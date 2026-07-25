@@ -1,0 +1,193 @@
+/* Design tokens aligned with grok-app (dark-first workbench shell). */
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --radius-window: 12px;
+  --radius-lg: 10px;
+  --radius-md: 8px;
+  --radius-sm: 6px;
+  --radius-full: 9999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+
+  --sidebar-width: 268px;
+  --aside-width: 300px;
+  --titlebar-height: 40px;
+  --input-min-height: 52px;
+  --control-height: 32px;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --leading-tight: 1.35;
+  --leading-normal: 1.55;
+
+  --motion-fast: 120ms;
+  --motion-normal: 200ms;
+
+  --bg-app: #0d0d0d;
+  --bg-sidebar: rgba(16, 16, 16, 0.4);
+  --bg-sidebar-solid: #101010;
+  --bg-main: #151515;
+  --bg-aside: #101010;
+  --bg-elevated: #1a1a1a;
+  --bg-hover: rgba(255, 255, 255, 0.05);
+  --bg-active: rgba(255, 255, 255, 0.08);
+  --bg-input: #121212;
+  --bg-user-bubble: #2a2a2e;
+
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.12);
+  --border-focus: rgba(140, 170, 255, 0.55);
+  /* alias used by older rules */
+  --border: var(--border-subtle);
+
+  --text-primary: rgba(255, 255, 255, 0.92);
+  --text-secondary: rgba(255, 255, 255, 0.58);
+  --text-tertiary: rgba(255, 255, 255, 0.38);
+  --text-muted: var(--text-tertiary);
+
+  --accent: #8aa4ff;
+  --accent-muted: rgba(138, 164, 255, 0.14);
+  --accent-hover: #a0b6ff;
+  --accent-soft: var(--accent-muted);
+
+  --success: #3ecf8e;
+  --warning: #f0993d;
+  --danger: #f07178;
+
+  --runtime-grok: #3ecf8e;
+  --runtime-codex: #a78bfa;
+  --runtime-claude: #f0993d;
+  --runtime-kimi: #6cb6ff;
+
+  --scrollbar-size: 8px;
+  --scrollbar-thumb: rgba(255, 255, 255, 0.3);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.45);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg-app: #f4f4f5;
+  --bg-sidebar: rgba(255, 255, 255, 0.72);
+  --bg-sidebar-solid: #efefef;
+  --bg-main: #ffffff;
+  --bg-aside: #f7f7f8;
+  --bg-elevated: #ffffff;
+  --bg-hover: rgba(0, 0, 0, 0.04);
+  --bg-active: rgba(0, 0, 0, 0.07);
+  --bg-input: #ffffff;
+  --bg-user-bubble: #e8e8ed;
+  --border-subtle: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.12);
+  --border-focus: rgba(79, 110, 247, 0.45);
+  --border: var(--border-subtle);
+  --text-primary: rgba(0, 0, 0, 0.9);
+  --text-secondary: rgba(0, 0, 0, 0.55);
+  --text-tertiary: rgba(0, 0, 0, 0.38);
+  --text-muted: var(--text-tertiary);
+  --accent: #4f6ef7;
+  --accent-muted: rgba(79, 110, 247, 0.12);
+  --accent-hover: #3d5ce5;
+  --accent-soft: var(--accent-muted);
+  --scrollbar-thumb: rgba(0, 0, 0, 0.22);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.35);
+}
+
+/* Light theme menu glass */
+[data-theme="light"] .rt-select__menu {
+  background: rgba(255, 255, 255, 0.96);
+  border-color: rgba(0, 0, 0, 0.1);
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.04) inset,
+    0 12px 40px rgba(0, 0, 0, 0.12);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Theme cross-fade (colors / surfaces) */
+html,
+body,
+#root,
+.app-shell,
+.workbench,
+.sidebar,
+.main,
+.aside,
+.composer,
+.composer__shell,
+.message,
+.probe-card,
+.rt-select__trigger,
+.rt-select__menu,
+.nav-new,
+.nav-item,
+.session-item,
+.chrome-btn,
+.btn,
+.chip,
+.main__top,
+.sidebar-chrome,
+.aside__chrome,
+.window-controls__btn {
+  transition:
+    background-color 220ms ease,
+    color 220ms ease,
+    border-color 220ms ease,
+    box-shadow 220ms ease,
+    fill 220ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html,
+  body,
+  #root,
+  .app-shell,
+  .workbench,
+  .sidebar,
+  .main,
+  .aside,
+  .composer,
+  .composer__shell,
+  .message,
+  .probe-card,
+  .rt-select__trigger,
+  .rt-select__menu,
+  .nav-new,
+  .nav-item,
+  .session-item,
+  .chrome-btn,
+  .btn,
+  .chip,
+  .main__top,
+  .sidebar-chrome,
+  .aside__chrome,
+  .window-controls__btn {
+    transition: none;
+  }
+}

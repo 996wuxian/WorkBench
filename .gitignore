@@ -1,0 +1,22 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+
+# Tauri / Rust
+src-tauri/target
+src-tauri/gen/schemas
+
+# Logs & env
+*.log
+.env
+.env.*
+
+# IDE
+.idea
+.vscode/*
+!.vscode/extensions.json
+
+# Test / coverage
+coverage

@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+@theme {
+  --color-app: var(--bg-app);
+  --color-sidebar: var(--bg-sidebar-solid);
+  --color-main: var(--bg-main);
+  --color-aside: var(--bg-aside);
+  --color-elevated: var(--bg-elevated);
+  --color-hover: var(--bg-hover);
+  --color-active: var(--bg-active);
+  --color-input: var(--bg-input);
+  --color-fg: var(--text-primary);
+  --color-fg-secondary: var(--text-secondary);
+  --color-fg-muted: var(--text-tertiary);
+  --color-border: var(--border-subtle);
+  --color-accent: var(--accent);
+}
