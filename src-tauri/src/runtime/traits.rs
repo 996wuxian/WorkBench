@@ -57,11 +57,60 @@ pub struct ProbeResult {
     pub detail: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    Ask,
+    Auto,
+    ReadOnly,
+    FullAccess,
+}
+
+impl PermissionMode {
+    pub fn default_for_runtime(runtime_id: RuntimeId) -> Self {
+        match runtime_id {
+            RuntimeId::Grok => Self::Auto,
+            RuntimeId::Codex => Self::Ask,
+            RuntimeId::Claude | RuntimeId::Kimi => Self::Ask,
+        }
+    }
+
+    pub fn codex_approval_policy(self) -> &'static str {
+        match self {
+            Self::Ask | Self::ReadOnly | Self::Auto => "on-request",
+            Self::FullAccess => "never",
+        }
+    }
+
+    pub fn codex_sandbox(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::FullAccess => "danger-full-access",
+            Self::Ask | Self::Auto => "workspace-write",
+        }
+    }
+
+    pub fn codex_approvals_reviewer(self) -> &'static str {
+        match self {
+            Self::Auto => "auto_review",
+            Self::Ask | Self::ReadOnly | Self::FullAccess => "user",
+        }
+    }
+
+    pub fn grok_auto_allow(self) -> bool {
+        matches!(self, Self::Auto)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConnectOpts {
     pub cwd: PathBuf,
     pub model_id: Option<String>,
+    pub model_reasoning_effort: Option<String>,
+    pub permission_mode: PermissionMode,
     pub cli_path: Option<PathBuf>,
+    pub native_session_id: Option<String>,
+    pub native_thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +143,15 @@ pub trait AgentRuntime: Send + Sync {
 #[async_trait]
 pub trait LiveSession: Send + Sync {
     fn backend(&self) -> &str;
+    fn native_session_id(&self) -> Option<String> {
+        None
+    }
+    fn native_thread_id(&self) -> Option<String> {
+        None
+    }
+    fn native_home(&self) -> Option<String> {
+        None
+    }
     async fn prompt(&self, input: PromptInput) -> Result<(), AgentError>;
     async fn cancel(&self) -> Result<(), AgentError>;
     async fn shutdown(&self) -> Result<(), AgentError>;

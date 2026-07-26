@@ -54,14 +54,66 @@ export interface ProbeResult {
   detail?: string | null;
 }
 
+export interface CodexRouteStatus {
+  routeKind: string;
+  ccSwitchDetected: boolean;
+  codexConfigPath?: string | null;
+  modelProvider?: string | null;
+  model?: string | null;
+  modelReasoningEffort?: string | null;
+  baseUrl?: string | null;
+  wireApi?: string | null;
+  ccSwitchDir?: string | null;
+  ccSwitchDbPath?: string | null;
+  ccSwitchLogPath?: string | null;
+  latestForwardUrl?: string | null;
+  latestForwardModel?: string | null;
+  latestError?: string | null;
+  note: string;
+}
+
+export type PermissionMode = "ask" | "auto" | "read_only" | "full_access";
+
+export interface ChoiceOption {
+  value: string;
+  label: string;
+  hint?: string | null;
+  suffix?: string | null;
+  disabled?: boolean;
+}
+
+export interface SessionSelectionCatalog {
+  runtimeId: RuntimeId;
+  modelOptions: ChoiceOption[];
+  permissionOptions: ChoiceOption[];
+}
+
 export interface SessionMeta {
   id: string;
   title: string;
+  summary?: string | null;
   runtimeId: RuntimeId;
   projectPath?: string | null;
   modelId?: string | null;
+  modelReasoningEffort?: string | null;
+  permissionMode?: PermissionMode | null;
+  nativeSessionId?: string | null;
+  nativeThreadId?: string | null;
+  nativeHome?: string | null;
+  resumeSupported?: boolean;
+  lastResumeError?: string | null;
+  nativeSource?: string | null;
+  nativeUpdatedAt?: string | null;
+  nativeHistoryImportedAt?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface NativeSessionSyncResult {
+  runtimeId: RuntimeId;
+  sessions: SessionMeta[];
+  nextCursor?: string | null;
+  hasMore: boolean;
 }
 
 export interface SessionSnapshot {
@@ -71,6 +123,8 @@ export interface SessionSnapshot {
   lastError?: AgentError | null;
   backend: string;
   modelId?: string | null;
+  modelReasoningEffort?: string | null;
+  permissionMode?: PermissionMode | null;
   projectPath?: string | null;
   title: string;
 }
@@ -80,8 +134,14 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system" | "thought" | "tool";
   content: string;
   runtimeId?: RuntimeId;
+  createdAt?: string;
+  toolName?: string | null;
+  toolTitle?: string | null;
+  toolStatus?: string | null;
   /** True while assistant stream is still open */
   streaming?: boolean;
+  /** True before first assistant content arrives */
+  pending?: boolean;
 }
 
 export const P0_RUNTIMES: RuntimeId[] = ["grok", "codex"];

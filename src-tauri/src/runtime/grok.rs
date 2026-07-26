@@ -71,12 +71,12 @@ impl AgentRuntime for GrokRuntime {
             cwd: opts.cwd.clone(),
             model_id: opts.model_id.clone(),
             home_env: Some("GROK_HOME".into()),
-            home_dir: Some(home),
+            home_dir: Some(home.clone()),
             // Flag order: top-level --no-auto-update, then agent, then opts, then stdio
             pre_stdio_args: vec!["--no-auto-update".into(), "agent".into()],
             client_name: "workbench".into(),
             runtime_id: RuntimeId::Grok,
-            auto_allow_permissions: true,
+            auto_allow_permissions: opts.permission_mode.grok_auto_allow(),
         };
 
         let (client, mut rx) = AcpClient::spawn(spawn_opts)?;
@@ -91,22 +91,40 @@ impl AgentRuntime for GrokRuntime {
             }
         });
 
-        client
-            .initialize_and_new_session("workbench", &opts.cwd)
-            .await?;
+        match opts.native_session_id.as_deref() {
+            Some(session_id) => {
+                client
+                    .initialize_and_load_session("workbench", &opts.cwd, session_id)
+                    .await?;
+            }
+            None => {
+                client
+                    .initialize_and_new_session("workbench", &opts.cwd)
+                    .await?;
+            }
+        }
 
-        Ok(Box::new(GrokLiveSession { client }))
+        Ok(Box::new(GrokLiveSession { client, home }))
     }
 }
 
 struct GrokLiveSession {
     client: Arc<AcpClient>,
+    home: PathBuf,
 }
 
 #[async_trait]
 impl LiveSession for GrokLiveSession {
     fn backend(&self) -> &str {
         self.client.backend()
+    }
+
+    fn native_session_id(&self) -> Option<String> {
+        self.client.agent_session_id()
+    }
+
+    fn native_home(&self) -> Option<String> {
+        Some(self.home.display().to_string())
     }
 
     async fn prompt(&self, input: PromptInput) -> Result<(), AgentError> {

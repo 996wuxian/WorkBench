@@ -5,9 +5,9 @@
 
 $ErrorActionPreference = "Stop"
 
-$env:RUSTUP_HOME = "D:\tools\rustup"
-$env:CARGO_HOME  = "D:\tools\cargo"
-$cargoBin = "D:\tools\cargo\bin"
+$env:RUSTUP_HOME = "D:\Rust\rustup"
+$env:CARGO_HOME  = "D:\Rust\cargo"
+$cargoBin = "D:\Rust\cargo\bin"
 if ($env:Path -notlike "*$cargoBin*") {
   $env:Path = "$cargoBin;$env:Path"
 }
@@ -23,6 +23,7 @@ $env:NO_PROXY = "*"
 $env:no_proxy = "*"
 
 $vcvarsCandidates = @(
+  "D:\Microsoft\VSBuildTools2022\VC\Auxiliary\Build\vcvarsall.bat",
   "X:\Visual-Studio\ide\VC\Auxiliary\Build\vcvarsall.bat",
   "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat",
   "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat",

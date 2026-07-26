@@ -128,12 +128,6 @@ impl SessionFsm {
         self.state = SessionState::Disconnected;
         self.last_error = err;
     }
-
-    pub fn mark_ready_from_idle_for_stub(&mut self) {
-        // Skeleton helper: allow demo transitions without full adapter.
-        self.state = SessionState::Ready;
-        self.last_error = None;
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +162,20 @@ mod tests {
         fsm.handshake_ok().unwrap();
         assert_eq!(fsm.state(), SessionState::Ready);
         fsm.begin_stream().unwrap();
+        fsm.end_stream().unwrap();
+        assert_eq!(fsm.state(), SessionState::Ready);
+    }
+
+    #[test]
+    fn permission_request_pauses_stream_until_prompt_finishes() {
+        let mut fsm = SessionFsm::new();
+        fsm.start_connect().unwrap();
+        fsm.handshake_ok().unwrap();
+        fsm.begin_stream().unwrap();
+
+        fsm.await_permission().unwrap();
+        assert_eq!(fsm.state(), SessionState::AwaitingPermission);
+
         fsm.end_stream().unwrap();
         assert_eq!(fsm.state(), SessionState::Ready);
     }

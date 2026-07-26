@@ -21,7 +21,9 @@ use crate::runtime::RuntimeId;
 
 const HANDSHAKE_TIMEOUT_SECS: u64 = 45;
 const AUTH_TIMEOUT_SECS: u64 = 12;
-const PROMPT_TIMEOUT_SECS: u64 = 600;
+const PROMPT_TIMEOUT_SECS: u64 = 60;
+const PROMPT_MAX_ATTEMPTS: usize = 3;
+const PROMPT_RETRY_BACKOFF_MS: u64 = 750;
 const PROMPT_COMPLETE_FALLBACK_MS: u64 = 3000;
 
 struct Pending {
@@ -55,6 +57,7 @@ pub struct AcpClient {
     runtime_id: RuntimeId,
     backend: String,
     stopped: AtomicBool,
+    prompt_has_assistant_output: AtomicBool,
     reader_alive: AtomicBool,
     stderr_tail: ParkingMutex<Vec<String>>,
     auto_allow_permissions: bool,
@@ -141,6 +144,7 @@ impl AcpClient {
             runtime_id: opts.runtime_id,
             backend: backend.clone(),
             stopped: AtomicBool::new(false),
+            prompt_has_assistant_output: AtomicBool::new(false),
             reader_alive: AtomicBool::new(true),
             stderr_tail: ParkingMutex::new(Vec::new()),
             auto_allow_permissions: opts.auto_allow_permissions,
@@ -318,6 +322,25 @@ impl AcpClient {
         client_name: &str,
         cwd: &std::path::Path,
     ) -> Result<String, AgentError> {
+        self.initialize_session(client_name, cwd, None).await
+    }
+
+    pub async fn initialize_and_load_session(
+        &self,
+        client_name: &str,
+        cwd: &std::path::Path,
+        session_id: &str,
+    ) -> Result<String, AgentError> {
+        self.initialize_session(client_name, cwd, Some(session_id))
+            .await
+    }
+
+    async fn initialize_session(
+        &self,
+        client_name: &str,
+        cwd: &std::path::Path,
+        session_id: Option<&str>,
+    ) -> Result<String, AgentError> {
         let init = self
             .request_timeout(
                 "initialize",
@@ -350,25 +373,36 @@ impl AcpClient {
         }
 
         let cwd_s = cwd.to_string_lossy().to_string();
-        let result = self
-            .request_timeout(
+        let (method, params) = match session_id {
+            Some(session_id) => (
+                "session/load",
+                json!({
+                    "sessionId": session_id,
+                    "cwd": cwd_s,
+                    "mcpServers": []
+                }),
+            ),
+            None => (
                 "session/new",
                 json!({
                     "cwd": cwd_s,
                     "mcpServers": []
                 }),
-                HANDSHAKE_TIMEOUT_SECS,
-            )
+            ),
+        };
+        let result = self
+            .request_timeout(method, params, HANDSHAKE_TIMEOUT_SECS)
             .await
-            .map_err(|e| self.map_handshake_err("session/new", e))?;
+            .map_err(|e| self.map_handshake_err(method, e))?;
 
         let sid = result
             .get("sessionId")
             .and_then(|v| v.as_str())
+            .or(session_id)
             .ok_or_else(|| {
                 AgentError::new(
                     AgentErrorCode::AgentCrashed,
-                    "session/new missing sessionId",
+                    format!("{method} missing sessionId"),
                 )
             })?
             .to_string();
@@ -420,31 +454,67 @@ impl AcpClient {
             .ok_or_else(|| AgentError::new(AgentErrorCode::AgentCrashed, "no session"))?;
 
         self.stopped.store(false, Ordering::SeqCst);
+        self.prompt_has_assistant_output
+            .store(false, Ordering::SeqCst);
         let params = json!({
             "sessionId": sid,
             "prompt": [{ "type": "text", "text": text }]
         });
 
-        let result = self
-            .request_timeout("session/prompt", params, PROMPT_TIMEOUT_SECS)
-            .await
-            .map_err(|e| classify_rpc_error(&e))?;
+        for attempt in 1..=PROMPT_MAX_ATTEMPTS {
+            self.stopped.store(false, Ordering::SeqCst);
+            match self
+                .request_timeout("session/prompt", params.clone(), PROMPT_TIMEOUT_SECS)
+                .await
+            {
+                Ok(result) => {
+                    let stop = result
+                        .get("stopReason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("end_turn")
+                        .to_string();
 
-        let stop = result
-            .get("stopReason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("end_turn")
-            .to_string();
+                    if !self.prompt_has_assistant_output.load(Ordering::SeqCst) {
+                        return Err(AgentError::new(
+                            AgentErrorCode::ProtocolMismatch,
+                            format!(
+                                "Grok 本轮已结束，但没有返回任何可显示内容（stopReason: {stop}）。请重试；如果持续出现，可能是 Grok CLI/ACP 没有发送 agent_message_chunk。"
+                            ),
+                        ));
+                    }
 
-        let _ = self.event_tx.send(HostEvent::Stream {
-            kind: StreamKind::Assistant,
-            text: String::new(),
-            done: true,
-        });
-        let _ = self
-            .event_tx
-            .send(HostEvent::PromptComplete { stop_reason: stop });
-        Ok(())
+                    let _ = self
+                        .event_tx
+                        .send(HostEvent::PromptComplete { stop_reason: stop });
+                    return Ok(());
+                }
+                Err(e) => {
+                    if e.to_lowercase().contains("timeout") {
+                        warn!(
+                            "acp session/prompt attempt {attempt}/{PROMPT_MAX_ATTEMPTS} timed out after {PROMPT_TIMEOUT_SECS}s: {e}"
+                        );
+                        if attempt < PROMPT_MAX_ATTEMPTS {
+                            let _ = self.cancel().await;
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                PROMPT_RETRY_BACKOFF_MS,
+                            ))
+                            .await;
+                            continue;
+                        }
+                        let msg = format!(
+                            "Grok 无响应，已超时 {PROMPT_TIMEOUT_SECS} 秒并重试 {PROMPT_MAX_ATTEMPTS} 次: {e}"
+                        );
+                        return Err(AgentError::new(AgentErrorCode::NetworkProvider, msg));
+                    }
+                    return Err(classify_rpc_error(&e));
+                }
+            }
+        }
+
+        Err(AgentError::new(
+            AgentErrorCode::AgentCrashed,
+            "prompt retry loop terminated unexpectedly",
+        ))
     }
 
     pub async fn cancel(&self) -> Result<(), AgentError> {
@@ -495,11 +565,6 @@ impl AcpClient {
                     warn!("acp late error id={id}: {full}");
                     let _ = self.event_tx.send(HostEvent::Error {
                         error: classify_rpc_error(&full),
-                    });
-                }
-                if let Some(sr) = msg.pointer("/result/stopReason").and_then(|v| v.as_str()) {
-                    let _ = self.event_tx.send(HostEvent::PromptComplete {
-                        stop_reason: sr.to_string(),
                     });
                 }
                 return;
@@ -597,9 +662,6 @@ impl AcpClient {
                         .and_then(|v| v.as_str())
                         .unwrap_or("end_turn")
                         .to_string();
-                    let _ = self.event_tx.send(HostEvent::PromptComplete {
-                        stop_reason: stop.clone(),
-                    });
                     let this = Arc::clone(&self);
                     tokio::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_millis(
@@ -654,6 +716,8 @@ impl AcpClient {
                     .unwrap_or("")
                     .to_string();
                 if !text.is_empty() {
+                    self.prompt_has_assistant_output
+                        .store(true, Ordering::SeqCst);
                     let _ = self.event_tx.send(HostEvent::Stream {
                         kind: StreamKind::Assistant,
                         text,

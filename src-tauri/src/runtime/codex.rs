@@ -1,13 +1,16 @@
 //! Codex adapter — `codex app-server --stdio` (Codex App Server JSON-RPC).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use parking_lot::Mutex as ParkingMutex;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -18,17 +21,68 @@ use crate::error::{AgentError, AgentErrorCode};
 use crate::host::events::{HostEvent, StreamKind};
 use crate::process_util;
 use crate::runtime::capabilities::RuntimeCapabilities;
+use crate::runtime::catalog::{ChoiceOption, SessionSelectionCatalog};
 use crate::runtime::traits::{
-    AgentRuntime, ConnectOpts, LiveSession, ProbeResult, PromptInput, RuntimeId,
+    AgentRuntime, ConnectOpts, LiveSession, PermissionMode, ProbeResult, PromptInput, RuntimeId,
 };
 
 const HANDSHAKE_TIMEOUT_SECS: u64 = 45;
 const REQUEST_TIMEOUT_SECS: u64 = 60;
-const PROMPT_TIMEOUT_SECS: u64 = 600;
+const INTERRUPT_TIMEOUT_SECS: u64 = 5;
+const PROMPT_TIMEOUT_SECS: u64 = 60;
+const PROMPT_MAX_ATTEMPTS: usize = 3;
+const PROMPT_RETRY_BACKOFF_MS: u64 = 1000;
+static RPC_TRACE_LOCK: OnceLock<ParkingMutex<()>> = OnceLock::new();
 
 struct Pending {
     method: String,
     tx: oneshot::Sender<Result<Value, String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelListResponse {
+    data: Vec<CodexModelCatalogEntry>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct CodexModelCatalogEntry {
+    id: String,
+    display_name: String,
+    description: String,
+    hidden: bool,
+    is_default: bool,
+    model: String,
+    default_reasoning_effort: String,
+    supported_reasoning_efforts: Vec<CodexReasoningEffortOption>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct CodexReasoningEffortOption {
+    description: String,
+    reasoning_effort: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct PermissionProfileListResponse {
+    data: Vec<PermissionProfileSummary>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct PermissionProfileSummary {
+    id: String,
+    allowed: bool,
+    description: Option<String>,
 }
 
 pub struct CodexRuntime;
@@ -78,47 +132,182 @@ impl AgentRuntime for CodexRuntime {
             )
         })?;
 
-        let (client, mut rx) =
-            CodexAppServerClient::spawn(cli, opts.cwd.clone(), opts.model_id.clone())?;
+        let client = spawn_initialized_client(
+            cli.clone(),
+            opts.cwd.clone(),
+            opts.model_id.clone(),
+            opts.model_reasoning_effort.clone(),
+            opts.permission_mode,
+            opts.native_thread_id
+                .clone()
+                .or_else(|| opts.native_session_id.clone()),
+            event_tx.clone(),
+        )
+        .await?;
+        let native_thread_id = client.thread_id();
+        let native_session_id = client.thread_session_id();
 
-        let bridge_tx = event_tx;
-        tokio::spawn(async move {
-            while let Some(ev) = rx.recv().await {
-                if bridge_tx.send(ev).is_err() {
-                    break;
-                }
-            }
-        });
-
-        client
-            .initialize_and_start_thread("workbench", &opts.cwd, opts.model_id.as_deref())
-            .await?;
-
-        Ok(Box::new(CodexLiveSession { client }))
+        Ok(Box::new(CodexLiveSession {
+            client: AsyncMutex::new(client),
+            cli_path: cli,
+            cwd: opts.cwd,
+            model_id: opts.model_id,
+            model_reasoning_effort: opts.model_reasoning_effort,
+            permission_mode: opts.permission_mode,
+            native_thread_id: ParkingMutex::new(native_thread_id),
+            native_session_id: ParkingMutex::new(native_session_id),
+            native_home: resolve_codex_home(),
+            event_tx,
+        }))
     }
 }
 
 struct CodexLiveSession {
-    client: Arc<CodexAppServerClient>,
+    client: AsyncMutex<Arc<CodexAppServerClient>>,
+    cli_path: PathBuf,
+    cwd: PathBuf,
+    model_id: Option<String>,
+    model_reasoning_effort: Option<String>,
+    permission_mode: PermissionMode,
+    native_thread_id: ParkingMutex<Option<String>>,
+    native_session_id: ParkingMutex<Option<String>>,
+    native_home: PathBuf,
+    event_tx: mpsc::UnboundedSender<HostEvent>,
 }
 
 #[async_trait]
 impl LiveSession for CodexLiveSession {
     fn backend(&self) -> &str {
-        self.client.backend()
+        "codex_app_server"
+    }
+
+    fn native_session_id(&self) -> Option<String> {
+        self.native_session_id.lock().clone()
+    }
+
+    fn native_thread_id(&self) -> Option<String> {
+        self.native_thread_id.lock().clone()
+    }
+
+    fn native_home(&self) -> Option<String> {
+        Some(self.native_home.display().to_string())
     }
 
     async fn prompt(&self, input: PromptInput) -> Result<(), AgentError> {
-        self.client.prompt(&input.text).await
+        let mut last_error: Option<AgentError> = None;
+        for attempt in 1..=PROMPT_MAX_ATTEMPTS {
+            let client = { self.client.lock().await.clone() };
+            match client.prompt_once(&input.text).await {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    let retryable = is_retryable_prompt_error(&err.message);
+                    tracing::warn!(
+                        "codex prompt attempt {attempt}/{PROMPT_MAX_ATTEMPTS} failed retryable={retryable}: {}",
+                        err.message
+                    );
+                    last_error = Some(err);
+                    if retryable && attempt < PROMPT_MAX_ATTEMPTS {
+                        let _ = client.shutdown().await;
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            PROMPT_RETRY_BACKOFF_MS,
+                        ))
+                        .await;
+                        let native_thread_id = { self.native_thread_id.lock().clone() };
+                        let new_client = spawn_initialized_client(
+                            self.cli_path.clone(),
+                            self.cwd.clone(),
+                            self.model_id.clone(),
+                            self.model_reasoning_effort.clone(),
+                            self.permission_mode,
+                            native_thread_id,
+                            self.event_tx.clone(),
+                        )
+                        .await?;
+                        *self.native_thread_id.lock() = new_client.thread_id();
+                        *self.native_session_id.lock() = new_client.thread_session_id();
+                        *self.client.lock().await = new_client;
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+
+        let err = last_error.unwrap_or_else(|| {
+            AgentError::new(
+                AgentErrorCode::AgentCrashed,
+                "Codex prompt retry loop terminated unexpectedly",
+            )
+        });
+        if is_retryable_prompt_error(&err.message) {
+            return Err(AgentError::new(
+                AgentErrorCode::NetworkProvider,
+                format!(
+                    "Codex 无响应或上游不可用，已超时 {PROMPT_TIMEOUT_SECS} 秒并重试 {PROMPT_MAX_ATTEMPTS} 次: {}",
+                    err.message
+                ),
+            ));
+        }
+        Err(err)
     }
 
     async fn cancel(&self) -> Result<(), AgentError> {
-        self.client.cancel().await
+        let client = { self.client.lock().await.clone() };
+        client.cancel().await
     }
 
     async fn shutdown(&self) -> Result<(), AgentError> {
-        self.client.shutdown().await
+        let client = { self.client.lock().await.clone() };
+        client.shutdown().await
     }
+}
+
+async fn spawn_initialized_client(
+    cli: PathBuf,
+    cwd: PathBuf,
+    model_id: Option<String>,
+    model_reasoning_effort: Option<String>,
+    permission_mode: PermissionMode,
+    native_thread_id: Option<String>,
+    event_tx: mpsc::UnboundedSender<HostEvent>,
+) -> Result<Arc<CodexAppServerClient>, AgentError> {
+    let (client, rx) = CodexAppServerClient::spawn(
+        cli,
+        cwd.clone(),
+        model_id.clone(),
+        model_reasoning_effort.clone(),
+        permission_mode,
+    )?;
+    bridge_client_events(rx, event_tx);
+
+    if let Err(err) = client
+        .initialize_thread(
+            "workbench",
+            &cwd,
+            model_id.as_deref(),
+            model_reasoning_effort.as_deref(),
+            permission_mode,
+            native_thread_id.as_deref(),
+        )
+        .await
+    {
+        let _ = client.shutdown().await;
+        return Err(err);
+    }
+    Ok(client)
+}
+
+fn bridge_client_events(
+    mut rx: mpsc::UnboundedReceiver<HostEvent>,
+    event_tx: mpsc::UnboundedSender<HostEvent>,
+) {
+    tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            if event_tx.send(ev).is_err() {
+                break;
+            }
+        }
+    });
 }
 
 struct CodexAppServerClient {
@@ -130,10 +319,14 @@ struct CodexAppServerClient {
     backend: String,
     cwd: PathBuf,
     model_id: Option<String>,
+    model_reasoning_effort: Option<String>,
+    permission_mode: PermissionMode,
     thread_id: ParkingMutex<Option<String>>,
+    thread_session_id: ParkingMutex<Option<String>>,
     current_turn_id: ParkingMutex<Option<String>>,
     turn_waiters: ParkingMutex<HashMap<String, oneshot::Sender<Result<String, String>>>>,
     completed_turns: ParkingMutex<HashMap<String, Result<String, String>>>,
+    emitted_agent_message_items: ParkingMutex<HashSet<String>>,
     stopped: AtomicBool,
     reader_alive: AtomicBool,
     stderr_tail: ParkingMutex<Vec<String>>,
@@ -144,6 +337,8 @@ impl CodexAppServerClient {
         cli_path: PathBuf,
         cwd: PathBuf,
         model_id: Option<String>,
+        model_reasoning_effort: Option<String>,
+        permission_mode: PermissionMode,
     ) -> Result<(Arc<Self>, mpsc::UnboundedReceiver<HostEvent>), AgentError> {
         if !cli_path.exists() {
             return Err(AgentError::new(
@@ -170,6 +365,9 @@ impl CodexAppServerClient {
         if let Some(path) = process_util::enriched_path_env() {
             cmd.env("PATH", path);
         }
+        process_util::clear_proxy_env_tokio(&mut cmd);
+        cmd.env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost");
 
         let mut child = cmd.spawn().map_err(|e| {
             AgentError::new(
@@ -200,10 +398,14 @@ impl CodexAppServerClient {
             backend: "codex_app_server".into(),
             cwd,
             model_id,
+            model_reasoning_effort,
+            permission_mode,
             thread_id: ParkingMutex::new(None),
+            thread_session_id: ParkingMutex::new(None),
             current_turn_id: ParkingMutex::new(None),
             turn_waiters: ParkingMutex::new(HashMap::new()),
             completed_turns: ParkingMutex::new(HashMap::new()),
+            emitted_agent_message_items: ParkingMutex::new(HashSet::new()),
             stopped: AtomicBool::new(false),
             reader_alive: AtomicBool::new(true),
             stderr_tail: ParkingMutex::new(Vec::new()),
@@ -268,8 +470,12 @@ impl CodexAppServerClient {
         Ok((client, event_rx))
     }
 
-    fn backend(&self) -> &str {
-        &self.backend
+    fn thread_id(&self) -> Option<String> {
+        self.thread_id.lock().clone()
+    }
+
+    fn thread_session_id(&self) -> Option<String> {
+        self.thread_session_id.lock().clone()
     }
 
     fn push_stderr(&self, line: &str) {
@@ -312,6 +518,7 @@ impl CodexAppServerClient {
     }
 
     async fn write_line(&self, value: &Value) -> Result<(), String> {
+        trace_rpc_frame("out", value);
         let mut line = serde_json::to_string(value).map_err(|e| e.to_string())?;
         line.push('\n');
         let mut guard = self.stdin.lock().await;
@@ -386,39 +593,79 @@ impl CodexAppServerClient {
         }
     }
 
-    async fn initialize_and_start_thread(
-        &self,
-        client_name: &str,
-        cwd: &Path,
-        model_id: Option<&str>,
-    ) -> Result<String, AgentError> {
+    async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), String> {
+        let msg = match params {
+            Some(params) => json!({ "method": method, "params": params }),
+            None => json!({ "method": method }),
+        };
+        self.write_line(&msg).await
+    }
+
+    async fn initialize_transport(&self, client_name: &str) -> Result<(), AgentError> {
         self.request_timeout(
             "initialize",
             json!({
                 "clientInfo": { "name": client_name, "version": env!("CARGO_PKG_VERSION") },
-                "capabilities": null
+                "capabilities": {
+                    "experimentalApi": true,
+                    "requestAttestation": false,
+                    "optOutNotificationMethods": [
+                        "command/exec/outputDelta",
+                        "item/agentMessage/delta",
+                        "item/plan/delta",
+                        "item/fileChange/outputDelta",
+                        "item/reasoning/summaryTextDelta",
+                        "item/reasoning/textDelta"
+                    ]
+                }
             }),
             HANDSHAKE_TIMEOUT_SECS,
         )
         .await
         .map_err(|e| self.map_handshake_err("initialize", e))?;
 
+        self.notify("initialized", None)
+            .await
+            .map_err(|e| self.map_handshake_err("initialized", e))?;
+        Ok(())
+    }
+
+    async fn initialize_thread(
+        &self,
+        client_name: &str,
+        cwd: &Path,
+        model_id: Option<&str>,
+        model_reasoning_effort: Option<&str>,
+        permission_mode: PermissionMode,
+        native_thread_id: Option<&str>,
+    ) -> Result<String, AgentError> {
+        self.initialize_transport(client_name).await?;
+
         let mut params = json!({
             "cwd": cwd.to_string_lossy().to_string(),
-            "runtimeWorkspaceRoots": [cwd.to_string_lossy().to_string()],
-            "approvalPolicy": "on-request",
-            "approvalsReviewer": "user",
-            "sandbox": "workspace-write",
-            "ephemeral": true
+            "approvalPolicy": permission_mode.codex_approval_policy(),
+            "approvalsReviewer": permission_mode.codex_approvals_reviewer(),
+            "sandbox": permission_mode.codex_sandbox()
         });
+        let method = if let Some(thread_id) = native_thread_id {
+            params["threadId"] = json!(thread_id);
+            "thread/resume"
+        } else {
+            params["runtimeWorkspaceRoots"] = json!([cwd.to_string_lossy().to_string()]);
+            params["ephemeral"] = json!(false);
+            "thread/start"
+        };
         if let Some(model) = normalize_model(model_id) {
             params["model"] = json!(model);
         }
+        if let Some(reasoning_effort) = normalize_reasoning_effort(model_reasoning_effort) {
+            params["modelReasoningEffort"] = json!(reasoning_effort);
+        }
 
         let result = self
-            .request_timeout("thread/start", params, HANDSHAKE_TIMEOUT_SECS)
+            .request_timeout(method, params, HANDSHAKE_TIMEOUT_SECS)
             .await
-            .map_err(|e| self.map_handshake_err("thread/start", e))?;
+            .map_err(|e| self.map_handshake_err(method, e))?;
 
         let thread_id = result
             .pointer("/thread/id")
@@ -426,19 +673,30 @@ impl CodexAppServerClient {
             .ok_or_else(|| {
                 AgentError::new(
                     AgentErrorCode::ProtocolMismatch,
-                    "thread/start response missing thread.id",
+                    format!("{method} response missing thread.id"),
                 )
             })?
             .to_string();
+        let session_id = result
+            .pointer("/thread/sessionId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let model = result
             .get("model")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         *self.thread_id.lock() = Some(thread_id.clone());
+        *self.thread_session_id.lock() = session_id.clone();
         if let Some(m) = model {
-            tracing::info!("codex thread ready model={m} threadId={thread_id}");
+            tracing::info!(
+                "codex thread ready model={m} method={method} threadId={thread_id} sessionId={:?}",
+                session_id
+            );
         } else {
-            tracing::info!("codex thread ready threadId={thread_id}");
+            tracing::info!(
+                "codex thread ready method={method} threadId={thread_id} sessionId={:?}",
+                session_id
+            );
         }
 
         let _ = self.event_tx.send(HostEvent::State {
@@ -449,12 +707,116 @@ impl CodexAppServerClient {
         Ok(thread_id)
     }
 
+    async fn fetch_model_catalog(&self) -> Result<Vec<ChoiceOption>, String> {
+        let mut cursor: Option<String> = None;
+        let mut out = Vec::new();
+
+        loop {
+            let mut params = json!({
+                "limit": 100_u32,
+                "includeHidden": false,
+            });
+            if let Some(ref c) = cursor {
+                params["cursor"] = json!(c);
+            }
+
+            let result = self
+                .request_timeout("model/list", params, HANDSHAKE_TIMEOUT_SECS)
+                .await?;
+            let response: ModelListResponse =
+                serde_json::from_value(result).map_err(|e| e.to_string())?;
+
+            for model in response.data {
+                if model.hidden || is_hidden_codex_model(&model.model) {
+                    continue;
+                }
+                let model_id = normalize_codex_model_id(&model.model);
+                if model_id.is_empty() {
+                    continue;
+                }
+                let mut label = model.display_name;
+                if label.trim().is_empty() {
+                    label = model_id.clone();
+                }
+                let hint = if model.description.trim().is_empty() {
+                    Some(model_id.clone())
+                } else if model.description == model_id {
+                    None
+                } else {
+                    Some(model.description)
+                };
+                out.push(ChoiceOption {
+                    value: model_id,
+                    label,
+                    hint,
+                    suffix: None,
+                    disabled: false,
+                });
+            }
+
+            cursor = response.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        out.sort_by(|a, b| codex_model_sort_key(a).cmp(&codex_model_sort_key(b)));
+        out.dedup_by(|a, b| a.value == b.value);
+        Ok(out)
+    }
+
+    #[allow(dead_code)]
+    async fn fetch_permission_profiles(&self, cwd: &Path) -> Result<Vec<ChoiceOption>, String> {
+        let mut cursor: Option<String> = None;
+        let mut out = Vec::new();
+
+        loop {
+            let mut params = json!({
+                "cwd": cwd.to_string_lossy().to_string(),
+                "limit": 100_u32,
+            });
+            if let Some(ref c) = cursor {
+                params["cursor"] = json!(c);
+            }
+
+            let result = self
+                .request_timeout("permissionProfile/list", params, HANDSHAKE_TIMEOUT_SECS)
+                .await?;
+            let response: PermissionProfileListResponse =
+                serde_json::from_value(result).map_err(|e| e.to_string())?;
+
+            for profile in response.data {
+                let label = profile.id.clone();
+                let hint = profile
+                    .description
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| Some(profile.id.clone()));
+                out.push(ChoiceOption {
+                    value: profile.id,
+                    label,
+                    hint,
+                    suffix: None,
+                    disabled: !profile.allowed,
+                });
+            }
+
+            cursor = response.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        out.sort_by(|a, b| a.label.cmp(&b.label).then(a.value.cmp(&b.value)));
+        out.dedup_by(|a, b| a.value == b.value);
+        Ok(out)
+    }
+
     fn map_handshake_err(&self, phase: &str, e: String) -> AgentError {
         let detail = self.format_exit_detail(&format!("{phase}: {e}"));
         classify_codex_error(&detail)
     }
 
-    async fn prompt(&self, text: &str) -> Result<(), AgentError> {
+    async fn prompt_once(&self, text: &str) -> Result<(), AgentError> {
         let thread_id = self
             .thread_id
             .lock()
@@ -462,6 +824,7 @@ impl CodexAppServerClient {
             .ok_or_else(|| AgentError::new(AgentErrorCode::AgentCrashed, "no Codex thread"))?;
 
         self.stopped.store(false, Ordering::SeqCst);
+        self.emitted_agent_message_items.lock().clear();
         let mut params = json!({
             "threadId": thread_id,
             "input": [
@@ -469,11 +832,17 @@ impl CodexAppServerClient {
             ],
             "cwd": self.cwd.to_string_lossy().to_string(),
             "runtimeWorkspaceRoots": [self.cwd.to_string_lossy().to_string()],
-            "approvalPolicy": "on-request",
-            "approvalsReviewer": "user",
+            "approvalPolicy": self.permission_mode.codex_approval_policy(),
+            "approvalsReviewer": self.permission_mode.codex_approvals_reviewer(),
+            "sandbox": self.permission_mode.codex_sandbox(),
         });
         if let Some(model) = normalize_model(self.model_id.as_deref()) {
             params["model"] = json!(model);
+        }
+        if let Some(reasoning_effort) =
+            normalize_reasoning_effort(self.model_reasoning_effort.as_deref())
+        {
+            params["modelReasoningEffort"] = json!(reasoning_effort);
         }
 
         let result = self
@@ -508,6 +877,14 @@ impl CodexAppServerClient {
                 Ok(Ok(done)) => done,
                 Ok(Err(_)) => Err("turn waiter closed".to_string()),
                 Err(_) => {
+                    self.stopped.store(true, Ordering::SeqCst);
+                    let _ = self
+                        .request_timeout(
+                            "turn/interrupt",
+                            json!({ "threadId": thread_id, "turnId": turn_id }),
+                            INTERRUPT_TIMEOUT_SECS,
+                        )
+                        .await;
                     self.turn_waiters.lock().remove(&turn_id);
                     Err(format!(
                         "turn timeout after {PROMPT_TIMEOUT_SECS}s (turnId={turn_id})"
@@ -546,7 +923,7 @@ impl CodexAppServerClient {
         self.request_timeout(
             "turn/interrupt",
             json!({ "threadId": thread_id, "turnId": turn_id }),
-            REQUEST_TIMEOUT_SECS,
+            INTERRUPT_TIMEOUT_SECS,
         )
         .await
         .map_err(|e| classify_codex_error(&e))?;
@@ -573,6 +950,7 @@ impl CodexAppServerClient {
                 return;
             }
         };
+        trace_rpc_frame("in", &msg);
 
         if let Some(id) = json_id_u64(msg.get("id")) {
             if msg.get("result").is_some() || msg.get("error").is_some() {
@@ -681,6 +1059,11 @@ impl CodexAppServerClient {
                     .unwrap_or("")
                     .to_string();
                 if !text.is_empty() {
+                    if let Some(item_id) = params.get("itemId").and_then(|v| v.as_str()) {
+                        self.emitted_agent_message_items
+                            .lock()
+                            .insert(item_id.to_string());
+                    }
                     let _ = self.event_tx.send(HostEvent::Stream {
                         kind: StreamKind::Assistant,
                         text,
@@ -706,7 +1089,10 @@ impl CodexAppServerClient {
                 }
             }
             "item/started" => self.emit_tool_item(params, "running"),
-            "item/completed" => self.emit_tool_item(params, "completed"),
+            "item/completed" => {
+                self.emit_completed_agent_message_fallback(params);
+                self.emit_tool_item(params, "completed");
+            }
             "turn/completed" => self.complete_turn(params),
             "error" => {
                 let message = params
@@ -714,11 +1100,16 @@ impl CodexAppServerClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("Codex error")
                     .to_string();
-                let err = classify_codex_error(&message);
-                let _ = self.event_tx.send(HostEvent::Error { error: err });
+                if is_transient_reconnect_message(&message) {
+                    tracing::warn!("codex transient reconnect: {message}");
+                    return;
+                }
                 if let Some(turn_id) = params.get("turnId").and_then(|v| v.as_str()) {
                     self.complete_turn_id(turn_id, Err(message));
+                    return;
                 }
+                let err = classify_codex_error(&message);
+                let _ = self.event_tx.send(HostEvent::Error { error: err });
             }
             "thread/status/changed"
             | "thread/started"
@@ -780,6 +1171,39 @@ impl CodexAppServerClient {
         });
     }
 
+    fn emit_completed_agent_message_fallback(&self, params: &Value) {
+        if self.stopped.load(Ordering::SeqCst) {
+            return;
+        }
+
+        let item = params.get("item").unwrap_or(params);
+        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if item_type != "agentMessage" {
+            return;
+        }
+
+        let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if !item_id.is_empty() && self.emitted_agent_message_items.lock().contains(item_id) {
+            return;
+        }
+
+        let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        if text.is_empty() {
+            return;
+        }
+
+        if !item_id.is_empty() {
+            self.emitted_agent_message_items
+                .lock()
+                .insert(item_id.to_string());
+        }
+        let _ = self.event_tx.send(HostEvent::Stream {
+            kind: StreamKind::Assistant,
+            text: text.to_string(),
+            done: false,
+        });
+    }
+
     fn complete_turn(&self, params: &Value) {
         let turn = params.get("turn").unwrap_or(params);
         let turn_id = turn
@@ -837,6 +1261,16 @@ fn resolve_codex_path() -> Option<PathBuf> {
     None
 }
 
+fn resolve_codex_home() -> PathBuf {
+    if let Ok(h) = std::env::var("CODEX_HOME") {
+        let p = PathBuf::from(h);
+        if !p.as_os_str().is_empty() {
+            return p;
+        }
+    }
+    process_util::user_home().join(".codex")
+}
+
 fn expand_env(s: &str) -> String {
     let mut out = s.to_string();
     if let Ok(v) = std::env::var("USERPROFILE") {
@@ -849,6 +1283,230 @@ fn expand_env(s: &str) -> String {
         out = out.replace("%USERPROFILE%", &v);
     }
     out
+}
+
+pub async fn read_selection_catalog(
+    cwd: PathBuf,
+    current_model: Option<String>,
+) -> Result<SessionSelectionCatalog, String> {
+    let cli = resolve_codex_path().ok_or_else(|| "Codex CLI not found".to_string())?;
+    let (client, mut rx) = CodexAppServerClient::spawn(
+        cli,
+        cwd.clone(),
+        None,
+        None,
+        PermissionMode::default_for_runtime(RuntimeId::Codex),
+    )
+    .map_err(|e| format!("{e:?}"))?;
+
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let result: Result<SessionSelectionCatalog, String> = async {
+        client
+            .initialize_transport("workbench")
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let model_options = match client.fetch_model_catalog().await {
+            Ok(models) if !models.is_empty() => models,
+            Ok(_) | Err(_) => fallback_codex_models(current_model.clone()),
+        };
+        let permission_options = fallback_codex_permissions();
+
+        Ok::<SessionSelectionCatalog, String>(SessionSelectionCatalog {
+            runtime_id: RuntimeId::Codex,
+            model_options: ensure_current_model(model_options, current_model),
+            permission_options,
+        })
+    }
+    .await;
+
+    let _ = client.shutdown().await;
+    let _ = drain.await;
+    result
+}
+
+fn fallback_codex_models(current_model: Option<String>) -> Vec<ChoiceOption> {
+    let status = crate::route_diagnostics::codex_route_status();
+    let mut values = Vec::new();
+    if let Some(model) = current_model {
+        let model = normalize_codex_model_id(&model);
+        if model.is_empty() {
+            return fallback_codex_models(None);
+        }
+        values.push(ChoiceOption {
+            value: model.clone(),
+            label: model,
+            hint: Some("当前会话".into()),
+            suffix: None,
+            disabled: false,
+        });
+    }
+    for candidate in [
+        status.model,
+        status.latest_forward_model,
+        Some("gpt-5.5".into()),
+        Some("gpt-5.4".into()),
+        Some("default".into()),
+    ] {
+        if let Some(model) = candidate {
+            let model = normalize_codex_model_id(&model);
+            if model.is_empty() {
+                continue;
+            }
+            if !values.iter().any(|opt| opt.value == model) {
+                values.push(ChoiceOption {
+                    value: model.clone(),
+                    label: model.clone(),
+                    hint: Some("fallback".into()),
+                    suffix: None,
+                    disabled: false,
+                });
+            }
+        }
+    }
+    if values.is_empty() {
+        values.push(ChoiceOption::new("default", "default"));
+    }
+    values
+}
+
+fn fallback_codex_permissions() -> Vec<ChoiceOption> {
+    vec![
+        ChoiceOption {
+            value: "ask".into(),
+            label: "Ask".into(),
+            hint: Some(
+                "approvalPolicy=on-request; sandbox=workspace-write; approvalsReviewer=user".into(),
+            ),
+            suffix: None,
+            disabled: false,
+        },
+        ChoiceOption {
+            value: "read_only".into(),
+            label: "Read Only".into(),
+            hint: Some(
+                "approvalPolicy=on-request; sandbox=read-only; approvalsReviewer=user".into(),
+            ),
+            suffix: None,
+            disabled: false,
+        },
+        ChoiceOption {
+            value: "auto".into(),
+            label: "Approve for me".into(),
+            hint: Some(
+                "approvalPolicy=on-request; sandbox=workspace-write; approvalsReviewer=auto_review"
+                    .into(),
+            ),
+            suffix: None,
+            disabled: false,
+        },
+        ChoiceOption {
+            value: "full_access".into(),
+            label: "Full Access".into(),
+            hint: Some("approvalPolicy=never; sandbox=danger-full-access".into()),
+            suffix: None,
+            disabled: false,
+        },
+    ]
+}
+
+fn ensure_current_model(
+    mut options: Vec<ChoiceOption>,
+    current_model: Option<String>,
+) -> Vec<ChoiceOption> {
+    let Some(model) = current_model else {
+        return options;
+    };
+    let model = normalize_codex_model_id(&model);
+    if model.is_empty() || options.iter().any(|opt| opt.value == model) {
+        return options;
+    }
+    options.insert(0, {
+        ChoiceOption {
+            value: model.clone(),
+            label: model,
+            hint: Some("当前会话".into()),
+            suffix: None,
+            disabled: false,
+        }
+    });
+    options
+}
+
+fn is_hidden_codex_model(model: &str) -> bool {
+    model.trim().eq_ignore_ascii_case("gpt-5")
+}
+
+fn normalize_codex_model_id(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() || is_hidden_codex_model(trimmed) {
+        return String::new();
+    }
+
+    let parts: Vec<&str> = trimmed.split('-').collect();
+    if parts.len() == 3 && parts[0].eq_ignore_ascii_case("gpt") {
+        let suffix = parts[2].to_ascii_lowercase();
+        if matches!(suffix.as_str(), "low" | "medium" | "high") {
+            return format!("{}-{}", parts[0], parts[1]);
+        }
+    }
+
+    trimmed.chars().take(120).collect()
+}
+
+fn normalize_reasoning_effort(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "low" | "medium" | "high" => Some(trimmed.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+fn codex_model_sort_key(option: &ChoiceOption) -> (String, i32, String) {
+    (
+        codex_model_family_key(&option.value),
+        codex_model_variant_rank(&option.value),
+        option.value.to_ascii_lowercase(),
+    )
+}
+
+fn codex_model_family_key(model: &str) -> String {
+    let model = model.trim();
+    let mut parts = model.splitn(3, '-');
+    if parts.next() != Some("gpt") {
+        return model.to_ascii_lowercase();
+    }
+
+    let Some(version) = parts.next() else {
+        return model.to_ascii_lowercase();
+    };
+
+    format!("gpt-{version}").to_ascii_lowercase()
+}
+
+fn codex_model_variant_rank(model: &str) -> i32 {
+    let model = model.trim();
+    let mut parts = model.splitn(3, '-');
+    if parts.next() != Some("gpt") {
+        return 0;
+    }
+    let _version = parts.next();
+    let Some(rest) = parts.next() else {
+        return 0;
+    };
+    match rest.rsplit('-').next().unwrap_or(rest) {
+        "low" => 1,
+        "medium" => 2,
+        "high" => 3,
+        "xhigh" => 4,
+        "mini" => 5,
+        "nano" => 6,
+        "minimal" => 7,
+        _ => 50,
+    }
 }
 
 async fn read_version(path: &PathBuf) -> Option<String> {
@@ -911,27 +1569,110 @@ fn format_jsonrpc_error(err: &Value) -> String {
     }
 }
 
+fn trace_rpc_frame(direction: &str, frame: &Value) {
+    if std::env::var("WORKBENCH_CODEX_RPC_TRACE").ok().as_deref() != Some("1") {
+        return;
+    }
+
+    let path = crate::paths::logs_dir().join("codex-rpc-trace.jsonl");
+    let _ = std::fs::create_dir_all(crate::paths::logs_dir());
+    let line = json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "direction": direction,
+        "frame": redact_rpc_value(frame),
+    });
+
+    let _guard = RPC_TRACE_LOCK.get_or_init(|| ParkingMutex::new(())).lock();
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{}", line);
+    }
+}
+
+fn redact_rpc_value(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let redacted = map.iter().map(|(key, value)| {
+                let lower = key.to_ascii_lowercase();
+                let value = if lower.contains("authorization")
+                    || lower.contains("api_key")
+                    || lower.contains("apikey")
+                    || lower.contains("token")
+                    || lower.contains("secret")
+                    || lower.contains("cookie")
+                    || lower.contains("password")
+                {
+                    Value::String("[REDACTED]".into())
+                } else {
+                    redact_rpc_value(value)
+                };
+                (key.clone(), value)
+            });
+            Value::Object(redacted.collect())
+        }
+        Value::Array(items) => Value::Array(items.iter().map(redact_rpc_value).collect()),
+        other => other.clone(),
+    }
+}
+
+fn is_transient_reconnect_message(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.starts_with("reconnecting") || lower.contains("reconnecting...")
+}
+
+fn is_retryable_prompt_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("timeout")
+        || lower.contains("network")
+        || lower.contains("dns")
+        || lower.contains("connection")
+        || lower.contains("reconnecting")
+        || lower.contains("bad gateway")
+        || lower.contains("upstream")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("504")
+        || lower.contains("/v1/responses")
+        || message.contains("上游")
+        || message.contains("超时")
+        || message.contains("熔断")
+}
+
 fn classify_codex_error(e: &str) -> AgentError {
     let lower = e.to_lowercase();
+    let message = enrich_codex_error_message(e);
     if lower.contains("401")
         || lower.contains("unauthorized")
         || lower.contains("auth")
         || lower.contains("login")
     {
-        AgentError::new(AgentErrorCode::AuthFailed, e)
+        AgentError::new(AgentErrorCode::AuthFailed, message)
     } else if lower.contains("timeout")
         || lower.contains("network")
         || lower.contains("dns")
         || lower.contains("connection")
+        || lower.contains("reconnecting")
+        || lower.contains("bad gateway")
+        || lower.contains("upstream")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("504")
+        || lower.contains("/v1/responses")
     {
-        AgentError::new(AgentErrorCode::NetworkProvider, e)
+        AgentError::new(AgentErrorCode::NetworkProvider, message)
     } else if lower.contains("quota")
         || lower.contains("rate")
         || lower.contains("usage limit")
         || lower.contains("budget")
     {
-        AgentError::new(AgentErrorCode::QuotaExceeded, e)
+        AgentError::new(AgentErrorCode::QuotaExceeded, message)
     } else {
-        AgentError::new(AgentErrorCode::AgentCrashed, e)
+        AgentError::new(AgentErrorCode::AgentCrashed, message)
     }
+}
+
+fn enrich_codex_error_message(e: &str) -> String {
+    let Some(context) = crate::route_diagnostics::codex_config_context() else {
+        return e.to_string();
+    };
+    format!("{e}; Codex config: {context}")
 }

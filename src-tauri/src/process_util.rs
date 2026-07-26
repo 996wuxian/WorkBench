@@ -27,6 +27,21 @@ pub fn apply_no_window_tokio(cmd: &mut tokio::process::Command) {
     let _ = cmd;
 }
 
+pub fn clear_proxy_env_tokio(cmd: &mut tokio::process::Command) {
+    for key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ] {
+        cmd.env_remove(key);
+    }
+}
+
 /// PATH for GUI-spawned agents (node/git/npx often missing otherwise).
 pub fn enriched_path_env() -> Option<String> {
     #[cfg(target_os = "windows")]

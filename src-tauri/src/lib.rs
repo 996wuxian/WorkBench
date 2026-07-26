@@ -5,10 +5,13 @@
 
 mod commands;
 mod error;
+mod native_sessions;
 mod paths;
 mod process_util;
+mod route_diagnostics;
 mod session_fsm;
 mod session_manager;
+mod session_store;
 
 pub mod host;
 pub mod runtime;
@@ -47,9 +50,15 @@ pub fn run() {
             commands::list_runtimes,
             commands::probe_all,
             commands::probe_runtime,
+            commands::codex_route_status,
+            commands::open_cc_switch,
             commands::session_list,
             commands::session_create,
             commands::session_get_state,
+            commands::session_control_options,
+            commands::session_update_settings,
+            commands::session_get_messages,
+            commands::session_sync_native,
             commands::session_connect,
             commands::session_send,
             commands::session_stop,
