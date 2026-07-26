@@ -6,6 +6,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   WindowControls,
@@ -16,14 +18,18 @@ import { ChoiceSelect } from "./components/ChoiceSelect";
 import {
   IconChat,
   IconDoctor,
+  IconCopy,
+  IconFolder,
   IconNewChat,
   IconPanel,
   IconPanelRight,
+  IconQuote,
   IconRefresh,
   IconSearch,
   IconSend,
   IconSettings,
   IconStop,
+  IconClose,
   IconThemeMoon,
   IconThemeSun,
 } from "./components/icons";
@@ -36,6 +42,7 @@ import type {
   ProbeResult,
   RuntimeId,
   SessionMeta,
+  SessionDeleteResult,
   SessionSelectionCatalog,
   SessionSnapshot,
   SessionState,
@@ -58,6 +65,16 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function formatElapsedSeconds(ms: number): string {
+  const seconds = Math.max(0, ms) / 1000;
+  if (seconds >= 60) {
+    const minutes = Math.floor(seconds / 60);
+    const remain = seconds - minutes * 60;
+    return `${minutes}m ${remain.toFixed(remain >= 10 ? 1 : 2)}s`;
+  }
+  return `${seconds.toFixed(seconds >= 10 ? 1 : 2)}s`;
+}
+
 const runtimeAvatarSrc: Partial<Record<RuntimeId, string>> = {
   grok: "/runtime-icons/grok.webp",
   codex: "/runtime-icons/codex.png",
@@ -70,6 +87,70 @@ const HISTORY_BATCH_SIZE = 40;
 const CHAT_BOTTOM_THRESHOLD = 80;
 const CHAT_TOP_THRESHOLD = 48;
 const RUNTIME_PICK_STORAGE_KEY = "workbench.runtimePick";
+
+async function deleteSessionById(sessionId: string): Promise<SessionDeleteResult> {
+  return invoke<SessionDeleteResult>("session_delete", { sessionId });
+}
+
+type QuoteTarget = {
+  messageId: string;
+  role: ChatMessage["role"];
+  runtimeId: RuntimeId | null;
+  label: string;
+  content: string;
+};
+
+function messageRoleLabel(message: ChatMessage, runtimeLabel: string): string {
+  switch (message.role) {
+    case "user":
+      return "我";
+    case "assistant":
+      return runtimeLabel;
+    case "thought":
+      return "思考";
+    case "tool":
+      return "工具";
+    default:
+      return "系统";
+  }
+}
+
+function quoteText(message: QuoteTarget): string {
+  const body = message.content.trim();
+  if (!body) return "";
+  const quoted = body.replace(/\n/g, "\n> ");
+  return `> ${message.label}\n> ${quoted}`;
+}
+
+function composeMessageText(
+  quoted: QuoteTarget | null,
+  text: string,
+): string {
+  const parts = [quoted ? quoteText(quoted) : "", text.trim()].filter(Boolean);
+  return parts.join("\n\n");
+}
+
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (!text.trim()) {
+    throw new Error("empty content");
+  }
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const el = document.createElement("textarea");
+  el.value = text;
+  el.setAttribute("readonly", "true");
+  el.style.position = "fixed";
+  el.style.opacity = "0";
+  document.body.appendChild(el);
+  el.select();
+  const ok = document.execCommand("copy");
+  document.body.removeChild(el);
+  if (!ok) {
+    throw new Error("clipboard unavailable");
+  }
+}
 
 function defaultPermissionMode(runtimeId?: RuntimeId | null): PermissionMode {
   return runtimeId === "grok" ? "auto" : "ask";
@@ -495,6 +576,64 @@ function toolMessageKey(message: ChatMessage): string {
   );
 }
 
+function assistantElapsedLabel(message: ChatMessage, now = Date.now()): string | null {
+  if (message.role !== "assistant" || !message.createdAt) return null;
+  const startedAt = new Date(message.createdAt).getTime();
+  if (Number.isNaN(startedAt)) return null;
+  const endedAt = message.completedAt ? new Date(message.completedAt).getTime() : null;
+  const referenceTime =
+    endedAt !== null && !Number.isNaN(endedAt)
+      ? endedAt
+      : message.streaming || message.pending
+        ? now
+        : startedAt;
+  const elapsed = Math.max(0, referenceTime - startedAt);
+  const prefix = message.streaming || message.pending ? "耗时" : "总耗时";
+  return `${prefix} ${formatElapsedSeconds(elapsed)}`;
+}
+
+function normalizeLoadedMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map((message) => {
+    if (
+      message.role === "assistant" &&
+      !message.streaming &&
+      !message.pending &&
+      !message.completedAt &&
+      message.createdAt
+    ) {
+      return { ...message, completedAt: message.createdAt };
+    }
+    return message;
+  });
+}
+
+function AssistantTiming({ message }: { message: ChatMessage }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!message.streaming && !message.pending) return;
+    const timer = window.setInterval(() => {
+      setNow(Date.now());
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [message.streaming, message.pending, message.id]);
+
+  const label = assistantElapsedLabel(message, now);
+  if (!label) return null;
+
+  return <span className="message__duration message__duration--inline">{label}</span>;
+}
+
+function finalizeAssistantMessage(message: ChatMessage): ChatMessage {
+  if (message.role !== "assistant") return message;
+  return {
+    ...message,
+    pending: false,
+    streaming: false,
+    completedAt: message.completedAt ?? nowIso(),
+  };
+}
+
 function StreamingText({
   content,
   onProgress,
@@ -627,6 +766,7 @@ export default function App() {
     Record<string, number>
   >({});
   const [draft, setDraft] = useState("");
+  const [quoteTarget, setQuoteTarget] = useState<QuoteTarget | null>(null);
   const [runtimePick, setRuntimePick] = useState<RuntimeId>(() =>
     loadRuntimePick(),
   );
@@ -639,6 +779,14 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sessionFilter, setSessionFilter] = useState("");
   const [showSearch, setShowSearch] = useState(false);
+  const [sessionContextMenu, setSessionContextMenu] = useState<{
+    sessionId: string;
+    left: number;
+    top: number;
+  } | null>(null);
+  const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
+  const [deleteSessionBusy, setDeleteSessionBusy] = useState(false);
+  const [deleteSessionError, setDeleteSessionError] = useState<string | null>(null);
   const [syncingRuntime, setSyncingRuntime] = useState<RuntimeId | null>(null);
   const [loadingMoreRuntime, setLoadingMoreRuntime] = useState<RuntimeId | null>(
     null,
@@ -650,6 +798,7 @@ export default function App() {
     Partial<Record<RuntimeId, boolean>>
   >({});
   const [theme, setTheme] = useState<ThemeMode>(() => loadTheme());
+  const [appDataDir, setAppDataDir] = useState<string | null>(null);
   const [statusLine, setStatusLine] = useState(
     isTauri() ? "Connecting Host…" : "UI preview mode (no Tauri)",
   );
@@ -752,9 +901,13 @@ export default function App() {
   const settingsChangeDisabled =
     !active || settingsBusy || !canChangeSessionSettings(snapshot.state);
   const activeIdRef = useRef<string | null>(null);
+  const sessionsRef = useRef<SessionMeta[]>([]);
+  const pendingSessionRef = useRef<SessionMeta | null>(null);
   const mockReplyTimerRef = useRef<number | null>(null);
   const sessionScrollRef = useRef<HTMLDivElement | null>(null);
   const messageScrollRef = useRef<HTMLDivElement | null>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const sessionContextMenuRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
   const pendingHistoryRestoreRef = useRef<{
     scrollHeight: number;
@@ -765,6 +918,14 @@ export default function App() {
   useEffect(() => {
     activeIdRef.current = activeId;
   }, [activeId]);
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  useEffect(() => {
+    pendingSessionRef.current = pendingSession;
+  }, [pendingSession]);
 
   useEffect(() => {
     if (!active) {
@@ -954,6 +1115,49 @@ export default function App() {
     visibleMessages.length,
   ]);
 
+  const refreshSessionMeta = useCallback(async (sessionId: string) => {
+    if (!isTauri()) return;
+    const session =
+      sessionsRef.current.find((item) => item.id === sessionId) ??
+      (pendingSessionRef.current?.id === sessionId ? pendingSessionRef.current : null);
+    const runtimeId = session?.runtimeId;
+
+    try {
+      if (runtimeId === "grok" || runtimeId === "codex") {
+        const result = await api.syncNativeSessions(runtimeId, SESSION_PAGE_SIZE, null);
+        setSessions((prev) => mergeSessions(prev, result.sessions));
+        setNativeCursors((prev) => ({
+          ...prev,
+          [runtimeId]: result.nextCursor ?? null,
+        }));
+        setNativeHasMore((prev) => ({
+          ...prev,
+          [runtimeId]: result.hasMore,
+        }));
+        setPendingSession((prev) =>
+          prev && result.sessions.some((item) => item.id === prev.id) ? null : prev,
+        );
+        return;
+      }
+
+      const list = await api.listSessions();
+      setSessions(list);
+      setPendingSession((prev) =>
+        prev && list.some((item) => item.id === prev.id) ? null : prev,
+      );
+    } catch (error) {
+      try {
+        const list = await api.listSessions();
+        setSessions(list);
+        setPendingSession((prev) =>
+          prev && list.some((item) => item.id === prev.id) ? null : prev,
+        );
+      } catch {
+        setStatusLine(`refresh session meta failed: ${String(error)}`);
+      }
+    }
+  }, []);
+
   // Host → UI stream / state events (real ACP path)
   useEffect(() => {
     if (!isTauri()) return;
@@ -1010,6 +1214,8 @@ export default function App() {
                   content: nextContent,
                   pending: false,
                   streaming: !p.done,
+                  createdAt: last.createdAt ?? nowIso(),
+                  completedAt: p.done ? last.completedAt ?? nowIso() : null,
                 },
                 ...m.slice(streamIndex + 1),
               ];
@@ -1022,6 +1228,7 @@ export default function App() {
               ...last,
               content: nextContent,
               streaming: !p.done,
+              completedAt: p.done ? last.completedAt ?? nowIso() : null,
             };
             return [...m.slice(0, streamIndex), next, ...m.slice(streamIndex + 1)];
           }
@@ -1036,6 +1243,8 @@ export default function App() {
                 content: p.text || "",
                 streaming: !p.done,
                 pending: false,
+                createdAt: nowIso(),
+                completedAt: p.done ? nowIso() : null,
               },
             ];
           }
@@ -1095,9 +1304,7 @@ export default function App() {
         updateSessionMessages(ev.payload.sessionId, (m) => {
           const closed = m
             .filter((msg) => !(msg.role === "assistant" && msg.pending))
-            .map((msg) =>
-              msg.streaming ? { ...msg, streaming: false, pending: false } : msg,
-            );
+            .map((msg) => (msg.streaming ? finalizeAssistantMessage(msg) : msg));
           return [
             ...closed,
             {
@@ -1114,6 +1321,7 @@ export default function App() {
         "session://prompt_complete",
         (ev) => {
           if (cancelled) return;
+          const sessionId = ev.payload.sessionId;
           updateSessionMessages(ev.payload.sessionId, (m) =>
             m.map((msg) => {
               if (msg.role === "assistant" && msg.pending) {
@@ -1126,11 +1334,32 @@ export default function App() {
                   content: `error EMPTY_RESPONSE: ${runtimeName} 本轮已结束，但没有返回任何可显示内容（stopReason: ${ev.payload.stopReason}）。`,
                 };
               }
-              return msg.streaming
-                ? { ...msg, streaming: false, pending: false }
-                : msg;
+              return msg.streaming ? finalizeAssistantMessage(msg) : msg;
             }),
           );
+          void (async () => {
+            if (!isTauri()) return;
+            try {
+              const restored = normalizeLoadedMessages(await api.getMessages(sessionId));
+              setMessagesBySession((prev) => ({
+                ...prev,
+                [sessionId]: restored,
+              }));
+              const staleIds = (messagesBySession[sessionId] ?? []).map((message) => message.id);
+              if (staleIds.length > 0) {
+                setAssistantTypingUntil((prev) => {
+                  const next = { ...prev };
+                  for (const id of staleIds) {
+                    delete next[id];
+                  }
+                  return next;
+                });
+              }
+              await refreshSessionMeta(sessionId);
+            } catch (error) {
+              setStatusLine(`reload messages failed: ${String(error)}`);
+            }
+          })();
         },
       );
       if (!cancelled) unsubs.push(u5);
@@ -1140,7 +1369,7 @@ export default function App() {
       cancelled = true;
       for (const u of unsubs) u();
     };
-  }, [updateSessionMessages]);
+  }, [refreshSessionMeta, updateSessionMessages]);
 
   const refreshProbes = useCallback(async () => {
     if (!isTauri()) {
@@ -1222,6 +1451,7 @@ export default function App() {
 
     try {
       const info = await api.appInfo();
+      setAppDataDir(info.dataDir);
       setStatusLine(`${info.name} ${info.version} · ${info.dataDir}`);
       const list = await api.listSessions();
       setPendingSession(null);
@@ -1231,7 +1461,7 @@ export default function App() {
         setActiveId(first.id);
         const snap = await api.getSnapshot(first.id);
         setSnapshot(snap);
-        const restored = await api.getMessages(first.id);
+        const restored = normalizeLoadedMessages(await api.getMessages(first.id));
         setMessagesBySession((prev) => ({
           ...prev,
           [first.id]: restored,
@@ -1252,32 +1482,194 @@ export default function App() {
     void refreshCodexRoute();
   }, [loadSessions, refreshProbes, refreshCodexRoute]);
 
+  const activateSession = useCallback(
+    async (id: string, metaOverride?: SessionMeta | null) => {
+      setPendingSession(null);
+      setActiveId(id);
+      setQuoteTarget(null);
+      const meta = metaOverride ?? sessions.find((s) => s.id === id) ?? null;
+      if (!isTauri()) {
+        setSnapshot(idleSnapshot(meta));
+        resetChatViewport(id, messagesBySession[id]?.length ?? 0);
+        return;
+      }
+      try {
+        const snap = await api.getSnapshot(id);
+        setSnapshot(snap);
+        const restored = normalizeLoadedMessages(await api.getMessages(id));
+        setMessagesBySession((prev) => ({
+          ...prev,
+          [id]: restored,
+        }));
+        resetChatViewport(id, restored.length);
+      } catch (e) {
+        setStatusLine(String(e));
+      }
+    },
+    [messagesBySession, resetChatViewport, sessions],
+  );
+
   async function selectSession(id: string) {
-    setPendingSession(null);
-    setActiveId(id);
-    const meta = sessions.find((s) => s.id === id);
+    void activateSession(id);
+  }
+
+  const openSelectedSessionLocation = useCallback(async (sessionId: string) => {
+    setSessionContextMenu(null);
     if (!isTauri()) {
-      setSnapshot(idleSnapshot(meta));
-      resetChatViewport(id, messagesBySession[id]?.length ?? 0);
+      setStatusLine("UI preview · open location unavailable");
       return;
     }
     try {
-      const snap = await api.getSnapshot(id);
-      setSnapshot(snap);
-      const restored = await api.getMessages(id);
-      setMessagesBySession((prev) => ({
-        ...prev,
-        [id]: restored,
-      }));
-      resetChatViewport(id, restored.length);
+      const path = await api.openSessionLocation(sessionId);
+      setStatusLine(`opened location · ${path}`);
     } catch (e) {
-      setStatusLine(String(e));
+      setStatusLine(`open location failed: ${String(e)}`);
     }
-  }
+  }, []);
+
+  const requestDeleteSession = useCallback((sessionId: string) => {
+    setSessionContextMenu(null);
+    setDeleteSessionError(null);
+    setDeleteSessionId(sessionId);
+  }, []);
+
+  const confirmDeleteSession = useCallback(async () => {
+    if (!deleteSessionId || deleteSessionBusy) return;
+    if (!isTauri()) {
+      setStatusLine("UI preview · delete unavailable");
+      setDeleteSessionId(null);
+      return;
+    }
+    const sessionId = deleteSessionId;
+    const target = sessions.find((s) => s.id === sessionId) ?? pendingSession;
+    const removedMessages = messagesBySession[sessionId] ?? [];
+    setDeleteSessionBusy(true);
+    setDeleteSessionError(null);
+    try {
+      const result = await deleteSessionById(sessionId);
+      setDeleteSessionId(null);
+      setMessagesBySession((prev) => {
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
+      setAssistantTypingUntil((prev) => {
+        const next = { ...prev };
+        for (const message of removedMessages) {
+          delete next[message.id];
+        }
+        return next;
+      });
+      setPendingSession((prev) => (prev?.id === sessionId ? null : prev));
+      const nextSessions = sessions.filter((item) => item.id !== sessionId);
+      setSessions(nextSessions);
+
+      if (result.activeSessionId) {
+        const nextMeta =
+          nextSessions.find((item) => item.id === result.activeSessionId) ??
+          nextSessions[0] ??
+          null;
+        if (nextMeta) {
+          await activateSession(nextMeta.id, nextMeta);
+        } else {
+          setActiveId(null);
+          setSnapshot(idleSnapshot());
+        }
+      } else if (activeId === sessionId) {
+        if (nextSessions.length > 0) {
+          const nextMeta = nextSessions[0];
+          await activateSession(nextMeta.id, nextMeta);
+        } else {
+          setActiveId(null);
+          setSnapshot(idleSnapshot());
+        }
+      }
+
+      setStatusLine(
+        `deleted session${target ? ` · ${target.title}` : ""} · ${result.deletedPath}`,
+      );
+      setQuoteTarget((prev) => (prev?.messageId === sessionId ? null : prev));
+    } catch (e) {
+      const message = `delete failed: ${String(e)}`;
+      setDeleteSessionError(message);
+      setStatusLine(message);
+    } finally {
+      setDeleteSessionBusy(false);
+    }
+  }, [
+    activateSession,
+    activeId,
+    deleteSessionBusy,
+    deleteSessionId,
+    messagesBySession,
+    pendingSession,
+    sessions,
+  ]);
+
+  const sessionContextTarget = useMemo(() => {
+    if (!sessionContextMenu) return null;
+    return (
+      sessions.find((session) => session.id === sessionContextMenu.sessionId) ??
+      (pendingSession?.id === sessionContextMenu.sessionId ? pendingSession : null)
+    );
+  }, [pendingSession, sessionContextMenu, sessions]);
+
+  const sessionPathFor = useCallback(
+    (sessionId: string) =>
+      appDataDir ? `${appDataDir}\\sessions\\${sessionId}` : sessionId,
+    [appDataDir],
+  );
+
+  const deleteTargetSession = useMemo(() => {
+    if (!deleteSessionId) return null;
+    return (
+      sessions.find((session) => session.id === deleteSessionId) ??
+      (pendingSession?.id === deleteSessionId ? pendingSession : null)
+    );
+  }, [deleteSessionId, pendingSession, sessions]);
+
+  useEffect(() => {
+    if (!sessionContextMenu) return;
+    const close = () => setSessionContextMenu(null);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (sessionContextMenuRef.current?.contains(target)) return;
+      close();
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [sessionContextMenu]);
+
+  useEffect(() => {
+    const suppressGlobalContextMenu = (event: MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".session-item")) {
+        return;
+      }
+      event.preventDefault();
+      setSessionContextMenu(null);
+    };
+    window.addEventListener("contextmenu", suppressGlobalContextMenu);
+    return () => {
+      window.removeEventListener("contextmenu", suppressGlobalContextMenu);
+    };
+  }, []);
 
   async function createSession() {
     setBusy(true);
     try {
+      setQuoteTarget(null);
       if (!isTauri()) {
         const meta: SessionMeta = {
           id: uid("sess"),
@@ -1379,8 +1771,9 @@ export default function App() {
   }
 
   async function sendMessage() {
-    const text = draft.trim();
-    if (!text || !active) return;
+    const body = draft.trim();
+    if (!body || !active) return;
+    const text = composeMessageText(quoteTarget, body);
     const session = active;
     setDraft("");
     stickToBottomRef.current = true;
@@ -1403,6 +1796,8 @@ export default function App() {
           runtimeId: session.runtimeId,
           streaming: true,
           pending: true,
+          createdAt: nowIso(),
+          completedAt: null,
         },
       ]);
       setSnapshot((s) => ({ ...s, state: "streaming" }));
@@ -1411,13 +1806,15 @@ export default function App() {
           const replyId = uid("a");
           const replyContent = `[${RUNTIME_LABEL[session.runtimeId]} stub]\n收到：${text}\n\n下一步会接入真实 Adapter（Grok ACP / Codex App Server）。`;
           queueAssistantTyping(replyId, replyContent);
+          const last = m[m.length - 1];
           const reply: ChatMessage = {
             id: replyId,
             role: "assistant",
             content: replyContent,
             runtimeId: session.runtimeId,
+            createdAt: last?.role === "assistant" ? last.createdAt ?? nowIso() : nowIso(),
+            completedAt: nowIso(),
           };
-          const last = m[m.length - 1];
           if (last?.role === "assistant" && last.pending) {
             return [...m.slice(0, -1), reply];
           }
@@ -1426,13 +1823,14 @@ export default function App() {
         if (activeIdRef.current === session.id) {
           setSnapshot((s) => ({ ...s, state: "ready" }));
         }
-        setPendingSession((prev) => (prev?.id === session.id ? null : prev));
-        setSessions((prev) =>
-          prev.some((item) => item.id === session.id)
-            ? prev
-            : [{ ...session, updatedAt: nowIso() }, ...prev],
-        );
-        mockReplyTimerRef.current = null;
+      setPendingSession((prev) => (prev?.id === session.id ? null : prev));
+      setSessions((prev) =>
+        prev.some((item) => item.id === session.id)
+          ? prev
+          : [{ ...session, updatedAt: nowIso() }, ...prev],
+      );
+      setQuoteTarget(null);
+      mockReplyTimerRef.current = null;
       }, 400);
       return;
     }
@@ -1448,6 +1846,8 @@ export default function App() {
           runtimeId: session.runtimeId,
           streaming: true,
           pending: true,
+          createdAt: nowIso(),
+          completedAt: null,
         },
       ]);
       setSnapshot((s) => ({ ...s, state: "streaming" }));
@@ -1455,6 +1855,7 @@ export default function App() {
       const list = await api.listSessions();
       setSessions(list);
       setPendingSession((prev) => (prev?.id === session.id ? null : prev));
+      setQuoteTarget(null);
     } catch (e) {
       updateSessionMessages(session.id, (m) => [
         ...m.filter(
@@ -1490,9 +1891,7 @@ export default function App() {
     updateSessionMessages(sessionId, (m) =>
       m
         .filter((msg) => !(msg.role === "assistant" && msg.pending))
-        .map((msg) =>
-          msg.streaming ? { ...msg, streaming: false, pending: false } : msg,
-        ),
+        .map((msg) => (msg.streaming ? finalizeAssistantMessage(msg) : msg)),
     );
     setSnapshot((s) =>
       s.state === "streaming" || s.state === "awaiting_permission"
@@ -1814,6 +2213,15 @@ export default function App() {
                   className={
                     "session-item" + (activeId === s.id ? " session-item--active" : "")
                   }
+                  onContextMenu={(ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    setSessionContextMenu({
+                      sessionId: s.id,
+                      left: Math.max(8, Math.min(ev.clientX, window.innerWidth - 224)),
+                      top: Math.max(8, Math.min(ev.clientY, window.innerHeight - 120)),
+                    });
+                  }}
                   onClick={() => void selectSession(s.id)}
                 >
                   <span className={`runtime-dot runtime-dot--${s.runtimeId}`} />
@@ -1980,6 +2388,7 @@ export default function App() {
                           : m.role;
                       const messageRuntime =
                         m.runtimeId ?? active.runtimeId ?? snapshot.runtimeId ?? "grok";
+                      const messageRuntimeLabel = RUNTIME_LABEL[messageRuntime];
                       const avatarSrc =
                         m.role === "assistant" ? runtimeAvatarSrc[messageRuntime] : null;
                       const thinking = m.role === "assistant" && m.pending && m.streaming;
@@ -1997,10 +2406,55 @@ export default function App() {
                               <span className="message__meta-text">
                                 {toolMessageLabel(tool)}
                               </span>
-                            </div>
-                          ))
+                          </div>
+                        ))
                         : null;
-                      const messageContent = (
+                      const quoteLabel = messageRoleLabel(m, messageRuntimeLabel);
+                      const canCopy = Boolean(m.content?.trim()) && !thinking;
+                      const canQuote = canCopy;
+                      const messageActionButtons = canCopy || canQuote ? (
+                        <>
+                          {canCopy ? (
+                            <button
+                              type="button"
+                              className="message__action"
+                              title="复制消息"
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                void copyTextToClipboard(m.content).then(
+                                  () => setStatusLine("已复制消息"),
+                                  (error) =>
+                                    setStatusLine(`复制失败: ${String(error)}`),
+                                );
+                              }}
+                            >
+                              <IconCopy size={14} />
+                            </button>
+                          ) : null}
+                          {canQuote ? (
+                            <button
+                              type="button"
+                              className="message__action"
+                              title="引用消息"
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                setQuoteTarget({
+                                  messageId: m.id,
+                                  role: m.role,
+                                  runtimeId: m.runtimeId ?? active.runtimeId ?? snapshot.runtimeId ?? null,
+                                  label: quoteLabel,
+                                  content: m.content,
+                                });
+                                composerInputRef.current?.focus();
+                                setStatusLine(`已引用 ${quoteLabel}`);
+                              }}
+                            >
+                              <IconQuote size={14} />
+                            </button>
+                          ) : null}
+                        </>
+                      ) : null;
+                      const messageBubble = (
                         <>
                           {thinking ? (
                             <ThinkingIndicator />
@@ -2022,14 +2476,26 @@ export default function App() {
                         return (
                           <div
                             key={m.id}
-                            className={`message message--${visualRole}`}
-                            style={
-                              m.role === "thought"
-                                ? { opacity: 0.75, fontStyle: "italic" }
-                                : undefined
-                            }
+                            className={`message-block message-block--${visualRole}`}
                           >
-                            {messageContent}
+                            <div
+                              className={`message message--${visualRole}`}
+                              style={
+                                m.role === "thought"
+                                  ? { opacity: 0.75, fontStyle: "italic" }
+                                  : undefined
+                              }
+                            >
+                              {messageBubble}
+                            </div>
+                            {messageActionButtons || m.role === "assistant" ? (
+                              <div className={`message__actions message__actions--${visualRole}`}>
+                                {messageActionButtons}
+                                {m.role === "assistant" ? (
+                                  <AssistantTiming message={m} />
+                                ) : null}
+                              </div>
+                            ) : null}
                           </div>
                         );
                       }
@@ -2045,8 +2511,16 @@ export default function App() {
                             height={30}
                             draggable={false}
                           />
-                          <div className="message message--assistant">
-                            {messageContent}
+                          <div className="message-block message-block--assistant">
+                            <div className="message message--assistant">{messageBubble}</div>
+                            {messageActionButtons || m.role === "assistant" ? (
+                              <div className="message__actions message__actions--assistant">
+                                {messageActionButtons}
+                                {m.role === "assistant" ? (
+                                  <AssistantTiming message={m} />
+                                ) : null}
+                              </div>
+                            ) : null}
                           </div>
                         </div>
                       );
@@ -2104,7 +2578,27 @@ export default function App() {
                       }
                     />
                   </div>
+                  {quoteTarget ? (
+                    <div className="composer__quote">
+                      <div className="composer__quote-label">
+                        <IconQuote size={13} />
+                        <span>{quoteTarget.label}</span>
+                      </div>
+                      <div className="composer__quote-text">
+                        {compactLabel(quoteTarget.content.replace(/\s+/g, " "), 180)}
+                      </div>
+                      <button
+                        type="button"
+                        className="composer__quote-close"
+                        title="取消引用"
+                        onClick={() => setQuoteTarget(null)}
+                      >
+                        <IconClose size={14} />
+                      </button>
+                    </div>
+                  ) : null}
                   <textarea
+                    ref={composerInputRef}
                     className="composer__input"
                     placeholder={`Message ${RUNTIME_LABEL[active.runtimeId]}…`}
                     value={draft}
@@ -2251,6 +2745,128 @@ export default function App() {
           </section>
         </div>
       ) : null}
+      {sessionContextMenu
+        ? createPortal(
+            <div
+              ref={sessionContextMenuRef}
+              className="session-context-menu"
+              role="menu"
+              style={{
+                left: sessionContextMenu.left,
+                top: sessionContextMenu.top,
+              }}
+              onMouseDown={(ev) => ev.stopPropagation()}
+            >
+              <div className="session-context-menu__title">
+                {sessionContextTarget?.title ?? "会话"}
+              </div>
+              <button
+                type="button"
+                className="session-context-menu__item"
+                onMouseDown={(ev) => {
+                  ev.preventDefault();
+                  ev.stopPropagation();
+                  void openSelectedSessionLocation(sessionContextMenu.sessionId)
+                }}
+              >
+                <IconFolder size={14} />
+                <span>打开文件所在位置</span>
+              </button>
+              <button
+                type="button"
+                className="session-context-menu__item session-context-menu__item--danger"
+                onMouseDown={(ev) => {
+                  ev.preventDefault();
+                  ev.stopPropagation();
+                  requestDeleteSession(sessionContextMenu.sessionId);
+                }}
+              >
+                <IconClose size={14} />
+                <span>删除会话</span>
+              </button>
+            </div>,
+            document.body,
+          )
+        : null}
+      {deleteSessionId
+        ? createPortal(
+          <div
+            className="settings-overlay"
+            role="presentation"
+            onMouseDown={(ev) => {
+              if (ev.target === ev.currentTarget) {
+                setDeleteSessionError(null);
+                setDeleteSessionId(null);
+              }
+            }}
+          >
+              <section
+                className="settings-dialog session-delete-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-label="删除会话"
+              >
+                <div className="settings-dialog__head">
+                  <div>
+                    <div className="settings-dialog__title">删除会话</div>
+                    <div className="settings-dialog__sub">
+                      删除后会移除会话文件夹和记录
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    disabled={deleteSessionBusy}
+                    onClick={() => {
+                      setDeleteSessionError(null);
+                      setDeleteSessionId(null);
+                    }}
+                  >
+                    关闭
+                  </button>
+                </div>
+                <div className="settings-dialog__body session-delete-dialog__body">
+                  <div className="session-delete-dialog__title">
+                    {deleteTargetSession?.title ?? deleteSessionId}
+                  </div>
+                  <div className="session-delete-dialog__path">
+                    {sessionPathFor(deleteSessionId)}
+                  </div>
+                  <div className="session-delete-dialog__note">
+                    此操作会删除会话及其文件夹内容，无法恢复。
+                  </div>
+                  {deleteSessionError ? (
+                    <div className="session-delete-dialog__error">
+                      {deleteSessionError}
+                    </div>
+                  ) : null}
+                  <div className="session-delete-dialog__actions">
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      disabled={deleteSessionBusy}
+                      onClick={() => {
+                        setDeleteSessionError(null);
+                        setDeleteSessionId(null);
+                      }}
+                    >
+                      取消
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--danger"
+                      disabled={deleteSessionBusy}
+                      onClick={() => void confirmDeleteSession()}
+                    >
+                      {deleteSessionBusy ? "删除中..." : "删除"}
+                    </button>
+                  </div>
+                </div>
+              </section>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

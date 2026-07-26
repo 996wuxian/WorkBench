@@ -3,7 +3,7 @@
  */
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { IconChevronDown } from "./icons";
+import { IconCheck, IconChevronDown } from "./icons";
 import type { RuntimeId } from "../lib/types";
 import { RUNTIME_LABEL } from "../lib/types";
 
@@ -119,7 +119,7 @@ export function RuntimeSelect({
                   </span>
                   {active ? (
                     <span className="rt-select__check" aria-hidden>
-                      ✓
+                      <IconCheck size={14} />
                     </span>
                   ) : (
                     <span className="rt-select__check" aria-hidden />

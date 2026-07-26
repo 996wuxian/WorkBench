@@ -58,6 +58,8 @@ pub fn run() {
             commands::session_control_options,
             commands::session_update_settings,
             commands::session_get_messages,
+            commands::session_delete,
+            commands::session_open_location,
             commands::session_sync_native,
             commands::session_connect,
             commands::session_send,

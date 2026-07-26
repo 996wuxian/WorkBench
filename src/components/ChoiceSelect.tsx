@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { IconChevronDown } from "./icons";
+import { IconCheck, IconChevronDown } from "./icons";
 
 export type ChoiceOption = {
   value: string;
@@ -139,7 +139,7 @@ export function ChoiceSelect({
                   <span className="rt-select__option-side">
                     {active ? (
                       <span className="rt-select__check" aria-hidden>
-                        ✓
+                        <IconCheck size={14} />
                       </span>
                     ) : (
                       <span className="rt-select__check" aria-hidden />

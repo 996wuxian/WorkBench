@@ -4,6 +4,7 @@ import type {
   ChatMessage,
   ProbeResult,
   NativeSessionSyncResult,
+  SessionDeleteResult,
   SessionSelectionCatalog,
   PermissionMode,
   RuntimeInfo,
@@ -30,6 +31,8 @@ export const api = {
     call<ProbeResult>("probe_runtime", { runtimeId }),
   codexRouteStatus: () => call<CodexRouteStatus>("codex_route_status"),
   openCcSwitch: () => call<string>("open_cc_switch"),
+  openSessionLocation: (sessionId: string) =>
+    call<string>("session_open_location", { sessionId }),
 
   listSessions: () => call<SessionMeta[]>("session_list"),
   createSession: (runtimeId: string, projectPath?: string | null) =>
@@ -52,6 +55,8 @@ export const api = {
     }),
   getMessages: (sessionId: string) =>
     call<ChatMessage[]>("session_get_messages", { sessionId }),
+  deleteSession: (sessionId: string) =>
+    call<SessionDeleteResult>("session_delete", { sessionId }),
   syncNativeSessions: (
     runtimeId: string,
     limit?: number,

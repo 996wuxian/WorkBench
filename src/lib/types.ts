@@ -116,6 +116,12 @@ export interface NativeSessionSyncResult {
   hasMore: boolean;
 }
 
+export interface SessionDeleteResult {
+  deletedSessionId: string;
+  deletedPath: string;
+  activeSessionId?: string | null;
+}
+
 export interface SessionSnapshot {
   sessionId?: string | null;
   runtimeId?: RuntimeId | null;
@@ -135,6 +141,7 @@ export interface ChatMessage {
   content: string;
   runtimeId?: RuntimeId;
   createdAt?: string;
+  completedAt?: string | null;
   toolName?: string | null;
   toolTitle?: string | null;
   toolStatus?: string | null;

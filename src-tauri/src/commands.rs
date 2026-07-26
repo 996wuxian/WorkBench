@@ -1,5 +1,7 @@
 //! Tauri command surface for the Workbench UI.
 
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 
 use tauri::{AppHandle, Manager};
@@ -9,7 +11,7 @@ use crate::paths;
 use crate::route_diagnostics::{self, CodexRouteStatus};
 use crate::runtime::{self, ChoiceOption, RuntimeId, SessionSelectionCatalog};
 use crate::session_manager::{SessionManager, SessionMeta, SessionSettingsPatch, SessionSnapshot};
-use crate::session_store::StoredChatMessage;
+use crate::session_store::{self, StoredChatMessage};
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,6 +20,14 @@ pub struct NativeSessionSyncResult {
     pub sessions: Vec<SessionMeta>,
     pub next_cursor: Option<String>,
     pub has_more: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDeleteResult {
+    pub deleted_session_id: String,
+    pub deleted_path: String,
+    pub active_session_id: Option<String>,
 }
 
 /// Sync native window fill with UI theme so rounded corners don't show a dark halo.
@@ -77,6 +87,13 @@ pub fn open_cc_switch() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn session_open_location(session_id: String) -> Result<String, String> {
+    let path = session_store::session_dir_path(&session_id).map_err(|e| e.to_string())?;
+    open_in_file_manager(&path)?;
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
 pub fn session_list(mgr: tauri::State<'_, Arc<SessionManager>>) -> Vec<SessionMeta> {
     mgr.list()
 }
@@ -116,6 +133,20 @@ pub async fn session_get_messages(
     session_id: String,
 ) -> Result<Vec<StoredChatMessage>, String> {
     mgr.messages(&session_id).await
+}
+
+#[tauri::command]
+pub async fn session_delete(
+    mgr: tauri::State<'_, Arc<SessionManager>>,
+    session_id: String,
+) -> Result<SessionDeleteResult, String> {
+    let path = session_store::session_dir_path(&session_id).map_err(|e| e.to_string())?;
+    let active_session_id = mgr.delete_session(&session_id).await?;
+    Ok(SessionDeleteResult {
+        deleted_session_id: session_id,
+        deleted_path: path.display().to_string(),
+        active_session_id,
+    })
 }
 
 #[tauri::command]
@@ -225,6 +256,38 @@ fn grok_permission_options() -> Vec<ChoiceOption> {
             disabled: true,
         },
     ]
+}
+
+fn open_in_file_manager(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer.exe")
+            .arg(path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("open location is not supported on this platform".into())
 }
 
 #[tauri::command]

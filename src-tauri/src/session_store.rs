@@ -56,6 +56,8 @@ pub struct StoredChatMessage {
     pub content: String,
     pub runtime_id: Option<RuntimeId>,
     pub created_at: String,
+    #[serde(default)]
+    pub completed_at: Option<String>,
 }
 
 impl StoredChatMessage {
@@ -70,6 +72,7 @@ impl StoredChatMessage {
             content: content.into(),
             runtime_id,
             created_at: Utc::now().to_rfc3339(),
+            completed_at: None,
         }
     }
 
@@ -79,12 +82,31 @@ impl StoredChatMessage {
         runtime_id: Option<RuntimeId>,
         created_at: impl Into<String>,
     ) -> Self {
+        let created_at = created_at.into();
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: role.into(),
+            content: content.into(),
+            runtime_id,
+            created_at: created_at.clone(),
+            completed_at: Some(created_at),
+        }
+    }
+
+    pub fn completed(
+        role: impl Into<String>,
+        content: impl Into<String>,
+        runtime_id: Option<RuntimeId>,
+        created_at: impl Into<String>,
+        completed_at: impl Into<String>,
+    ) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             role: role.into(),
             content: content.into(),
             runtime_id,
             created_at: created_at.into(),
+            completed_at: Some(completed_at.into()),
         }
     }
 }
@@ -134,6 +156,19 @@ pub fn save_meta(meta: &StoredSessionMeta) -> std::io::Result<()> {
     let text = serde_json::to_string_pretty(meta)?;
     fs::write(path, text)?;
     write_index(Some(&meta.id))
+}
+
+pub fn session_dir_path(session_id: &str) -> std::io::Result<PathBuf> {
+    session_dir(session_id)
+}
+
+pub fn delete_session(session_id: &str) -> std::io::Result<PathBuf> {
+    let dir = session_dir(session_id)?;
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    write_index(None)?;
+    Ok(dir)
 }
 
 pub fn append_message(session_id: &str, message: &StoredChatMessage) -> std::io::Result<()> {

@@ -70,6 +70,7 @@ struct LiveSessionSlot {
     backend: String,
     live: Option<std::sync::Arc<dyn LiveSession>>,
     mirror: StreamMirror,
+    prompt_started_at: Option<String>,
     persisted: bool,
 }
 
@@ -159,6 +160,7 @@ impl SessionManager {
                     backend: "none".into(),
                     live: None,
                     mirror: StreamMirror::default(),
+                    prompt_started_at: None,
                     persisted: true,
                 },
             );
@@ -261,13 +263,14 @@ impl SessionManager {
                     id.clone(),
                     LiveSessionSlot {
                         meta: meta.clone(),
-                        fsm: SessionFsm::new(),
-                        backend: "none".into(),
-                        live: None,
-                        mirror: StreamMirror::default(),
-                        persisted: true,
-                    },
-                );
+                    fsm: SessionFsm::new(),
+                    backend: "none".into(),
+                    live: None,
+                    mirror: StreamMirror::default(),
+                    prompt_started_at: None,
+                    persisted: true,
+                },
+            );
                 meta
             };
 
@@ -338,6 +341,7 @@ impl SessionManager {
             backend: "none".into(),
             live: None,
             mirror: StreamMirror::default(),
+            prompt_started_at: None,
             persisted: false,
         };
 
@@ -401,6 +405,38 @@ impl SessionManager {
             project_path: slot.meta.project_path.clone(),
             title: slot.meta.title.clone(),
         }
+    }
+
+    pub async fn delete_session(&self, session_id: &str) -> Result<Option<String>, String> {
+        let (live, next_active, removed_meta) = {
+            let mut guard = self.inner.lock();
+            let Some(slot) = guard.sessions.remove(session_id) else {
+                return Err("session not found".to_string());
+            };
+            let next_active = if guard.active_id.as_deref() == Some(session_id) {
+                guard
+                    .sessions
+                    .values()
+                    .max_by(|a, b| a.meta.updated_at.cmp(&b.meta.updated_at))
+                    .map(|slot| slot.meta.id.clone())
+            } else {
+                guard.active_id.clone()
+            };
+            guard.active_id = next_active.clone();
+            (slot.live, next_active, slot.meta)
+        };
+
+        if let Some(live) = live {
+            let _ = live.shutdown().await;
+        }
+
+        session_store::delete_session(session_id).map_err(|e| e.to_string())?;
+        tracing::info!(
+            "deleted session {} ({})",
+            removed_meta.id,
+            removed_meta.title
+        );
+        Ok(next_active)
     }
 
     fn emit_state(&self, app: &AppHandle, session_id: &str) {
@@ -774,29 +810,26 @@ impl SessionManager {
     }
 
     fn record_stream(&self, session_id: &str, kind: StreamKind, text: &str, done: bool) {
-        let message = {
-            let mut guard = self.inner.lock();
-            let Some(slot) = guard.sessions.get_mut(session_id) else {
-                return;
-            };
-            let buffer = match kind {
-                StreamKind::Assistant => &mut slot.mirror.assistant,
-                StreamKind::Thought => &mut slot.mirror.thought,
-            };
-            if !text.is_empty() {
-                buffer.push_str(text);
-            }
-            if !done || buffer.trim().is_empty() {
-                return;
-            }
-            let role = match kind {
-                StreamKind::Assistant => "assistant",
-                StreamKind::Thought => "thought",
-            };
-            let content = std::mem::take(buffer);
-            StoredChatMessage::new(role, content, Some(slot.meta.runtime_id))
+        let mut guard = self.inner.lock();
+        let Some(slot) = guard.sessions.get_mut(session_id) else {
+            return;
         };
-        self.append_message(session_id, &message);
+        let buffer = match kind {
+            StreamKind::Assistant => &mut slot.mirror.assistant,
+            StreamKind::Thought => &mut slot.mirror.thought,
+        };
+        if !text.is_empty() {
+            buffer.push_str(text);
+        }
+        if done {
+            tracing::debug!(
+                "session {session_id} stream completed; awaiting prompt_complete to persist final {}",
+                match kind {
+                    StreamKind::Assistant => "assistant",
+                    StreamKind::Thought => "thought",
+                }
+            );
+        }
     }
 
     fn record_tool(&self, session_id: &str, title: &str, status: &str) {
@@ -805,33 +838,37 @@ impl SessionManager {
         self.append_message(session_id, &message);
     }
 
-    fn record_prompt_complete(&self, session_id: &str, stop_reason: &str) {
+    fn record_prompt_complete(&self, session_id: &str, _stop_reason: &str) {
         let messages = {
             let mut guard = self.inner.lock();
             let Some(slot) = guard.sessions.get_mut(session_id) else {
                 return;
             };
+            let started_at = slot
+                .prompt_started_at
+                .clone()
+                .unwrap_or_else(|| Utc::now().to_rfc3339());
+            let completed_at = Utc::now().to_rfc3339();
             let mut messages = Vec::new();
             if !slot.mirror.thought.trim().is_empty() {
-                messages.push(StoredChatMessage::new(
+                messages.push(StoredChatMessage::completed(
                     "thought",
                     std::mem::take(&mut slot.mirror.thought),
                     Some(slot.meta.runtime_id),
+                    started_at.clone(),
+                    completed_at.clone(),
                 ));
             }
             if !slot.mirror.assistant.trim().is_empty() {
-                messages.push(StoredChatMessage::new(
+                messages.push(StoredChatMessage::completed(
                     "assistant",
                     std::mem::take(&mut slot.mirror.assistant),
                     Some(slot.meta.runtime_id),
-                ));
-            } else if stop_reason != "end_turn" {
-                messages.push(StoredChatMessage::new(
-                    "system",
-                    format!("Prompt complete · stopReason={stop_reason}"),
-                    Some(slot.meta.runtime_id),
+                    started_at,
+                    completed_at,
                 ));
             }
+            slot.prompt_started_at = None;
             messages
         };
         for message in messages {
@@ -931,6 +968,7 @@ impl SessionManager {
                 return Err("session not connected after auto-connect".into());
             }
             slot.fsm.begin_stream().map_err(|e| e.to_string())?;
+            slot.prompt_started_at = Some(Utc::now().to_rfc3339());
         }
         let runtime_id = self.runtime_id_for_session(&session_id);
         self.append_message(

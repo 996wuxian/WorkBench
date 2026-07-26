@@ -6,10 +6,12 @@
 
 import type { ComponentType } from "react";
 import {
+  IconCheck as TbCheck,
   IconChevronDown as TbChevronDown,
   IconChevronRight as TbChevronRight,
   IconDots as TbDots,
   IconEdit as TbEdit,
+  IconCopy as TbCopy,
   IconFirstAidKit as TbFirstAidKit,
   IconFolder as TbFolder,
   IconLayoutSidebar as TbLayoutSidebar,
@@ -25,6 +27,7 @@ import {
   IconSearch as TbSearch,
   IconSend as TbSend,
   IconSettings as TbSettings,
+  IconQuote as TbQuote,
   IconSquare as TbSquare,
   IconSun as TbSun,
   IconX as TbX,
@@ -124,6 +127,8 @@ export function IconWorkbenchMark({
 
 export const IconSearch = wrap(TbSearch);
 export const IconNewChat = wrap(TbEdit);
+export const IconCopy = wrap(TbCopy);
+export const IconCheck = wrap(TbCheck, { stroke: 2 });
 export const IconChevronDown = wrap(TbChevronDown);
 export const IconChevronRight = wrap(TbChevronRight);
 export const IconPlus = wrap(TbPlus);
@@ -137,6 +142,7 @@ export const IconSettings = wrap(TbSettings);
 export const IconDoctor = wrap(TbFirstAidKit);
 export const IconStop = wrap(TbPlayerStop);
 export const IconRefresh = wrap(TbRefresh);
+export const IconQuote = wrap(TbQuote);
 export const IconMinimize = wrap(TbMinus);
 export const IconMaximize = wrap(TbSquare);
 export const IconChat = wrap(TbMessage);
