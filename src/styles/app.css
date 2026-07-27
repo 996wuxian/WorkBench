@@ -476,6 +476,7 @@ select,
   border-radius: 50%;
   flex-shrink: 0;
   margin-top: 5px;
+  background: var(--runtime-default);
 }
 
 .runtime-dot--grok {
@@ -756,6 +757,18 @@ select,
 .message--assistant {
   align-self: flex-start;
   border-radius: 12px 8px 12px 12px;
+}
+
+/* Restored from a streaming checkpoint: the turn was cut short by a crash or a
+   killed process. Marked inline so a half-finished answer is never mistaken for
+   a complete one. */
+.message__interrupted {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-strong);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .message__meta-stack {
@@ -1080,6 +1093,109 @@ select,
 }
 
 /* ── Composer ── */
+
+/* Approval gate. Sits directly above the composer because answering it is the
+   only thing that unblocks the turn — burying it in the transcript would let a
+   long stream scroll it out of view. */
+.permission-bar {
+  flex-shrink: 0;
+  margin: 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--warning);
+  border-radius: 12px;
+  background: var(--bg-input);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.permission-bar__body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.permission-bar__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.permission-bar__badge {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--bg-app);
+  background: var(--warning);
+}
+
+.permission-bar__title {
+  min-width: 0;
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.permission-bar__count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.permission-bar__preview {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.permission-bar__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.permission-btn {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.permission-btn:hover:not(:disabled) {
+  background: var(--bg-active);
+}
+
+.permission-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.permission-btn--allow {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.permission-btn--deny {
+  border-color: var(--danger);
+  color: var(--danger);
+}
 
 .composer {
   border-top: 1px solid var(--border-subtle);

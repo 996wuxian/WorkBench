@@ -1,19 +1,28 @@
-//! Runtime adapters: Grok (ACP) + Codex (App Server) for P0.
-//! Claude / Kimi registered as disabled stubs for later phases.
+//! Runtime adapters.
+//!
+//! Two protocols are implemented: ACP (generic, manifest-driven) and the Codex
+//! App Server. Which CLIs exist, where they live and what they support is data
+//! (`runtimes/builtin.json` + `<data>/runtimes/*.json`), not code.
 
 pub mod acp;
 mod capabilities;
 pub mod catalog;
 mod codex;
-mod grok;
+mod id;
+pub mod manifest;
 mod registry;
 mod traits;
 
 pub use capabilities::RuntimeCapabilities;
 pub use catalog::{ChoiceOption, SessionSelectionCatalog};
-pub use codex::read_selection_catalog as read_codex_selection_catalog;
+pub use id::RuntimeId;
+pub use manifest::{NativeSessionSource, RuntimeManifest, RuntimeProtocol};
 pub use registry::{
-    get as get_runtime, list_descriptors, probe_all, probe_runtime, registry, RuntimeDescriptor,
+    get as get_runtime, get_enabled as get_enabled_runtime, list_descriptors, probe_all,
+    probe_runtime, registry, RuntimeDescriptor,
 };
-pub use traits::{AgentRuntime, ConnectOpts, LiveSession, ProbeResult, PromptInput};
-pub use traits::{PermissionMode, RuntimeId};
+pub use traits::PermissionMode;
+pub use traits::{
+    AgentRuntime, ConnectOpts, LiveSession, ProbeResult, PromptInput, SessionSettings,
+    SessionSettingsPatch,
+};

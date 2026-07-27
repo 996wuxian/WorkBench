@@ -32,11 +32,16 @@ pub fn agent_homes_dir() -> PathBuf {
     data_dir().join("agent-homes")
 }
 
+/// User-provided runtime manifests (`*.json`), merged over the built-ins.
+pub fn runtimes_dir() -> PathBuf {
+    data_dir().join("runtimes")
+}
+
 pub fn ensure_app_dirs() -> std::io::Result<()> {
     fs::create_dir_all(data_dir())?;
     fs::create_dir_all(sessions_dir())?;
     fs::create_dir_all(logs_dir())?;
-    fs::create_dir_all(agent_homes_dir().join("grok"))?;
-    fs::create_dir_all(agent_homes_dir().join("codex"))?;
+    fs::create_dir_all(agent_homes_dir())?;
+    fs::create_dir_all(runtimes_dir())?;
     Ok(())
 }

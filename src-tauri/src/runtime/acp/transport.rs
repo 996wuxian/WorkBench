@@ -16,6 +16,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::{AgentError, AgentErrorCode};
 use crate::host::events::{HostEvent, StreamKind};
+use crate::host::permissions::{PermissionBroker, PermissionDecision, PermissionRequest};
 use crate::process_util;
 use crate::runtime::RuntimeId;
 
@@ -39,12 +40,19 @@ pub struct AcpSpawnOpts {
     /// Env var name for agent home (e.g. GROK_HOME).
     pub home_env: Option<String>,
     pub home_dir: Option<PathBuf>,
-    /// Args before `stdio`, e.g. `["--no-auto-update", "agent"]` then model flags then `stdio`.
+    /// Args before the model flag, e.g. `["--no-auto-update", "agent"]`.
     pub pre_stdio_args: Vec<String>,
+    /// Args that select the stdio transport, appended last. `["stdio"]` for
+    /// Grok, `["acp"]` for Kimi, `["--experimental-acp"]` for Gemini, `[]` for
+    /// a binary that speaks ACP with no subcommand.
+    pub stdio_args: Vec<String>,
+    /// Flag used to pin a model; `None` means never pass one.
+    pub model_arg: Option<String>,
     pub client_name: String,
     pub runtime_id: RuntimeId,
-    /// Auto-approve tool permissions (MVP until UI permission bar exists).
-    pub auto_allow_permissions: bool,
+    /// Host-owned approval gate. Every `session/request_permission` is routed
+    /// through this — the transport never decides on its own.
+    pub permissions: PermissionBroker,
 }
 
 pub struct AcpClient {
@@ -60,7 +68,7 @@ pub struct AcpClient {
     prompt_has_assistant_output: AtomicBool,
     reader_alive: AtomicBool,
     stderr_tail: ParkingMutex<Vec<String>>,
-    auto_allow_permissions: bool,
+    permissions: PermissionBroker,
 }
 
 impl AcpClient {
@@ -87,13 +95,15 @@ impl AcpClient {
         for a in &opts.pre_stdio_args {
             cmd.arg(a);
         }
-        if let Some(ref m) = opts.model_id {
-            let m = m.trim();
-            if !m.is_empty() {
-                cmd.args(["--model", m]);
+        if let (Some(flag), Some(model)) = (opts.model_arg.as_deref(), opts.model_id.as_deref()) {
+            let model = model.trim();
+            if !model.is_empty() {
+                cmd.args([flag, model]);
             }
         }
-        cmd.arg("stdio");
+        for a in &opts.stdio_args {
+            cmd.arg(a);
+        }
         cmd.current_dir(&opts.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -147,7 +157,7 @@ impl AcpClient {
             prompt_has_assistant_output: AtomicBool::new(false),
             reader_alive: AtomicBool::new(true),
             stderr_tail: ParkingMutex::new(Vec::new()),
-            auto_allow_permissions: opts.auto_allow_permissions,
+            permissions: opts.permissions.clone(),
         });
 
         {
@@ -173,6 +183,8 @@ impl AcpClient {
                 }
                 c.reader_alive.store(false, Ordering::SeqCst);
                 c.fail_all_pending("Agent process exited (stdout EOF)");
+                // Unblock anything waiting on an approval that can no longer be delivered.
+                c.permissions.abort_all();
                 let _ = c.event_tx.send(HostEvent::ProcessExited { code: None });
             });
         }
@@ -595,34 +607,51 @@ impl AcpClient {
                     .unwrap_or_default();
                 let options = params.get("options").cloned().unwrap_or(json!([]));
 
-                let _ = self.event_tx.send(HostEvent::PermissionRequest {
-                    rpc_id: rpc_id.to_string(),
-                    tool_name: tool_name.clone(),
-                    title: title.clone(),
-                    preview: preview.chars().take(400).collect(),
-                    auto_allowed: self.auto_allow_permissions,
-                });
+                // Awaiting the user can take minutes; never block the reader loop.
+                let this = Arc::clone(&self);
+                tokio::spawn(async move {
+                    let decision = this
+                        .permissions
+                        .request(PermissionRequest {
+                            tool_name: tool_name.clone(),
+                            title,
+                            preview,
+                        })
+                        .await;
 
-                if self.auto_allow_permissions {
-                    let option_id =
-                        pick_allow_option(&options).unwrap_or_else(|| "allow_once".into());
+                    let outcome = match decision {
+                        PermissionDecision::AllowOnce | PermissionDecision::AllowAlways => {
+                            match pick_option(&options, true) {
+                                Some(option_id) => {
+                                    json!({ "outcome": "selected", "optionId": option_id })
+                                }
+                                None => json!({ "outcome": "cancelled" }),
+                            }
+                        }
+                        PermissionDecision::Deny => match pick_option(&options, false) {
+                            Some(option_id) => {
+                                json!({ "outcome": "selected", "optionId": option_id })
+                            }
+                            // No reject option offered: cancelling is the only
+                            // way to say "no" without granting anything.
+                            None => json!({ "outcome": "cancelled" }),
+                        },
+                        PermissionDecision::Cancel => json!({ "outcome": "cancelled" }),
+                    };
+
                     info!(
-                        "acp auto-allow permission id={rpc_id} option={option_id} tool={tool_name}"
+                        "acp permission id={rpc_id} tool={tool_name} decision={}",
+                        decision.as_str()
                     );
                     let reply = json!({
                         "jsonrpc": "2.0",
                         "id": rpc_id,
-                        "result": {
-                            "outcome": {
-                                "outcome": "selected",
-                                "optionId": option_id
-                            }
-                        }
+                        "result": { "outcome": outcome }
                     });
-                    if let Err(e) = self.write_line(&reply).await {
+                    if let Err(e) = this.write_line(&reply).await {
                         warn!("acp permission reply failed: {e}");
                     }
-                }
+                });
                 return;
             }
 
@@ -781,41 +810,49 @@ impl AcpClient {
     }
 }
 
-fn pick_allow_option(options: &Value) -> Option<String> {
+/// Pick the option id matching the Host's decision.
+///
+/// ACP options carry a `kind` (`allow_once` / `reject_once` / …); that is
+/// authoritative. Ids are only a fallback for agents that omit `kind`. There is
+/// deliberately no "just take the first option" fallback: guessing could turn a
+/// deny into an allow.
+fn pick_option(options: &Value, allow: bool) -> Option<String> {
     let arr = options.as_array()?;
-    // Prefer allow_once / allow_always style ids
-    for prefer in [
-        "allow_once",
-        "allow_always",
-        "allowOnce",
-        "allowAlways",
-        "approve",
-    ] {
+    let option_id = |o: &Value| -> Option<String> {
+        o.get("optionId")
+            .or_else(|| o.get("id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+
+    let wanted_kinds: &[&str] = if allow {
+        &["allow_once", "allow_always"]
+    } else {
+        &["reject_once", "reject_always"]
+    };
+    for kind in wanted_kinds {
         for o in arr {
-            let id = o
-                .get("optionId")
-                .or_else(|| o.get("id"))
-                .and_then(|v| v.as_str());
-            if id == Some(prefer) {
-                return Some(prefer.to_string());
+            if o.get("kind").and_then(|v| v.as_str()) == Some(*kind) {
+                if let Some(id) = option_id(o) {
+                    return Some(id);
+                }
             }
         }
     }
+
+    let needles: &[&str] = if allow {
+        &["allow", "approve", "accept", "yes"]
+    } else {
+        &["reject", "deny", "decline", "no"]
+    };
     for o in arr {
-        let id = o
-            .get("optionId")
-            .or_else(|| o.get("id"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let Some(id) = option_id(o) else { continue };
         let lower = id.to_ascii_lowercase();
-        if lower.contains("allow") || lower.contains("approve") || lower.contains("accept") {
-            return Some(id.to_string());
+        if needles.iter().any(|needle| lower.contains(needle)) {
+            return Some(id);
         }
     }
-    arr.first()
-        .and_then(|o| o.get("optionId").or_else(|| o.get("id")))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    None
 }
 
 fn json_id_u64(v: Option<&Value>) -> Option<u64> {
@@ -853,5 +890,38 @@ fn classify_rpc_error(e: &str) -> AgentError {
         AgentError::new(AgentErrorCode::QuotaExceeded, e)
     } else {
         AgentError::new(AgentErrorCode::AgentCrashed, e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options() -> Value {
+        json!([
+            { "optionId": "a1", "kind": "allow_once", "name": "Allow" },
+            { "optionId": "r1", "kind": "reject_once", "name": "Reject" }
+        ])
+    }
+
+    #[test]
+    fn pick_option_uses_kind_when_present() {
+        assert_eq!(pick_option(&options(), true).as_deref(), Some("a1"));
+        assert_eq!(pick_option(&options(), false).as_deref(), Some("r1"));
+    }
+
+    #[test]
+    fn pick_option_falls_back_to_id_heuristics() {
+        let opts = json!([{ "optionId": "approve_all" }, { "optionId": "decline" }]);
+        assert_eq!(pick_option(&opts, true).as_deref(), Some("approve_all"));
+        assert_eq!(pick_option(&opts, false).as_deref(), Some("decline"));
+    }
+
+    #[test]
+    fn pick_option_never_guesses_an_unrelated_option() {
+        // Only an allow option is offered: a deny must not select it.
+        let opts = json!([{ "optionId": "allow_once", "kind": "allow_once" }]);
+        assert_eq!(pick_option(&opts, false), None);
+        assert_eq!(pick_option(&json!([]), true), None);
     }
 }

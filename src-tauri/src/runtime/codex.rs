@@ -15,15 +15,17 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
-use which::which;
 
 use crate::error::{AgentError, AgentErrorCode};
 use crate::host::events::{HostEvent, StreamKind};
+use crate::host::permissions::{PermissionBroker, PermissionDecision, PermissionRequest};
 use crate::process_util;
-use crate::runtime::capabilities::RuntimeCapabilities;
 use crate::runtime::catalog::{ChoiceOption, SessionSelectionCatalog};
+use crate::runtime::id::RuntimeId;
+use crate::runtime::manifest::RuntimeManifest;
 use crate::runtime::traits::{
-    AgentRuntime, ConnectOpts, LiveSession, PermissionMode, ProbeResult, PromptInput, RuntimeId,
+    AgentRuntime, ConnectOpts, LiveSession, PermissionMode, ProbeResult, PromptInput,
+    SessionSettings, SessionSettingsPatch,
 };
 
 const HANDSHAKE_TIMEOUT_SECS: u64 = 45;
@@ -85,25 +87,28 @@ struct PermissionProfileSummary {
     description: Option<String>,
 }
 
-pub struct CodexRuntime;
+pub struct CodexRuntime {
+    manifest: &'static RuntimeManifest,
+}
+
+impl CodexRuntime {
+    pub fn new(manifest: &'static RuntimeManifest) -> Self {
+        Self { manifest }
+    }
+}
 
 #[async_trait]
 impl AgentRuntime for CodexRuntime {
-    fn id(&self) -> RuntimeId {
-        RuntimeId::Codex
-    }
-
-    fn capabilities(&self) -> RuntimeCapabilities {
-        RuntimeCapabilities::codex_app_server()
+    fn manifest(&self) -> &'static RuntimeManifest {
+        self.manifest
     }
 
     async fn probe(&self) -> ProbeResult {
-        let path = resolve_codex_path();
-        match path {
+        match self.manifest.resolve_cli_path() {
             Some(p) => {
                 let version = read_version(&p).await;
                 ProbeResult {
-                    runtime_id: RuntimeId::Codex,
+                    runtime_id: self.id(),
                     found: true,
                     path: Some(p.display().to_string()),
                     version,
@@ -111,12 +116,79 @@ impl AgentRuntime for CodexRuntime {
                 }
             }
             None => ProbeResult {
-                runtime_id: RuntimeId::Codex,
+                runtime_id: self.id(),
                 found: false,
                 path: None,
                 version: None,
-                detail: Some("not found on PATH or common install locations".into()),
+                detail: Some(format!(
+                    "`{}` not found on PATH or known locations",
+                    self.manifest.command
+                )),
             },
+        }
+    }
+
+    /// Codex can enumerate its own models, so this queries the app-server
+    /// instead of using the manifest's (empty) static list.
+    async fn selection_catalog(
+        &self,
+        cwd: PathBuf,
+        current_model: Option<String>,
+    ) -> Result<SessionSelectionCatalog, String> {
+        read_selection_catalog(self.manifest, cwd, current_model).await
+    }
+
+    /// Codex is the one runtime with a reasoning-effort axis, and it encodes
+    /// that effort in the model id (`gpt-5.5-high`). Both rules live here so
+    /// `SessionManager` stays runtime-agnostic.
+    fn normalize_settings(
+        &self,
+        current: &SessionSettings,
+        patch: &SessionSettingsPatch,
+    ) -> Result<SessionSettings, String> {
+        let mut next = current.clone();
+
+        if let Some(mode) = patch.permission_mode {
+            if !self.manifest.supports_permission_mode(mode) {
+                return Err(format!(
+                    "{} does not support permission mode `{}`",
+                    self.manifest.display_name,
+                    mode.as_str()
+                ));
+            }
+            next.permission_mode = Some(mode);
+        }
+
+        if let Some(raw) = patch.model_id.as_deref() {
+            // Read the effort suffix off the *raw* id: normalization strips it.
+            let effort_from_model = codex_reasoning_effort_from_model(raw);
+            let model = normalize_codex_model_id(raw);
+            if model.is_empty() {
+                return Err(format!("invalid Codex model id: {raw}"));
+            }
+            // An id that carries an effort suffix wins over the stored effort,
+            // otherwise switching model would silently keep the old one.
+            next.model_reasoning_effort =
+                effort_from_model.or_else(|| next.model_reasoning_effort.clone());
+            next.model_id = Some(model);
+        }
+
+        if let Some(raw) = patch.model_reasoning_effort.as_deref() {
+            next.model_reasoning_effort = validate_reasoning_effort(raw)?;
+        }
+
+        Ok(next)
+    }
+
+    fn default_settings(&self) -> SessionSettings {
+        // `default` means "let the CLI choose"; the real catalog is fetched
+        // lazily by `selection_catalog` once a session exists.
+        SessionSettings {
+            model_id: Some("default".into()),
+            model_reasoning_effort: crate::route_diagnostics::codex_route_status()
+                .model_reasoning_effort
+                .or_else(|| Some("high".into())),
+            permission_mode: Some(self.manifest.default_permission_mode()),
         }
     }
 
@@ -125,12 +197,15 @@ impl AgentRuntime for CodexRuntime {
         opts: ConnectOpts,
         event_tx: mpsc::UnboundedSender<HostEvent>,
     ) -> Result<Box<dyn LiveSession>, AgentError> {
-        let cli = opts.cli_path.or_else(resolve_codex_path).ok_or_else(|| {
-            AgentError::new(
-                AgentErrorCode::CliNotFound,
-                "Codex CLI not found (expected `codex`)",
-            )
-        })?;
+        let cli = opts
+            .cli_path
+            .or_else(|| self.manifest.resolve_cli_path())
+            .ok_or_else(|| {
+                AgentError::new(
+                    AgentErrorCode::CliNotFound,
+                    "Codex CLI not found (expected `codex`)",
+                )
+            })?;
 
         let client = spawn_initialized_client(
             cli.clone(),
@@ -138,6 +213,7 @@ impl AgentRuntime for CodexRuntime {
             opts.model_id.clone(),
             opts.model_reasoning_effort.clone(),
             opts.permission_mode,
+            opts.permissions.clone(),
             opts.native_thread_id
                 .clone()
                 .or_else(|| opts.native_session_id.clone()),
@@ -154,9 +230,10 @@ impl AgentRuntime for CodexRuntime {
             model_id: opts.model_id,
             model_reasoning_effort: opts.model_reasoning_effort,
             permission_mode: opts.permission_mode,
+            permissions: opts.permissions,
             native_thread_id: ParkingMutex::new(native_thread_id),
             native_session_id: ParkingMutex::new(native_session_id),
-            native_home: resolve_codex_home(),
+            native_home: self.manifest.resolve_home(),
             event_tx,
         }))
     }
@@ -169,6 +246,7 @@ struct CodexLiveSession {
     model_id: Option<String>,
     model_reasoning_effort: Option<String>,
     permission_mode: PermissionMode,
+    permissions: PermissionBroker,
     native_thread_id: ParkingMutex<Option<String>>,
     native_session_id: ParkingMutex<Option<String>>,
     native_home: PathBuf,
@@ -219,6 +297,7 @@ impl LiveSession for CodexLiveSession {
                             self.model_id.clone(),
                             self.model_reasoning_effort.clone(),
                             self.permission_mode,
+                            self.permissions.clone(),
                             native_thread_id,
                             self.event_tx.clone(),
                         )
@@ -268,6 +347,7 @@ async fn spawn_initialized_client(
     model_id: Option<String>,
     model_reasoning_effort: Option<String>,
     permission_mode: PermissionMode,
+    permissions: PermissionBroker,
     native_thread_id: Option<String>,
     event_tx: mpsc::UnboundedSender<HostEvent>,
 ) -> Result<Arc<CodexAppServerClient>, AgentError> {
@@ -277,6 +357,7 @@ async fn spawn_initialized_client(
         model_id.clone(),
         model_reasoning_effort.clone(),
         permission_mode,
+        permissions,
     )?;
     bridge_client_events(rx, event_tx);
 
@@ -321,6 +402,7 @@ struct CodexAppServerClient {
     model_id: Option<String>,
     model_reasoning_effort: Option<String>,
     permission_mode: PermissionMode,
+    permissions: PermissionBroker,
     thread_id: ParkingMutex<Option<String>>,
     thread_session_id: ParkingMutex<Option<String>>,
     current_turn_id: ParkingMutex<Option<String>>,
@@ -339,6 +421,7 @@ impl CodexAppServerClient {
         model_id: Option<String>,
         model_reasoning_effort: Option<String>,
         permission_mode: PermissionMode,
+        permissions: PermissionBroker,
     ) -> Result<(Arc<Self>, mpsc::UnboundedReceiver<HostEvent>), AgentError> {
         if !cli_path.exists() {
             return Err(AgentError::new(
@@ -400,6 +483,7 @@ impl CodexAppServerClient {
             model_id,
             model_reasoning_effort,
             permission_mode,
+            permissions,
             thread_id: ParkingMutex::new(None),
             thread_session_id: ParkingMutex::new(None),
             current_turn_id: ParkingMutex::new(None),
@@ -435,6 +519,8 @@ impl CodexAppServerClient {
                 c.reader_alive.store(false, Ordering::SeqCst);
                 c.fail_all_pending("Codex app-server exited (stdout EOF)");
                 c.fail_all_turns("Codex app-server exited");
+                // Unblock anything waiting on an approval that can no longer be delivered.
+                c.permissions.abort_all();
                 let _ = c.event_tx.send(HostEvent::ProcessExited { code: None });
             });
         }
@@ -463,7 +549,7 @@ impl CodexAppServerClient {
 
         let _ = event_tx.send(HostEvent::State {
             state: crate::session_fsm::SessionState::Connecting,
-            runtime_id: RuntimeId::Codex,
+            runtime_id: RuntimeId::CODEX,
             backend: "codex_app_server".into(),
         });
 
@@ -701,7 +787,7 @@ impl CodexAppServerClient {
 
         let _ = self.event_tx.send(HostEvent::State {
             state: crate::session_fsm::SessionState::Ready,
-            runtime_id: RuntimeId::Codex,
+            runtime_id: RuntimeId::CODEX,
             backend: self.backend.clone(),
         });
         Ok(thread_id)
@@ -977,7 +1063,7 @@ impl CodexAppServerClient {
         }
     }
 
-    async fn handle_server_request(&self, id: u64, method: &str, params: &Value) {
+    async fn handle_server_request(self: Arc<Self>, id: u64, method: &str, params: &Value) {
         match method {
             "currentTime/read" => {
                 self.reply_result(
@@ -992,9 +1078,7 @@ impl CodexAppServerClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                self.emit_permission(id, "commandExecution", "Command approval", &preview);
-                self.reply_result(id, json!({ "decision": "decline" }))
-                    .await;
+                self.gate_approval(id, "commandExecution", "Command approval", preview);
             }
             "item/fileChange/requestApproval" => {
                 let preview = params
@@ -1003,31 +1087,30 @@ impl CodexAppServerClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                self.emit_permission(id, "fileChange", "File change approval", &preview);
-                self.reply_result(id, json!({ "decision": "decline" }))
-                    .await;
+                self.gate_approval(id, "fileChange", "File change approval", preview);
             }
+            "item/permissions/requestApproval" => {
+                let preview = params
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                self.gate_approval(id, "permissions", "Permission approval", preview);
+            }
+            // Not permission gates but free-form input requests. There is no UI
+            // for them yet, so decline rather than raise an approval card the
+            // user cannot actually answer.
             "item/tool/requestUserInput" => {
-                self.emit_permission(id, "userInput", "User input required", "");
+                tracing::warn!("codex requestUserInput declined (no UI) id={id}");
                 self.reply_result(id, json!({ "answers": {} })).await;
             }
             "mcpServer/elicitation/request" => {
-                self.emit_permission(id, "mcpElicitation", "MCP input required", "");
+                tracing::warn!("codex MCP elicitation cancelled (no UI) id={id}");
                 self.reply_result(
                     id,
                     json!({ "action": "cancel", "content": null, "_meta": null }),
                 )
                 .await;
-            }
-            "item/permissions/requestApproval" => {
-                let reason = params
-                    .get("reason")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                self.emit_permission(id, "permissions", "Permission approval", &reason);
-                self.reply_error(id, -32001, "permission approval UI is not implemented")
-                    .await;
             }
             _ => {
                 tracing::warn!("codex unhandled server request method={method} id={id}");
@@ -1037,13 +1120,24 @@ impl CodexAppServerClient {
         }
     }
 
-    fn emit_permission(&self, id: u64, tool_name: &str, title: &str, preview: &str) {
-        let _ = self.event_tx.send(HostEvent::PermissionRequest {
-            rpc_id: id.to_string(),
+    /// Route an approval through the Host gate and answer when it resolves.
+    /// Spawned because the user may take minutes; the reader loop must not stall.
+    fn gate_approval(self: Arc<Self>, id: u64, tool_name: &str, title: &str, preview: String) {
+        let request = PermissionRequest {
             tool_name: tool_name.to_string(),
             title: title.to_string(),
-            preview: preview.chars().take(400).collect(),
-            auto_allowed: false,
+            preview,
+        };
+        tokio::spawn(async move {
+            let decision = self.permissions.request(request).await;
+            let verdict = match decision {
+                PermissionDecision::AllowOnce => "approved",
+                PermissionDecision::AllowAlways => "approved_for_session",
+                PermissionDecision::Deny => "denied",
+                PermissionDecision::Cancel => "abort",
+            };
+            tracing::info!("codex approval id={id} decision={verdict}");
+            self.reply_result(id, json!({ "decision": verdict })).await;
         });
     }
 
@@ -1242,60 +1336,30 @@ impl CodexAppServerClient {
     }
 }
 
-fn resolve_codex_path() -> Option<PathBuf> {
-    if let Ok(p) = which("codex") {
-        return Some(p);
-    }
-    let candidates = [
-        r"D:\codex\codex.exe",
-        r"%USERPROFILE%\.codex\bin\codex.exe",
-        r"%LOCALAPPDATA%\Programs\codex\codex.exe",
-    ];
-    for c in candidates {
-        let expanded = expand_env(c);
-        let p = PathBuf::from(&expanded);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-fn resolve_codex_home() -> PathBuf {
-    if let Ok(h) = std::env::var("CODEX_HOME") {
-        let p = PathBuf::from(h);
-        if !p.as_os_str().is_empty() {
-            return p;
-        }
-    }
-    process_util::user_home().join(".codex")
-}
-
-fn expand_env(s: &str) -> String {
-    let mut out = s.to_string();
-    if let Ok(v) = std::env::var("USERPROFILE") {
-        out = out.replace("%USERPROFILE%", &v);
-    }
-    if let Ok(v) = std::env::var("LOCALAPPDATA") {
-        out = out.replace("%LOCALAPPDATA%", &v);
-    }
-    if let Ok(v) = std::env::var("HOME") {
-        out = out.replace("%USERPROFILE%", &v);
-    }
-    out
-}
-
 pub async fn read_selection_catalog(
+    manifest: &'static RuntimeManifest,
     cwd: PathBuf,
     current_model: Option<String>,
 ) -> Result<SessionSelectionCatalog, String> {
-    let cli = resolve_codex_path().ok_or_else(|| "Codex CLI not found".to_string())?;
+    let runtime_id = manifest
+        .runtime_id()
+        .ok_or_else(|| "invalid Codex manifest id".to_string())?;
+    let cli = manifest
+        .resolve_cli_path()
+        .ok_or_else(|| "Codex CLI not found".to_string())?;
+    // A throwaway probe session: nothing it does should ever prompt the user,
+    // so it gets an auto-allow broker whose events go nowhere.
+    let (probe_tx, probe_rx) = mpsc::unbounded_channel();
+    drop(probe_rx);
+    let permissions = PermissionBroker::new("codex-catalog-probe", PermissionMode::Auto, probe_tx);
+
     let (client, mut rx) = CodexAppServerClient::spawn(
         cli,
         cwd.clone(),
         None,
         None,
-        PermissionMode::default_for_runtime(RuntimeId::Codex),
+        manifest.default_permission_mode(),
+        permissions,
     )
     .map_err(|e| format!("{e:?}"))?;
 
@@ -1313,7 +1377,7 @@ pub async fn read_selection_catalog(
         let permission_options = fallback_codex_permissions();
 
         Ok::<SessionSelectionCatalog, String>(SessionSelectionCatalog {
-            runtime_id: RuntimeId::Codex,
+            runtime_id,
             model_options: ensure_current_model(model_options, current_model),
             permission_options,
         })
@@ -1463,6 +1527,31 @@ fn normalize_reasoning_effort(value: Option<&str>) -> Option<String> {
         "low" | "medium" | "high" => Some(trimmed.to_ascii_lowercase()),
         _ => None,
     }
+}
+
+/// `gpt-5.5-high` → `high`. Codex encodes effort in the model id, so a model
+/// switch has to be able to carry the effort with it.
+fn codex_reasoning_effort_from_model(model: &str) -> Option<String> {
+    let parts: Vec<&str> = model.trim().split('-').collect();
+    if parts.len() != 3 || !parts[0].eq_ignore_ascii_case("gpt") {
+        return None;
+    }
+    match parts[2].to_ascii_lowercase().as_str() {
+        effort @ ("low" | "medium" | "high") => Some(effort.to_string()),
+        _ => None,
+    }
+}
+
+/// Like [`normalize_reasoning_effort`] but rejects garbage instead of dropping
+/// it, so a bad UI value surfaces as an error rather than a silent no-op.
+fn validate_reasoning_effort(value: &str) -> Result<Option<String>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    normalize_reasoning_effort(Some(trimmed)).map(Some).ok_or(
+        format!("invalid Codex reasoning effort: {trimmed} (expected low, medium, or high)"),
+    )
 }
 
 fn codex_model_sort_key(option: &ChoiceOption) -> (String, i32, String) {

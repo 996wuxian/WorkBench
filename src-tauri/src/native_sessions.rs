@@ -1,6 +1,6 @@
 //! Read-only import of runtime-native session indexes.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 
 use chrono::{TimeZone, Utc};
@@ -9,10 +9,9 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::time::{timeout, Duration};
-use which::which;
-
 use crate::process_util;
-use crate::runtime::RuntimeId;
+use crate::runtime::manifest::{self, RuntimeManifest};
+use crate::runtime::{NativeSessionSource, RuntimeId};
 use crate::session_store::StoredChatMessage;
 
 const CODEX_RPC_TIMEOUT_SECS: u64 = 45;
@@ -43,28 +42,44 @@ pub struct NativeSessionItem {
     pub updated_at: String,
 }
 
+/// Which import strategy a runtime uses is declared in its manifest, so a new
+/// ACP CLI that writes the same `sessions/**/summary.json` layout works here
+/// without a code change.
 pub async fn sync_native_sessions(
     runtime_id: RuntimeId,
     limit: usize,
     cursor: Option<String>,
 ) -> Result<NativeSessionPage, String> {
     let limit = limit.clamp(1, 100);
-    match runtime_id {
-        RuntimeId::Grok => sync_grok_sessions(limit, cursor),
-        RuntimeId::Codex => sync_codex_threads(limit, cursor).await,
-        _ => Err(format!(
-            "{} is not enabled for native session sync",
-            runtime_id.display_name()
+    let manifest = manifest::get(runtime_id)
+        .ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
+    match manifest.native_sessions {
+        Some(NativeSessionSource::AcpSummaryFiles) => {
+            sync_summary_file_sessions(manifest, limit, cursor)
+        }
+        Some(NativeSessionSource::CodexAppServer) => {
+            sync_codex_threads(manifest, limit, cursor).await
+        }
+        None => Err(format!(
+            "{} 不提供可导入的历史会话",
+            manifest.display_name
         )),
     }
 }
 
-fn sync_grok_sessions(limit: usize, cursor: Option<String>) -> Result<NativeSessionPage, String> {
-    let home = resolve_grok_home();
+fn sync_summary_file_sessions(
+    manifest: &RuntimeManifest,
+    limit: usize,
+    cursor: Option<String>,
+) -> Result<NativeSessionPage, String> {
+    let runtime_id = manifest
+        .runtime_id()
+        .ok_or_else(|| format!("invalid runtime id in manifest: {}", manifest.id))?;
+    let home = manifest.resolve_home();
     let root = home.join("sessions");
     if !root.is_dir() {
         return Ok(NativeSessionPage {
-            runtime_id: RuntimeId::Grok,
+            runtime_id,
             items: Vec::new(),
             next_cursor: None,
             has_more: false,
@@ -72,7 +87,7 @@ fn sync_grok_sessions(limit: usize, cursor: Option<String>) -> Result<NativeSess
     }
 
     let mut all = Vec::new();
-    collect_grok_summaries(&root, &home, &mut all)?;
+    collect_summary_files(manifest, &root, &home, &mut all)?;
     all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     let total = all.len();
 
@@ -85,14 +100,15 @@ fn sync_grok_sessions(limit: usize, cursor: Option<String>) -> Result<NativeSess
     let has_more = next < total;
 
     Ok(NativeSessionPage {
-        runtime_id: RuntimeId::Grok,
+        runtime_id,
         next_cursor: has_more.then(|| next.to_string()),
         has_more,
         items,
     })
 }
 
-fn collect_grok_summaries(
+fn collect_summary_files(
+    manifest: &RuntimeManifest,
     dir: &Path,
     home: &Path,
     out: &mut Vec<NativeSessionItem>,
@@ -104,20 +120,26 @@ fn collect_grok_summaries(
         };
         let path = entry.path();
         if path.is_dir() {
-            collect_grok_summaries(&path, home, out)?;
+            collect_summary_files(manifest, &path, home, out)?;
             continue;
         }
         if path.file_name().and_then(|name| name.to_str()) != Some("summary.json") {
             continue;
         }
-        if let Some(item) = parse_grok_summary(&path, home) {
+        if let Some(item) = parse_summary_file(manifest, &path, home) {
             out.push(item);
         }
     }
     Ok(())
 }
 
-fn parse_grok_summary(path: &Path, home: &Path) -> Option<NativeSessionItem> {
+fn parse_summary_file(
+    manifest: &RuntimeManifest,
+    path: &Path,
+    home: &Path,
+) -> Option<NativeSessionItem> {
+    let runtime_id = manifest.runtime_id()?;
+    let fallback_title = format!("{} session", manifest.display_name);
     let value: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     let session_id = value
         .pointer("/info/id")
@@ -128,7 +150,7 @@ fn parse_grok_summary(path: &Path, home: &Path) -> Option<NativeSessionItem> {
         .get("generated_title")
         .or_else(|| value.get("session_summary"))
         .and_then(|v| v.as_str())
-        .unwrap_or("Grok session")
+        .unwrap_or(&fallback_title)
         .trim()
         .to_string();
     let summary = value
@@ -149,13 +171,13 @@ fn parse_grok_summary(path: &Path, home: &Path) -> Option<NativeSessionItem> {
         .to_string();
 
     Some(NativeSessionItem {
-        runtime_id: RuntimeId::Grok,
-        native_source: "grok".into(),
+        runtime_id,
+        native_source: manifest.id.clone(),
         native_session_id: Some(session_id),
         native_thread_id: None,
         native_home: Some(home.display().to_string()),
         title: if title.is_empty() {
-            "Grok session".into()
+            fallback_title
         } else {
             title
         },
@@ -174,11 +196,17 @@ fn parse_grok_summary(path: &Path, home: &Path) -> Option<NativeSessionItem> {
 }
 
 async fn sync_codex_threads(
+    manifest: &RuntimeManifest,
     limit: usize,
     cursor: Option<String>,
 ) -> Result<NativeSessionPage, String> {
-    let cli = resolve_codex_path().ok_or_else(|| "Codex CLI not found".to_string())?;
-    let home = resolve_codex_home();
+    let runtime_id = manifest
+        .runtime_id()
+        .ok_or_else(|| format!("invalid runtime id in manifest: {}", manifest.id))?;
+    let cli = manifest
+        .resolve_cli_path()
+        .ok_or_else(|| format!("{} CLI not found", manifest.display_name))?;
+    let home = manifest.resolve_home();
     let mut client = JsonRpcClient::spawn(&cli)?;
     client.initialize().await?;
 
@@ -214,7 +242,7 @@ async fn sync_codex_threads(
         .map(|items| {
             items
                 .iter()
-                .filter_map(|thread| parse_codex_thread(thread, &home))
+                .filter_map(|thread| parse_codex_thread(manifest, thread, &home))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -224,14 +252,19 @@ async fn sync_codex_threads(
         .map(str::to_string);
 
     Ok(NativeSessionPage {
-        runtime_id: RuntimeId::Codex,
+        runtime_id,
         has_more: next_cursor.is_some(),
         next_cursor,
         items,
     })
 }
 
-fn parse_codex_thread(thread: &Value, home: &Path) -> Option<NativeSessionItem> {
+fn parse_codex_thread(
+    manifest: &RuntimeManifest,
+    thread: &Value,
+    home: &Path,
+) -> Option<NativeSessionItem> {
+    let runtime_id = manifest.runtime_id()?;
     let thread_id = thread.get("id").and_then(|v| v.as_str())?.to_string();
     let session_id = thread
         .get("sessionId")
@@ -241,7 +274,7 @@ fn parse_codex_thread(thread: &Value, home: &Path) -> Option<NativeSessionItem> 
     let title = clean_str(thread.get("name"))
         .or_else(|| clean_str(thread.get("title")))
         .or_else(|| preview.as_ref().map(|s| compact_text(s, 80)))
-        .unwrap_or_else(|| "Codex session".into());
+        .unwrap_or_else(|| format!("{} session", manifest.display_name));
     let cwd = thread
         .get("cwd")
         .and_then(|v| v.as_str())
@@ -265,8 +298,8 @@ fn parse_codex_thread(thread: &Value, home: &Path) -> Option<NativeSessionItem> 
     });
 
     Some(NativeSessionItem {
-        runtime_id: RuntimeId::Codex,
-        native_source: "codex".into(),
+        runtime_id,
+        native_source: manifest.id.clone(),
         native_session_id: session_id,
         native_thread_id: Some(thread_id),
         native_home: Some(home.display().to_string()),
@@ -280,7 +313,11 @@ fn parse_codex_thread(thread: &Value, home: &Path) -> Option<NativeSessionItem> 
 }
 
 pub async fn load_codex_thread_messages(thread_id: &str) -> Result<Vec<StoredChatMessage>, String> {
-    let cli = resolve_codex_path().ok_or_else(|| "Codex CLI not found".to_string())?;
+    let manifest =
+        manifest::get(RuntimeId::CODEX).ok_or_else(|| "Codex runtime is not registered".to_string())?;
+    let cli = manifest
+        .resolve_cli_path()
+        .ok_or_else(|| format!("{} CLI not found", manifest.display_name))?;
     let mut client = JsonRpcClient::spawn(&cli)?;
     client.initialize().await?;
     let result = client
@@ -316,13 +353,90 @@ fn parse_codex_thread_messages(result: &Value) -> Vec<StoredChatMessage> {
     messages
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_history_items_map_to_workbench_messages() {
+        let result = serde_json::json!({
+            "thread": {
+                "turns": [
+                    {
+                        "startedAt": 1710000000,
+                        "items": [
+                            {
+                                "type": "userMessage",
+                                "content": [
+                                    { "type": "text", "text": "hello" }
+                                ]
+                            },
+                            {
+                                "type": "agentMessage",
+                                "phase": "interim",
+                                "text": "thinking"
+                            },
+                            {
+                                "type": "reasoning",
+                                "summary": ["step one", "step two"]
+                            },
+                            {
+                                "type": "commandExecution",
+                                "command": "ls",
+                                "status": "completed"
+                            },
+                            {
+                                "type": "fileChange",
+                                "changes": [{ "path": "src/main.rs" }]
+                            },
+                            {
+                                "type": "agentMessage",
+                                "text": "done"
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let messages = parse_codex_thread_messages(&result);
+
+        assert_eq!(messages.len(), 6);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content, "hello");
+        assert_eq!(messages[1].role, "thought");
+        assert_eq!(messages[1].content, "thinking");
+        assert_eq!(messages[2].role, "thought");
+        assert_eq!(messages[2].content, "step one\n\nstep two");
+        assert_eq!(messages[3].role, "tool");
+        assert_eq!(messages[3].content, "command: ls · completed");
+        assert_eq!(messages[4].role, "tool");
+        assert_eq!(messages[4].content, "file changes: 1");
+        assert_eq!(messages[5].role, "assistant");
+        assert_eq!(messages[5].content, "done");
+        assert_eq!(messages[0].runtime_id, Some(RuntimeId::CODEX));
+        assert_eq!(messages[0].created_at, "2024-03-09T16:00:00+00:00");
+    }
+
+    #[test]
+    fn empty_or_missing_turns_do_not_import_anything() {
+        assert!(parse_codex_thread_messages(&serde_json::json!({})).is_empty());
+        assert!(
+            parse_codex_thread_messages(&serde_json::json!({
+                "thread": { "turns": [] }
+            }))
+            .is_empty()
+        );
+    }
+}
+
 fn parse_codex_thread_item(item: &Value, created_at: &str) -> Vec<StoredChatMessage> {
     let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match item_type {
         "userMessage" => message_from_text(
             "user",
             user_message_text(item),
-            RuntimeId::Codex,
+            RuntimeId::CODEX,
             created_at,
         ),
         "agentMessage" => {
@@ -333,20 +447,20 @@ fn parse_codex_thread_item(item: &Value, created_at: &str) -> Vec<StoredChatMess
             message_from_text(
                 role,
                 clean_str(item.get("text")),
-                RuntimeId::Codex,
+                RuntimeId::CODEX,
                 created_at,
             )
         }
         "reasoning" => message_from_text(
             "thought",
             reasoning_text(item),
-            RuntimeId::Codex,
+            RuntimeId::CODEX,
             created_at,
         ),
         "plan" => message_from_text(
             "tool",
             clean_str(item.get("text")),
-            RuntimeId::Codex,
+            RuntimeId::CODEX,
             created_at,
         ),
         "commandExecution"
@@ -364,7 +478,7 @@ fn parse_codex_thread_item(item: &Value, created_at: &str) -> Vec<StoredChatMess
         | "contextCompaction" => message_from_text(
             "tool",
             tool_summary(item_type, item),
-            RuntimeId::Codex,
+            RuntimeId::CODEX,
             created_at,
         ),
         _ => Vec::new(),
@@ -634,53 +748,4 @@ impl Drop for JsonRpcClient {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
     }
-}
-
-fn resolve_grok_home() -> PathBuf {
-    if let Ok(h) = std::env::var("GROK_HOME") {
-        let p = PathBuf::from(h);
-        if !p.as_os_str().is_empty() {
-            return p;
-        }
-    }
-    process_util::user_home().join(".grok")
-}
-
-fn resolve_codex_home() -> PathBuf {
-    if let Ok(h) = std::env::var("CODEX_HOME") {
-        let p = PathBuf::from(h);
-        if !p.as_os_str().is_empty() {
-            return p;
-        }
-    }
-    process_util::user_home().join(".codex")
-}
-
-fn resolve_codex_path() -> Option<PathBuf> {
-    if let Ok(p) = which("codex") {
-        return Some(p);
-    }
-    let candidates = [
-        r"D:\codex\codex.exe",
-        r"%USERPROFILE%\.codex\bin\codex.exe",
-        r"%LOCALAPPDATA%\Programs\codex\codex.exe",
-    ];
-    for c in candidates {
-        let p = PathBuf::from(expand_env(c));
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-fn expand_env(s: &str) -> String {
-    let mut out = s.to_string();
-    if let Ok(v) = std::env::var("USERPROFILE") {
-        out = out.replace("%USERPROFILE%", &v);
-    }
-    if let Ok(v) = std::env::var("LOCALAPPDATA") {
-        out = out.replace("%LOCALAPPDATA%", &v);
-    }
-    out
 }

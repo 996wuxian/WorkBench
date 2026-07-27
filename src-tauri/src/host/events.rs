@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::AgentError;
+use crate::host::permissions::{DecisionSource, PermissionDecision};
 use crate::runtime::RuntimeId;
 use crate::session_fsm::SessionState;
 
@@ -25,12 +26,24 @@ pub enum HostEvent {
         status: String,
         title: String,
     },
+    /// A tool call is waiting for approval. `request_id` is Host-generated and
+    /// is what `session_permission_respond` expects — adapters never expose
+    /// their own protocol ids to the UI.
     PermissionRequest {
-        rpc_id: String,
+        request_id: String,
         tool_name: String,
         title: String,
         preview: String,
+        /// Already decided by the session's permission mode or a remembered
+        /// grant; emitted for visibility, no answer is expected.
         auto_allowed: bool,
+    },
+    /// Terminal state for a `PermissionRequest`. The UI uses this to retire the
+    /// approval card, including when the Host decided on the user's behalf.
+    PermissionResolved {
+        request_id: String,
+        decision: PermissionDecision,
+        source: DecisionSource,
     },
     PromptComplete {
         stop_reason: String,

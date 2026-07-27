@@ -1,8 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AppSettings,
   CodexRouteStatus,
   ChatMessage,
+  PermissionDecision,
   ProbeResult,
+  RuntimeOverride,
   NativeSessionSyncResult,
   SessionDeleteResult,
   SessionSelectionCatalog,
@@ -67,6 +70,16 @@ export const api = {
       limit,
       cursor,
     }),
+  respondPermission: (
+    sessionId: string,
+    requestId: string,
+    decision: PermissionDecision,
+  ) =>
+    call<void>("session_permission_respond", {
+      sessionId,
+      requestId,
+      decision,
+    }),
   connect: (sessionId: string) =>
     call<SessionSnapshot>("session_connect", { sessionId }),
   send: (sessionId: string, text: string) =>
@@ -74,6 +87,11 @@ export const api = {
   stop: (sessionId: string) => call<void>("session_stop", { sessionId }),
   disconnect: (sessionId: string) =>
     call<void>("session_disconnect", { sessionId }),
+
+  getSettings: () => call<AppSettings>("settings_get"),
+  reloadSettings: () => call<AppSettings>("settings_reload"),
+  setRuntimeOverride: (runtimeId: string, patch: RuntimeOverride) =>
+    call<AppSettings>("settings_set_runtime_override", { runtimeId, patch }),
 
   appInfo: () =>
     call<{ name: string; version: string; dataDir: string }>("app_info"),

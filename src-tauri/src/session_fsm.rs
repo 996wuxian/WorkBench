@@ -124,6 +124,22 @@ impl SessionFsm {
         }
     }
 
+    /// The approval was answered (or timed out) and the turn continues.
+    /// Idempotent: resolving twice, or resolving while already streaming, is a
+    /// no-op rather than an error — several approvals can overlap in one turn.
+    pub fn resume_stream(&mut self) -> Result<(), FsmError> {
+        match self.state {
+            SessionState::AwaitingPermission | SessionState::Streaming => {
+                self.state = SessionState::Streaming;
+                Ok(())
+            }
+            other => Err(FsmError::InvalidTransition {
+                from: other,
+                event: "resume_stream",
+            }),
+        }
+    }
+
     pub fn disconnect(&mut self, err: Option<AgentError>) {
         self.state = SessionState::Disconnected;
         self.last_error = err;
@@ -177,6 +193,34 @@ mod tests {
         assert_eq!(fsm.state(), SessionState::AwaitingPermission);
 
         fsm.end_stream().unwrap();
+        assert_eq!(fsm.state(), SessionState::Ready);
+    }
+
+    #[test]
+    fn resolved_permission_returns_to_streaming() {
+        let mut fsm = SessionFsm::new();
+        fsm.start_connect().unwrap();
+        fsm.handshake_ok().unwrap();
+        fsm.begin_stream().unwrap();
+        fsm.await_permission().unwrap();
+
+        fsm.resume_stream().unwrap();
+        assert_eq!(fsm.state(), SessionState::Streaming);
+
+        // Overlapping approvals resolve independently; the extra resume is a no-op.
+        fsm.resume_stream().unwrap();
+        assert_eq!(fsm.state(), SessionState::Streaming);
+
+        fsm.end_stream().unwrap();
+        assert_eq!(fsm.state(), SessionState::Ready);
+    }
+
+    #[test]
+    fn resume_stream_rejects_states_with_no_turn_in_flight() {
+        let mut fsm = SessionFsm::new();
+        fsm.start_connect().unwrap();
+        fsm.handshake_ok().unwrap();
+        assert!(fsm.resume_stream().is_err());
         assert_eq!(fsm.state(), SessionState::Ready);
     }
 }

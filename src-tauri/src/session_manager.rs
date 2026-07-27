@@ -13,8 +13,12 @@ use uuid::Uuid;
 
 use crate::error::{AgentError, AgentErrorCode};
 use crate::host::events::{HostEvent, StreamKind};
+use crate::host::permissions::{PermissionBroker, PermissionDecision};
 use crate::native_sessions::NativeSessionItem;
-use crate::runtime::{self, ConnectOpts, LiveSession, PermissionMode, PromptInput, RuntimeId};
+use crate::runtime::{
+    self, ConnectOpts, LiveSession, NativeSessionSource, PermissionMode, PromptInput, RuntimeId,
+    SessionSettings,
+};
 use crate::session_fsm::{SessionFsm, SessionState};
 use crate::session_store::{self, StoredChatMessage, StoredSessionMeta};
 
@@ -56,19 +60,17 @@ pub struct SessionSnapshot {
     pub title: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionSettingsPatch {
-    pub model_id: Option<String>,
-    pub model_reasoning_effort: Option<String>,
-    pub permission_mode: Option<PermissionMode>,
-}
+/// Re-exported so callers keep a single import path for session settings.
+pub use crate::runtime::SessionSettingsPatch;
 
 struct LiveSessionSlot {
     meta: SessionMeta,
     fsm: SessionFsm,
     backend: String,
     live: Option<std::sync::Arc<dyn LiveSession>>,
+    /// Approval gate for the current connection. Dropped on disconnect so a
+    /// stale broker can never answer for a new process.
+    permissions: Option<PermissionBroker>,
     mirror: StreamMirror,
     prompt_started_at: Option<String>,
     persisted: bool,
@@ -76,8 +78,47 @@ struct LiveSessionSlot {
 
 #[derive(Debug, Default)]
 struct StreamMirror {
-    assistant: String,
-    thought: String,
+    assistant: StreamBuffer,
+    thought: StreamBuffer,
+}
+
+/// Smallest amount of new text worth a checkpoint. Below this the write costs
+/// more than the tail it protects.
+const MIN_CHECKPOINT_BYTES: usize = 4096;
+
+/// One in-flight stream (assistant text or reasoning) of the current turn.
+#[derive(Debug, Default)]
+struct StreamBuffer {
+    /// Journal id shared by this turn's checkpoints and its final record, so
+    /// replay collapses them into a single message. Allocated on first write.
+    id: Option<String>,
+    text: String,
+    /// How much of `text` the last checkpoint already covers.
+    checkpointed: usize,
+}
+
+impl StreamBuffer {
+    /// A checkpoint rewrites the whole buffer, so the interval grows with it:
+    /// a long answer costs O(log n) writes instead of O(n). The trade is that a
+    /// crash can lose up to a quarter of the tail — still far better than
+    /// losing the entire turn, which is what an unbuffered journal did.
+    fn checkpoint_due(&self) -> bool {
+        let grown = self.text.len().saturating_sub(self.checkpointed);
+        grown >= MIN_CHECKPOINT_BYTES.max(self.checkpointed / 4)
+    }
+
+    /// Take the accumulated turn, leaving the buffer ready for the next one.
+    fn take(&mut self) -> (Option<String>, String) {
+        self.checkpointed = 0;
+        (self.id.take(), std::mem::take(&mut self.text))
+    }
+}
+
+fn stream_role(kind: StreamKind) -> &'static str {
+    match kind {
+        StreamKind::Assistant => "assistant",
+        StreamKind::Thought => "thought",
+    }
 }
 
 pub struct SessionManager {
@@ -91,7 +132,7 @@ struct Inner {
 
 impl SessionMeta {
     fn from_stored(stored: StoredSessionMeta) -> Self {
-        let (model_id, model_reasoning_effort) = normalize_codex_model_settings(
+        let (model_id, model_reasoning_effort) = normalize_stored_settings(
             stored.runtime_id,
             stored.model_id,
             stored.model_reasoning_effort,
@@ -106,7 +147,7 @@ impl SessionMeta {
             model_reasoning_effort,
             permission_mode: stored
                 .permission_mode
-                .unwrap_or_else(|| PermissionMode::default_for_runtime(stored.runtime_id)),
+                .unwrap_or_else(|| default_permission_mode(stored.runtime_id)),
             native_session_id: stored.native_session_id,
             native_thread_id: stored.native_thread_id,
             native_home: stored.native_home,
@@ -159,6 +200,7 @@ impl SessionManager {
                     fsm: SessionFsm::new(),
                     backend: "none".into(),
                     live: None,
+                    permissions: None,
                     mirror: StreamMirror::default(),
                     prompt_started_at: None,
                     persisted: true,
@@ -207,7 +249,7 @@ impl SessionManager {
                 slot.meta.summary = item.summary.clone();
                 slot.meta.project_path =
                     item.project_path.clone().or(slot.meta.project_path.clone());
-                let (model_id, model_reasoning_effort) = normalize_codex_model_settings(
+                let (model_id, model_reasoning_effort) = normalize_stored_settings(
                     item.runtime_id,
                     item.model_id.clone().or(slot.meta.model_id.clone()),
                     slot.meta.model_reasoning_effort.clone(),
@@ -240,7 +282,7 @@ impl SessionManager {
                     project_path: item.project_path.clone(),
                     model_id: None,
                     model_reasoning_effort: None,
-                    permission_mode: PermissionMode::default_for_runtime(item.runtime_id),
+                    permission_mode: default_permission_mode(item.runtime_id),
                     native_session_id: item.native_session_id.clone(),
                     native_thread_id: item.native_thread_id.clone(),
                     native_home: item.native_home.clone(),
@@ -253,7 +295,7 @@ impl SessionManager {
                     updated_at: item.updated_at.clone(),
                 };
                 let (model_id, model_reasoning_effort) =
-                    normalize_codex_model_settings(item.runtime_id, item.model_id.clone(), None);
+                    normalize_stored_settings(item.runtime_id, item.model_id.clone(), None);
                 let meta = SessionMeta {
                     model_id,
                     model_reasoning_effort,
@@ -266,6 +308,7 @@ impl SessionManager {
                     fsm: SessionFsm::new(),
                     backend: "none".into(),
                     live: None,
+                    permissions: None,
                     mirror: StreamMirror::default(),
                     prompt_started_at: None,
                     persisted: true,
@@ -289,27 +332,12 @@ impl SessionManager {
         runtime_id: RuntimeId,
         project_path: Option<String>,
     ) -> Result<SessionMeta, String> {
-        if !matches!(runtime_id, RuntimeId::Grok | RuntimeId::Codex) {
-            return Err(format!(
-                "{} is not enabled in P0 (use grok or codex)",
-                runtime_id.display_name()
-            ));
-        }
+        let runtime = runtime::get_enabled_runtime(runtime_id)?;
+        let defaults = runtime.default_settings();
 
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        let title = format!("{} · 新会话", runtime_id.display_name());
-        let model_id = match runtime_id {
-            RuntimeId::Grok => Some("grok-4.5".into()),
-            RuntimeId::Codex => Some("default".into()),
-            _ => None,
-        };
-        let model_reasoning_effort = match runtime_id {
-            RuntimeId::Codex => crate::route_diagnostics::codex_route_status()
-                .model_reasoning_effort
-                .or_else(|| Some("high".into())),
-            _ => None,
-        };
+        let title = format!("{} · 新会话", runtime.display_name());
 
         let project_path =
             project_path.or_else(|| default_project_dir().ok().map(|p| p.display().to_string()));
@@ -320,9 +348,11 @@ impl SessionManager {
             summary: None,
             runtime_id,
             project_path,
-            model_id,
-            model_reasoning_effort,
-            permission_mode: PermissionMode::default_for_runtime(runtime_id),
+            model_id: defaults.model_id,
+            model_reasoning_effort: defaults.model_reasoning_effort,
+            permission_mode: defaults
+                .permission_mode
+                .unwrap_or_else(|| default_permission_mode(runtime_id)),
             native_session_id: None,
             native_thread_id: None,
             native_home: None,
@@ -340,6 +370,7 @@ impl SessionManager {
             fsm: SessionFsm::new(),
             backend: "none".into(),
             live: None,
+            permissions: None,
             mirror: StreamMirror::default(),
             prompt_started_at: None,
             persisted: false,
@@ -466,47 +497,25 @@ impl SessionManager {
                 return Err("cannot change session settings while runtime is busy".into());
             }
 
-            let next_model_id = patch
-                .model_id
-                .as_deref()
-                .map(|model_id| normalize_model_id_for_runtime(slot.meta.runtime_id, model_id));
-            let next_model_reasoning_effort =
-                if let Some(model_reasoning_effort) = patch.model_reasoning_effort.as_deref() {
-                    if slot.meta.runtime_id != RuntimeId::Codex {
-                        return Err("model reasoning effort is only supported for Codex".into());
-                    }
-                    Some(
-                        normalize_codex_reasoning_effort(model_reasoning_effort)?
-                            .ok_or_else(|| "model reasoning effort cannot be empty".to_string())?,
-                    )
-                } else {
-                    None
-                };
+            // Validation lives in the adapter: model aliases, reasoning effort and
+            // unsupported permission modes are runtime-specific knowledge.
+            let runtime = runtime::get_enabled_runtime(slot.meta.runtime_id)?;
+            let current = SessionSettings {
+                model_id: slot.meta.model_id.clone(),
+                model_reasoning_effort: slot.meta.model_reasoning_effort.clone(),
+                permission_mode: Some(slot.meta.permission_mode),
+            };
+            let next = runtime.normalize_settings(&current, &patch)?;
 
-            if let Some(model_id) = next_model_id {
-                slot.meta.model_id = Some(model_id.clone());
-                if patch.model_reasoning_effort.is_none()
-                    && slot.meta.runtime_id == RuntimeId::Codex
-                {
-                    slot.meta.model_reasoning_effort = codex_reasoning_effort_from_model(&model_id)
-                        .or_else(|| slot.meta.model_reasoning_effort.clone());
-                }
-            }
-
-            if let Some(model_reasoning_effort) = next_model_reasoning_effort {
-                slot.meta.model_reasoning_effort = Some(model_reasoning_effort);
-            }
-
-            if let Some(permission_mode) = patch.permission_mode {
-                if slot.meta.runtime_id == RuntimeId::Grok
-                    && permission_mode != PermissionMode::Auto
-                {
-                    return Err(
-                        "Grok Ask/Read Only needs permission approval UI before it can be enabled"
-                            .into(),
-                    );
-                }
+            slot.meta.model_id = next.model_id;
+            slot.meta.model_reasoning_effort = next.model_reasoning_effort;
+            if let Some(permission_mode) = next.permission_mode {
                 slot.meta.permission_mode = permission_mode;
+                // A live broker must follow the session's mode, otherwise a
+                // switch to Ask would keep auto-approving until reconnect.
+                if let Some(broker) = &slot.permissions {
+                    broker.set_mode(permission_mode);
+                }
             }
 
             slot.meta.updated_at = Utc::now().to_rfc3339();
@@ -516,6 +525,9 @@ impl SessionManager {
                 }
             }
 
+            if let Some(broker) = slot.permissions.take() {
+                broker.abort_all();
+            }
             slot.live.take()
         };
 
@@ -606,19 +618,20 @@ impl SessionManager {
 
         self.emit_state(app, session_id);
 
-        let runtime = runtime::get_runtime(runtime_id)
-            .ok_or_else(|| format!("runtime {:?} not registered", runtime_id))?;
-        let model_reasoning_effort = model_reasoning_effort.or_else(|| {
-            if runtime_id == RuntimeId::Codex {
-                crate::route_diagnostics::codex_route_status()
-                    .model_reasoning_effort
-                    .or_else(|| Some("high".into()))
-            } else {
-                None
-            }
-        });
+        let runtime = runtime::get_enabled_runtime(runtime_id)?;
+        // Legacy sessions may predate a runtime's defaults; fill the gap from the
+        // adapter rather than special-casing a runtime id here.
+        let model_reasoning_effort =
+            model_reasoning_effort.or_else(|| runtime.default_settings().model_reasoning_effort);
 
         let (tx, mut rx) = mpsc::unbounded_channel::<HostEvent>();
+        let permissions = PermissionBroker::new(session_id, permission_mode, tx.clone());
+        {
+            let mut guard = self.inner.lock();
+            if let Some(slot) = guard.sessions.get_mut(session_id) {
+                slot.permissions = Some(permissions.clone());
+            }
+        }
         let opts = ConnectOpts {
             cwd,
             model_id,
@@ -627,6 +640,7 @@ impl SessionManager {
             cli_path: None,
             native_session_id,
             native_thread_id,
+            permissions,
         };
 
         let app_events = app.clone();
@@ -658,7 +672,7 @@ impl SessionManager {
                         status,
                         title,
                     } => {
-                        mgr_events.record_tool(&sid_events, title, status);
+                        mgr_events.record_tool(&sid_events, id, name, title, status);
                         let _ = app_events.emit(
                             "session://tool",
                             serde_json::json!({
@@ -671,24 +685,44 @@ impl SessionManager {
                         );
                     }
                     HostEvent::PermissionRequest {
-                        rpc_id,
+                        request_id,
                         tool_name,
                         title,
                         preview,
                         auto_allowed,
                     } => {
-                        if mgr_events.mark_awaiting_permission(&sid_events) {
+                        // Auto-allowed requests are surfaced for the transcript but
+                        // must not park the FSM: nobody is going to answer them.
+                        if !auto_allowed && mgr_events.mark_awaiting_permission(&sid_events) {
                             mgr_events.emit_state(&app_events, &sid_events);
                         }
                         let _ = app_events.emit(
                             "session://permission",
                             serde_json::json!({
                                 "sessionId": sid_events,
-                                "rpcId": rpc_id,
+                                "requestId": request_id,
                                 "toolName": tool_name,
                                 "title": title,
                                 "preview": preview,
                                 "autoAllowed": auto_allowed,
+                            }),
+                        );
+                    }
+                    HostEvent::PermissionResolved {
+                        request_id,
+                        decision,
+                        source,
+                    } => {
+                        if mgr_events.mark_permission_resolved(&sid_events) {
+                            mgr_events.emit_state(&app_events, &sid_events);
+                        }
+                        let _ = app_events.emit(
+                            "session://permission_resolved",
+                            serde_json::json!({
+                                "sessionId": sid_events,
+                                "requestId": request_id,
+                                "decision": decision.as_str(),
+                                "source": serde_json::to_value(source).unwrap_or_default(),
                             }),
                         );
                     }
@@ -714,6 +748,9 @@ impl SessionManager {
                         );
                     }
                     HostEvent::ProcessExited { code } => {
+                        // The turn will never complete now, so persist whatever
+                        // the agent had already streamed before the pipe died.
+                        mgr_events.record_prompt_complete(&sid_events, "exited");
                         let _ = app_events.emit(
                             "session://exited",
                             serde_json::json!({
@@ -792,6 +829,40 @@ impl SessionManager {
         Ok(self.snapshot(Some(session_id)))
     }
 
+    /// The turn continues after an approval was answered. Returns true when the
+    /// FSM actually moved, so we only emit a state event on a real change.
+    fn mark_permission_resolved(&self, session_id: &str) -> bool {
+        let mut guard = self.inner.lock();
+        let Some(slot) = guard.sessions.get_mut(session_id) else {
+            return false;
+        };
+        if slot.fsm.state() != SessionState::AwaitingPermission {
+            return false;
+        }
+        slot.fsm.resume_stream().is_ok()
+    }
+
+    /// Answer a pending approval. The broker resolves exactly once, so a late or
+    /// duplicate click is reported as an error rather than silently ignored.
+    pub fn respond_permission(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        decision: PermissionDecision,
+    ) -> Result<(), String> {
+        let broker = {
+            let guard = self.inner.lock();
+            guard
+                .sessions
+                .get(session_id)
+                .ok_or_else(|| "session not found".to_string())?
+                .permissions
+                .clone()
+                .ok_or_else(|| "session has no active permission gate".to_string())?
+        };
+        broker.resolve(request_id, decision)
+    }
+
     fn mark_awaiting_permission(&self, session_id: &str) -> bool {
         let mut guard = self.inner.lock();
         let Some(slot) = guard.sessions.get_mut(session_id) else {
@@ -809,35 +880,58 @@ impl SessionManager {
         true
     }
 
+    /// Mirror an incoming stream chunk and checkpoint it to the journal often
+    /// enough that a crash mid-turn costs the tail rather than the whole answer.
     fn record_stream(&self, session_id: &str, kind: StreamKind, text: &str, done: bool) {
-        let mut guard = self.inner.lock();
-        let Some(slot) = guard.sessions.get_mut(session_id) else {
-            return;
+        let checkpoint = {
+            let mut guard = self.inner.lock();
+            let Some(slot) = guard.sessions.get_mut(session_id) else {
+                return;
+            };
+            let runtime_id = slot.meta.runtime_id;
+            let started_at = slot
+                .prompt_started_at
+                .clone()
+                .unwrap_or_else(|| Utc::now().to_rfc3339());
+            let buffer = match kind {
+                StreamKind::Assistant => &mut slot.mirror.assistant,
+                StreamKind::Thought => &mut slot.mirror.thought,
+            };
+            if !text.is_empty() {
+                buffer.text.push_str(text);
+            }
+            // `done` closes this stream but not the turn — tool calls may still
+            // follow — so checkpoint here and let prompt_complete finalize.
+            if buffer.text.trim().is_empty()
+                || buffer.checkpointed == buffer.text.len()
+                || !(done || buffer.checkpoint_due())
+            {
+                return;
+            }
+            let id = buffer
+                .id
+                .get_or_insert_with(|| Uuid::new_v4().to_string())
+                .clone();
+            buffer.checkpointed = buffer.text.len();
+            StoredChatMessage::checkpoint(
+                id,
+                stream_role(kind),
+                buffer.text.clone(),
+                Some(runtime_id),
+                started_at,
+            )
         };
-        let buffer = match kind {
-            StreamKind::Assistant => &mut slot.mirror.assistant,
-            StreamKind::Thought => &mut slot.mirror.thought,
-        };
-        if !text.is_empty() {
-            buffer.push_str(text);
-        }
-        if done {
-            tracing::debug!(
-                "session {session_id} stream completed; awaiting prompt_complete to persist final {}",
-                match kind {
-                    StreamKind::Assistant => "assistant",
-                    StreamKind::Thought => "thought",
-                }
-            );
-        }
+        self.append_message(session_id, &checkpoint);
     }
 
-    fn record_tool(&self, session_id: &str, title: &str, status: &str) {
+    fn record_tool(&self, session_id: &str, id: &str, name: &str, title: &str, status: &str) {
         let runtime_id = self.runtime_id_for_session(session_id);
-        let message = StoredChatMessage::new("tool", format!("{title} · {status}"), runtime_id);
+        let message = StoredChatMessage::tool(id, name, title, status, runtime_id);
         self.append_message(session_id, &message);
     }
 
+    /// Close the turn: promote both mirrors to final records. They reuse the id
+    /// their checkpoints used, so replay sees one message, not a growing stack.
     fn record_prompt_complete(&self, session_id: &str, _stop_reason: &str) {
         let messages = {
             let mut guard = self.inner.lock();
@@ -849,23 +943,23 @@ impl SessionManager {
                 .clone()
                 .unwrap_or_else(|| Utc::now().to_rfc3339());
             let completed_at = Utc::now().to_rfc3339();
+            let runtime_id = slot.meta.runtime_id;
             let mut messages = Vec::new();
-            if !slot.mirror.thought.trim().is_empty() {
-                messages.push(StoredChatMessage::completed(
-                    "thought",
-                    std::mem::take(&mut slot.mirror.thought),
-                    Some(slot.meta.runtime_id),
+            for (role, buffer) in [
+                ("thought", &mut slot.mirror.thought),
+                ("assistant", &mut slot.mirror.assistant),
+            ] {
+                let (id, text) = buffer.take();
+                if text.trim().is_empty() {
+                    continue;
+                }
+                messages.push(StoredChatMessage::completed_with_id(
+                    id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+                    role,
+                    text,
+                    Some(runtime_id),
                     started_at.clone(),
                     completed_at.clone(),
-                ));
-            }
-            if !slot.mirror.assistant.trim().is_empty() {
-                messages.push(StoredChatMessage::completed(
-                    "assistant",
-                    std::mem::take(&mut slot.mirror.assistant),
-                    Some(slot.meta.runtime_id),
-                    started_at,
-                    completed_at,
                 ));
             }
             slot.prompt_started_at = None;
@@ -909,8 +1003,11 @@ impl SessionManager {
                 .get(session_id)
                 .ok_or_else(|| "session not found".to_string())?;
             let messages = session_store::load_messages(session_id).map_err(|e| e.to_string())?;
+            let imports_from_app_server = runtime::manifest::get(slot.meta.runtime_id)
+                .and_then(|m| m.native_sessions)
+                == Some(NativeSessionSource::CodexAppServer);
             if !messages.is_empty()
-                || slot.meta.runtime_id != RuntimeId::Codex
+                || !imports_from_app_server
                 || slot.meta.native_history_imported_at.is_some()
             {
                 return Ok(messages);
@@ -969,6 +1066,9 @@ impl SessionManager {
             }
             slot.fsm.begin_stream().map_err(|e| e.to_string())?;
             slot.prompt_started_at = Some(Utc::now().to_rfc3339());
+            // A new turn gets fresh journal ids. Anything the previous turn left
+            // behind is already on disk as a `partial` record.
+            slot.mirror = StreamMirror::default();
         }
         let runtime_id = self.runtime_id_for_session(&session_id);
         self.append_message(
@@ -1065,12 +1165,19 @@ impl SessionManager {
     }
 
     pub async fn disconnect(&self, app: &AppHandle, session_id: &str) -> Result<(), String> {
+        // Flush before teardown: text the user already saw must not vanish just
+        // because the turn never reached prompt_complete.
+        self.record_prompt_complete(session_id, "disconnected");
         let live = {
             let mut guard = self.inner.lock();
             let slot = guard
                 .sessions
                 .get_mut(session_id)
                 .ok_or_else(|| "session not found".to_string())?;
+            // Abort first: pending approvals belong to the process we are killing.
+            if let Some(broker) = slot.permissions.take() {
+                broker.abort_all();
+            }
             slot.live.take()
         };
         if let Some(live) = live {
@@ -1097,67 +1204,34 @@ impl Default for SessionManager {
     }
 }
 
-fn normalize_codex_model_settings(
+/// Re-validate settings loaded from disk. Stored data must never fail to load,
+/// so an adapter rejection is logged and the raw values are kept as-is.
+fn normalize_stored_settings(
     runtime_id: RuntimeId,
     model_id: Option<String>,
     model_reasoning_effort: Option<String>,
 ) -> (Option<String>, Option<String>) {
-    let model_id = model_id.map(|value| normalize_model_id_for_runtime(runtime_id, &value));
-    let model_reasoning_effort = match runtime_id {
-        RuntimeId::Codex => model_reasoning_effort
-            .and_then(|value| normalize_codex_reasoning_effort(&value).ok().flatten())
-            .or_else(|| {
-                model_id
-                    .as_deref()
-                    .and_then(codex_reasoning_effort_from_model)
-            }),
-        _ => model_reasoning_effort,
+    let Some(runtime) = runtime::get_runtime(runtime_id) else {
+        return (model_id, model_reasoning_effort);
     };
-    (model_id, model_reasoning_effort)
-}
-
-fn normalize_model_id_for_runtime(runtime_id: RuntimeId, model_id: &str) -> String {
-    let trimmed = model_id.trim();
-    if trimmed.is_empty() {
-        return "default".into();
-    }
-
-    if runtime_id == RuntimeId::Codex {
-        let parts: Vec<&str> = trimmed.split('-').collect();
-        if parts.len() == 3 && parts[0].eq_ignore_ascii_case("gpt") {
-            let suffix = parts[2].to_ascii_lowercase();
-            if matches!(suffix.as_str(), "low" | "medium" | "high") {
-                return format!("{}-{}", parts[0], parts[1]);
-            }
+    let patch = SessionSettingsPatch {
+        model_id: model_id.clone(),
+        model_reasoning_effort: model_reasoning_effort.clone(),
+        permission_mode: None,
+    };
+    match runtime.normalize_settings(&SessionSettings::default(), &patch) {
+        Ok(next) => (next.model_id, next.model_reasoning_effort),
+        Err(err) => {
+            tracing::warn!("stored settings for runtime {runtime_id} are not valid: {err}");
+            (model_id, model_reasoning_effort)
         }
     }
-
-    trimmed.chars().take(120).collect()
 }
 
-fn codex_reasoning_effort_from_model(model: &str) -> Option<String> {
-    let trimmed = model.trim();
-    let parts: Vec<&str> = trimmed.split('-').collect();
-    if parts.len() != 3 || !parts[0].eq_ignore_ascii_case("gpt") {
-        return None;
-    }
-    match parts[2].to_ascii_lowercase().as_str() {
-        "low" | "medium" | "high" => Some(parts[2].to_ascii_lowercase()),
-        _ => None,
-    }
-}
-
-fn normalize_codex_reasoning_effort(value: &str) -> Result<Option<String>, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    match trimmed.to_ascii_lowercase().as_str() {
-        "low" | "medium" | "high" => Ok(Some(trimmed.to_ascii_lowercase())),
-        other => Err(format!(
-            "invalid Codex reasoning effort: {other} (expected low, medium, or high)"
-        )),
-    }
+fn default_permission_mode(runtime_id: RuntimeId) -> PermissionMode {
+    runtime::manifest::get(runtime_id)
+        .map(|m| m.default_permission_mode())
+        .unwrap_or(PermissionMode::Ask)
 }
 
 fn native_matches(meta: &SessionMeta, item: &NativeSessionItem) -> bool {

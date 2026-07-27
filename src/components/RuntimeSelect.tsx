@@ -5,7 +5,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { IconCheck, IconChevronDown } from "./icons";
 import type { RuntimeId } from "../lib/types";
-import { RUNTIME_LABEL } from "../lib/types";
+import { runtimeLabel } from "../lib/runtimes";
 
 export type RuntimeOption = {
   id: RuntimeId;
@@ -111,7 +111,7 @@ export function RuntimeSelect({
                   <span className={`runtime-dot runtime-dot--${o.id}`} />
                   <span className="rt-select__option-text">
                     <span className="rt-select__option-label">
-                      {o.label ?? RUNTIME_LABEL[o.id]}
+                      {o.label ?? runtimeLabel(o.id)}
                     </span>
                     {o.hint ? (
                       <span className="rt-select__option-hint">{o.hint}</span>
@@ -151,7 +151,7 @@ export function RuntimeSelect({
       >
         <span className={`runtime-dot runtime-dot--${selected?.id ?? value}`} />
         <span className="rt-select__value">
-          {selected?.label ?? RUNTIME_LABEL[value]}
+          {selected?.label ?? runtimeLabel(value)}
         </span>
         <span className={"rt-select__chev" + (open ? " is-open" : "")} aria-hidden>
           <IconChevronDown size={14} />

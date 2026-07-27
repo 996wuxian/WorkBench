@@ -12,6 +12,7 @@ mod route_diagnostics;
 mod session_fsm;
 mod session_manager;
 mod session_store;
+mod settings;
 
 pub mod host;
 pub mod runtime;
@@ -57,6 +58,7 @@ pub fn run() {
             commands::session_get_state,
             commands::session_control_options,
             commands::session_update_settings,
+            commands::session_permission_respond,
             commands::session_get_messages,
             commands::session_delete,
             commands::session_open_location,
@@ -65,6 +67,9 @@ pub fn run() {
             commands::session_send,
             commands::session_stop,
             commands::session_disconnect,
+            commands::settings_get,
+            commands::settings_reload,
+            commands::settings_set_runtime_override,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Workbench");

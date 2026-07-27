@@ -1,5 +1,9 @@
-/** P0 runtimes. Claude/Kimi reserved in registry for later. */
-export type RuntimeId = "grok" | "codex" | "claude" | "kimi";
+/**
+ * Runtimes are declared by manifests on the Host, so the set is open-ended —
+ * a new CLI must not require a frontend type change. Use `runtimeLabel()` from
+ * `lib/runtimes` to render one instead of a hardcoded map.
+ */
+export type RuntimeId = string;
 
 export type SessionState =
   | "idle"
@@ -32,6 +36,7 @@ export interface RuntimeCapabilities {
   sessionResume: boolean;
   multiTurn: boolean;
   modelsList: boolean;
+  reasoningEffort: boolean;
   planMode: boolean;
   slashCommands: boolean;
   imagesIn: boolean;
@@ -44,6 +49,10 @@ export interface RuntimeInfo {
   displayName: string;
   enabled: boolean;
   capabilities: RuntimeCapabilities;
+  permissionModes: PermissionMode[];
+  defaultPermissionMode: PermissionMode;
+  /** Why a runtime is unavailable or degraded — shown in Doctor. */
+  notes?: string | null;
 }
 
 export interface ProbeResult {
@@ -142,20 +151,59 @@ export interface ChatMessage {
   runtimeId?: RuntimeId;
   createdAt?: string;
   completedAt?: string | null;
+  /** Runtime-native tool call id; repeated status updates share it. */
+  toolCallId?: string | null;
   toolName?: string | null;
   toolTitle?: string | null;
   toolStatus?: string | null;
+  /**
+   * Restored from a mid-stream checkpoint: the turn never completed, so this is
+   * as much as the Host managed to persist before the process died.
+   */
+  partial?: boolean;
   /** True while assistant stream is still open */
   streaming?: boolean;
   /** True before first assistant content arrives */
   pending?: boolean;
 }
 
-export const P0_RUNTIMES: RuntimeId[] = ["grok", "codex"];
+/** A pending tool approval waiting on the user. */
+export interface PermissionRequestEvent {
+  sessionId: string;
+  requestId: string;
+  toolName: string;
+  title: string;
+  preview: string;
+  /** True when the session mode already answered it — display only. */
+  autoAllowed: boolean;
+}
 
-export const RUNTIME_LABEL: Record<RuntimeId, string> = {
-  grok: "Grok Build",
-  codex: "Codex",
-  claude: "Claude Code",
-  kimi: "Kimi",
-};
+export type PermissionDecision =
+  | "allow_once"
+  | "allow_always"
+  | "deny"
+  | "cancel";
+
+export type PermissionDecisionSource =
+  | "user"
+  | "mode"
+  | "remembered"
+  | "timeout"
+  | "aborted";
+
+export interface PermissionResolvedEvent {
+  sessionId: string;
+  requestId: string;
+  decision: PermissionDecision;
+  source: PermissionDecisionSource;
+}
+
+export interface RuntimeOverride {
+  enabled?: boolean | null;
+  cliPath?: string | null;
+  homeDir?: string | null;
+}
+
+export interface AppSettings {
+  runtimes: Record<string, RuntimeOverride>;
+}

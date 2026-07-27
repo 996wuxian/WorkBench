@@ -68,6 +68,9 @@
   --warning: #f0993d;
   --danger: #f07178;
 
+  /* Fallback for runtimes added by a user manifest — an unknown id must still
+     render a visible dot rather than a transparent gap. */
+  --runtime-default: #8b8b93;
   --runtime-grok: #3ecf8e;
   --runtime-codex: #a78bfa;
   --runtime-claude: #f0993d;

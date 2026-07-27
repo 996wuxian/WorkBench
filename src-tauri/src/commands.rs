@@ -9,7 +9,9 @@ use tauri::{AppHandle, Manager};
 use crate::native_sessions;
 use crate::paths;
 use crate::route_diagnostics::{self, CodexRouteStatus};
-use crate::runtime::{self, ChoiceOption, RuntimeId, SessionSelectionCatalog};
+use crate::host::permissions::PermissionDecision;
+use crate::runtime::{self, RuntimeId, SessionSelectionCatalog};
+use crate::settings::{self, AppSettings, RuntimeOverride};
 use crate::session_manager::{SessionManager, SessionMeta, SessionSettingsPatch, SessionSnapshot};
 use crate::session_store::{self, StoredChatMessage};
 
@@ -167,18 +169,45 @@ pub async fn session_control_options(
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
         });
 
-    match runtime_id {
-        RuntimeId::Codex => runtime::read_codex_selection_catalog(cwd, current_model).await,
-        RuntimeId::Grok => Ok(SessionSelectionCatalog {
-            runtime_id,
-            model_options: grok_model_options(current_model),
-            permission_options: grok_permission_options(),
-        }),
-        _ => Err(format!(
-            "{} is not enabled in P0",
-            runtime_id.display_name()
-        )),
-    }
+    // Which models and modes exist is the adapter's knowledge; the default impl
+    // answers from the manifest, Codex overrides it with a live config read.
+    let runtime = runtime::get_enabled_runtime(runtime_id)?;
+    runtime.selection_catalog(cwd, current_model).await
+}
+
+#[tauri::command]
+pub fn session_permission_respond(
+    mgr: tauri::State<'_, Arc<SessionManager>>,
+    session_id: String,
+    request_id: String,
+    decision: PermissionDecision,
+) -> Result<(), String> {
+    mgr.respond_permission(&session_id, &request_id, decision)
+}
+
+#[tauri::command]
+pub fn settings_get() -> AppSettings {
+    settings::get()
+}
+
+/// Re-read `settings.json` after the user edited it by hand. Runtime manifests
+/// are cached for the process lifetime, so a new `runtimes/*.json` still needs
+/// a restart — only the overrides in this file are picked up live.
+#[tauri::command]
+pub fn settings_reload() -> AppSettings {
+    settings::reload()
+}
+
+/// Point a runtime at a custom binary / home, or switch it off entirely.
+/// `None` fields clear the override rather than leaving a stale value behind.
+#[tauri::command]
+pub fn settings_set_runtime_override(
+    runtime_id: String,
+    patch: RuntimeOverride,
+) -> Result<AppSettings, String> {
+    let id =
+        RuntimeId::parse(&runtime_id).ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
+    settings::set_runtime_override(id.as_str(), patch)
 }
 
 #[tauri::command]
@@ -203,59 +232,6 @@ pub async fn session_sync_native(
         next_cursor: page.next_cursor,
         has_more: page.has_more,
     })
-}
-
-fn grok_model_options(current_model: Option<String>) -> Vec<ChoiceOption> {
-    let mut options: Vec<ChoiceOption> = Vec::new();
-    for value in current_model
-        .into_iter()
-        .chain(["grok-4.5".to_string(), "default".to_string()])
-    {
-        if options.iter().any(|opt| opt.value == value) {
-            continue;
-        }
-        options.push(ChoiceOption {
-            value: value.clone(),
-            label: value,
-            hint: Some("Grok ACP".into()),
-            suffix: None,
-            disabled: false,
-        });
-    }
-    options
-}
-
-fn grok_permission_options() -> Vec<ChoiceOption> {
-    vec![
-        ChoiceOption {
-            value: "auto".into(),
-            label: "Auto".into(),
-            hint: Some("auto_allow_permissions=true".into()),
-            suffix: None,
-            disabled: false,
-        },
-        ChoiceOption {
-            value: "ask".into(),
-            label: "Ask".into(),
-            hint: Some("需要权限审批 UI".into()),
-            suffix: None,
-            disabled: true,
-        },
-        ChoiceOption {
-            value: "read_only".into(),
-            label: "Read Only".into(),
-            hint: Some("Grok ACP 暂不支持".into()),
-            suffix: None,
-            disabled: true,
-        },
-        ChoiceOption {
-            value: "full_access".into(),
-            label: "Full Access".into(),
-            hint: Some("Grok ACP 暂不支持".into()),
-            suffix: None,
-            disabled: true,
-        },
-    ]
 }
 
 fn open_in_file_manager(path: &Path) -> Result<(), String> {
