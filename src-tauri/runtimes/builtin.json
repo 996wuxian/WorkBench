@@ -1,29 +1,58 @@
 [
   {
-    "id": "grok",
-    "displayName": "Grok Build",
-    "protocol": "acp",
+    "id": "claude",
+    "displayName": "Claude Code",
+    "protocol": "claude_code",
     "enabled": true,
-    "command": "grok",
-    "preStdioArgs": ["--no-auto-update", "agent"],
-    "stdioArgs": ["stdio"],
-    "modelArg": "--model",
-    "versionArgs": ["--version"],
+    "command": "claude",
+    "preStdioArgs": [],
+    "stdioArgs": [],
+    "versionArgs": [
+      "--version"
+    ],
     "probePaths": [
-      "D:\\tools\\grok\\bin\\grok.exe",
-      "%USERPROFILE%\\.grok\\bin\\grok.exe",
-      "~/.grok/bin/grok"
+      "D:\\Nvm\\node\\node_global\\claude.cmd",
+      "D:\\Nvm\\node\\node_global\\claude.ps1",
+      "%APPDATA%\\npm\\claude.cmd",
+      "%APPDATA%\\npm\\claude.ps1",
+      "~/.local/bin/claude"
     ],
-    "homeEnv": "GROK_HOME",
-    "homeCandidates": ["~/.grok", "D:\\tools\\grok"],
-    "homeMarkers": ["auth.json", "config.toml"],
+    "homeCandidates": [
+      "~/.claude"
+    ],
+    "homeMarkers": [
+      ".credentials.json",
+      "settings.json"
+    ],
     "defaultPermissionMode": "ask",
-    "permissionModes": ["ask", "auto"],
-    "models": [
-      { "value": "grok-4.5", "label": "grok-4.5", "hint": "Grok ACP" },
-      { "value": "default", "label": "default", "hint": "CLI 默认模型" }
+    "permissionModes": [
+      "ask",
+      "auto",
+      "read_only",
+      "full_access"
     ],
-    "nativeSessions": "acp_summary_files",
+    "models": [
+      {
+        "value": "default",
+        "label": "default",
+        "hint": "Claude Code 当前默认模型"
+      },
+      {
+        "value": "sonnet",
+        "label": "sonnet",
+        "hint": "Claude Code alias"
+      },
+      {
+        "value": "opus",
+        "label": "opus",
+        "hint": "Claude Code alias"
+      },
+      {
+        "value": "haiku",
+        "label": "haiku",
+        "hint": "Claude Code alias"
+      }
+    ],
     "capabilities": {
       "streaming": true,
       "thoughts": true,
@@ -36,8 +65,9 @@
       "slashCommands": false,
       "imagesIn": false,
       "imagesOut": false,
-      "protocol": "acp"
-    }
+      "protocol": "claude_code"
+    },
+    "notes": "使用本机 Claude Code CLI 的 headless stream-json 模式；cc-switch 当前选择会随本机 claude 环境生效。"
   },
   {
     "id": "codex",
@@ -45,9 +75,15 @@
     "protocol": "codex_app_server",
     "enabled": true,
     "command": "codex",
-    "preStdioArgs": ["app-server"],
-    "stdioArgs": ["--stdio"],
-    "versionArgs": ["--version"],
+    "preStdioArgs": [
+      "app-server"
+    ],
+    "stdioArgs": [
+      "--stdio"
+    ],
+    "versionArgs": [
+      "--version"
+    ],
     "probePaths": [
       "D:\\codex\\codex.exe",
       "%USERPROFILE%\\.codex\\bin\\codex.exe",
@@ -55,10 +91,20 @@
       "~/.codex/bin/codex"
     ],
     "homeEnv": "CODEX_HOME",
-    "homeCandidates": ["~/.codex"],
-    "homeMarkers": ["auth.json", "config.toml"],
+    "homeCandidates": [
+      "~/.codex"
+    ],
+    "homeMarkers": [
+      "auth.json",
+      "config.toml"
+    ],
     "defaultPermissionMode": "ask",
-    "permissionModes": ["ask", "auto", "read_only", "full_access"],
+    "permissionModes": [
+      "ask",
+      "auto",
+      "read_only",
+      "full_access"
+    ],
     "models": [],
     "nativeSessions": "codex_app_server",
     "capabilities": {
@@ -84,17 +130,26 @@
     "enabled": true,
     "command": "kimi",
     "preStdioArgs": [],
-    "stdioArgs": ["acp"],
+    "stdioArgs": [
+      "acp"
+    ],
     "modelArg": "--model",
-    "versionArgs": ["--version"],
+    "versionArgs": [
+      "--version"
+    ],
     "probePaths": [
       "%USERPROFILE%\\.kimi\\bin\\kimi.exe",
       "~/.kimi/bin/kimi"
     ],
     "homeEnv": "KIMI_HOME",
-    "homeCandidates": ["~/.kimi"],
+    "homeCandidates": [
+      "~/.kimi"
+    ],
     "defaultPermissionMode": "ask",
-    "permissionModes": ["ask", "auto"],
+    "permissionModes": [
+      "ask",
+      "auto"
+    ],
     "models": [],
     "capabilities": {
       "streaming": true,
@@ -113,66 +168,54 @@
     "notes": "未在本机验证过握手；缺失时 Doctor 会显示 missing。"
   },
   {
-    "id": "gemini",
-    "displayName": "Gemini CLI",
+    "id": "grok",
+    "displayName": "Grok Build",
     "protocol": "acp",
     "enabled": true,
-    "command": "gemini",
-    "preStdioArgs": [],
-    "stdioArgs": ["--experimental-acp"],
+    "command": "grok",
+    "preStdioArgs": [
+      "--no-auto-update",
+      "agent"
+    ],
+    "stdioArgs": [
+      "stdio"
+    ],
     "modelArg": "--model",
-    "versionArgs": ["--version"],
-    "probePaths": [
-      "%APPDATA%\\npm\\gemini.cmd",
-      "~/.local/bin/gemini"
+    "versionArgs": [
+      "--version"
     ],
-    "homeEnv": null,
-    "homeCandidates": ["~/.gemini"],
-    "defaultPermissionMode": "ask",
-    "permissionModes": ["ask", "auto"],
-    "models": [],
-    "capabilities": {
-      "streaming": true,
-      "thoughts": true,
-      "tools": true,
-      "permissionGate": true,
-      "sessionResume": false,
-      "multiTurn": true,
-      "modelsList": false,
-      "planMode": false,
-      "slashCommands": false,
-      "imagesIn": false,
-      "imagesOut": false,
-      "protocol": "acp"
-    },
-    "notes": "ACP 支持标记为 experimental；未在本机验证过握手。"
-  },
-  {
-    "id": "claude",
-    "displayName": "Claude Code",
-    "protocol": "claude_code",
-    "enabled": true,
-    "command": "claude",
-    "preStdioArgs": [],
-    "stdioArgs": [],
-    "versionArgs": ["--version"],
     "probePaths": [
-      "D:\\Nvm\\node\\node_global\\claude.cmd",
-      "D:\\Nvm\\node\\node_global\\claude.ps1",
-      "%APPDATA%\\npm\\claude.cmd",
-      "%APPDATA%\\npm\\claude.ps1",
-      "~/.local/bin/claude"
+      "D:\\tools\\grok\\bin\\grok.exe",
+      "%USERPROFILE%\\.grok\\bin\\grok.exe",
+      "~/.grok/bin/grok"
     ],
-    "homeCandidates": ["~/.claude"],
-    "homeMarkers": [".credentials.json", "settings.json"],
+    "homeEnv": "GROK_HOME",
+    "homeCandidates": [
+      "~/.grok",
+      "D:\\tools\\grok"
+    ],
+    "homeMarkers": [
+      "auth.json",
+      "config.toml"
+    ],
     "defaultPermissionMode": "ask",
-    "permissionModes": ["ask", "auto", "read_only", "full_access"],
+    "permissionModes": [
+      "ask",
+      "auto"
+    ],
     "models": [
-      { "value": "default", "label": "default", "hint": "Claude Code 当前默认模型" },
-      { "value": "sonnet", "label": "sonnet", "hint": "Claude Code alias" },
-      { "value": "opus", "label": "opus", "hint": "Claude Code alias" },
-      { "value": "haiku", "label": "haiku", "hint": "Claude Code alias" }
+      {
+        "value": "grok-4.5",
+        "label": "grok-4.5",
+        "hint": "Grok ACP"
+      },
+      {
+        "value": "default",
+        "label": "default",
+        "hint": "CLI 默认模型"
+      }
     ],
+    "nativeSessions": "acp_summary_files",
     "capabilities": {
       "streaming": true,
       "thoughts": true,
@@ -185,8 +228,7 @@
       "slashCommands": false,
       "imagesIn": false,
       "imagesOut": false,
-      "protocol": "claude_code"
-    },
-    "notes": "使用本机 Claude Code CLI 的 headless stream-json 模式；cc-switch 当前选择会随本机 claude 环境生效。"
+      "protocol": "acp"
+    }
   }
 ]

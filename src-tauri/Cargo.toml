@@ -3,6 +3,7 @@ name = "workbench"
 version = "0.1.0"
 description = "Workbench — multi-agent desktop host for Grok Build + Codex"
 authors = ["Alxian"]
+license = "MIT"
 edition = "2021"
 
 [lib]

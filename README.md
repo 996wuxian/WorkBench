@@ -8,11 +8,10 @@
 
 | Runtime | 接入方式 | 状态 | 说明 |
 |---|---|---|---|
-| Grok Build | ACP: `grok agent stdio` | 已启用 | 支持流式消息、工具事件、Host 权限门 |
-| Codex | `codex app-server --stdio` | 已启用 | 支持模型/推理档位、会话恢复、权限审批 |
 | Claude Code | `claude -p --output-format stream-json` | 已启用 | 支持 cc-switch/本机 Claude 配置、会话恢复、MCP 权限审批桥 |
+| Codex | `codex app-server --stdio` | 已启用 | 支持模型/推理档位、会话恢复、权限审批 |
 | Kimi Code | ACP | 已启用 | 依赖本机 CLI 与 ACP 可用性 |
-| Gemini CLI | experimental ACP | 已启用 | 依赖本机 CLI 与 experimental ACP |
+| Grok Build | ACP: `grok agent stdio` | 已启用 | 支持流式消息、工具事件、Host 权限门 |
 
 Workbench 的重点是统一桌面体验：
 
@@ -138,11 +137,11 @@ cargo test runtime::claude::tests
 
 1. 确认 `README.md`、`src-tauri/tauri.conf.json`、`package.json`、`src-tauri/Cargo.toml` 版本一致。
 2. 执行 `pnpm tauri build` 生成安装包。
-3. 安装构建产物，验证 Grok/Codex/Claude 至少各一条消息。
+3. 安装构建产物，验证 Claude/Codex/Kimi/Grok 至少各一条消息。
 4. 对 Claude 验证 `ask`、`auto`、`full_access` 权限模式。
 5. 执行密钥扫描，确认无 `.env`、token、API key、日志或用户 home 数据进入提交。
 6. 创建 Git tag，推送并在 GitHub Release 上传安装包。
 
 ## License
 
-Private / local project.
+MIT. See `LICENSE`.

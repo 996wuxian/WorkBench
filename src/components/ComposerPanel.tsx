@@ -1,4 +1,4 @@
-import { type RefObject } from "react";
+import { type MouseEvent, type RefObject } from "react";
 
 import { ChoiceSelect, type ChoiceOption } from "./ChoiceSelect";
 import {
@@ -98,6 +98,27 @@ export function ComposerPanel({
   onReasoningEffortChange,
   onPermissionChange,
 }: Props) {
+  const pasteClipboardAtCursor = async (event: MouseEvent<HTMLTextAreaElement>) => {
+    event.preventDefault();
+    const readText = navigator.clipboard?.readText;
+    if (!readText) return;
+
+    const text = await readText.call(navigator.clipboard).catch(() => "");
+    if (!text) return;
+
+    const input = event.currentTarget;
+    const start = input.selectionStart ?? draft.length;
+    const end = input.selectionEnd ?? start;
+    const next = `${draft.slice(0, start)}${text}${draft.slice(end)}`;
+    onDraftChange(next);
+
+    requestAnimationFrame(() => {
+      input.focus();
+      const caret = start + text.length;
+      input.setSelectionRange(caret, caret);
+    });
+  };
+
   return (
     <div className="composer">
       <div className="composer__shell">
@@ -165,6 +186,7 @@ export function ComposerPanel({
           placeholder={`Message ${runtimeLabel(runtimeId)}…`}
           value={draft}
           onChange={(e) => onDraftChange(e.target.value)}
+          onContextMenu={pasteClipboardAtCursor}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();

@@ -43,8 +43,8 @@ pub struct AcpSpawnOpts {
     /// Args before the model flag, e.g. `["--no-auto-update", "agent"]`.
     pub pre_stdio_args: Vec<String>,
     /// Args that select the stdio transport, appended last. `["stdio"]` for
-    /// Grok, `["acp"]` for Kimi, `["--experimental-acp"]` for Gemini, `[]` for
-    /// a binary that speaks ACP with no subcommand.
+    /// Grok, `["acp"]` for Kimi, `[]` for a binary that speaks ACP with no
+    /// subcommand.
     pub stdio_args: Vec<String>,
     /// Flag used to pin a model; `None` means never pass one.
     pub model_arg: Option<String>,

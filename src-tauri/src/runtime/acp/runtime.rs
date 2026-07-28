@@ -1,8 +1,8 @@
 //! Generic ACP runtime adapter.
 //!
 //! Every field this needs comes from a [`RuntimeManifest`], so a new
-//! ACP-speaking CLI is a JSON file — not a Rust module. Grok, Kimi, Gemini and
-//! the `claude-code-acp` bridge all run through this one type.
+//! ACP-speaking CLI is a JSON file — not a Rust module. Grok, Kimi and future
+//! ACP bridges all run through this one type.
 
 use std::path::PathBuf;
 use std::process::Stdio;

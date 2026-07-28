@@ -23,22 +23,6 @@ export function mockRuntimes(): RuntimeInfo[] {
   };
   return [
     {
-      id: "grok",
-      displayName: "Grok Build",
-      enabled: true,
-      capabilities,
-      permissionModes: ["ask", "auto"],
-      defaultPermissionMode: "ask",
-    },
-    {
-      id: "codex",
-      displayName: "Codex",
-      enabled: true,
-      capabilities,
-      permissionModes: ["ask", "auto", "read_only", "full_access"],
-      defaultPermissionMode: "ask",
-    },
-    {
       id: "claude",
       displayName: "Claude Code",
       enabled: true,
@@ -51,6 +35,31 @@ export function mockRuntimes(): RuntimeInfo[] {
       permissionModes: ["ask", "auto", "read_only", "full_access"],
       defaultPermissionMode: "ask",
       notes: "使用本机 Claude Code CLI 的 headless stream-json 模式。",
+    },
+    {
+      id: "codex",
+      displayName: "Codex",
+      enabled: true,
+      capabilities,
+      permissionModes: ["ask", "auto", "read_only", "full_access"],
+      defaultPermissionMode: "ask",
+    },
+    {
+      id: "kimi",
+      displayName: "Kimi Code",
+      enabled: true,
+      capabilities,
+      permissionModes: ["ask", "auto"],
+      defaultPermissionMode: "ask",
+      notes: "未在浏览器 mock 中连接真实 CLI。",
+    },
+    {
+      id: "grok",
+      displayName: "Grok Build",
+      enabled: true,
+      capabilities,
+      permissionModes: ["ask", "auto"],
+      defaultPermissionMode: "ask",
     },
   ];
 }

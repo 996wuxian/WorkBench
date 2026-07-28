@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "Multi-agent desktop workbench for Grok Build + Codex CLI",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
