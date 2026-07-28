@@ -3,16 +3,92 @@
  *
  * Deliberately hand-rolled and deliberately small: agent output is rendered as
  * it streams, so the parser runs on every frame of a long answer. It covers
- * fenced code, headings, quotes, lists and paragraphs — everything else falls
- * through as plain text rather than pulling in a full CommonMark implementation.
+ * fenced code, headings, quotes, tables, lists and paragraphs — everything else
+ * falls through as plain text rather than pulling in a full CommonMark
+ * implementation.
  */
 
 export type MarkdownBlock =
   | { type: "code"; language: string; text: string }
   | { type: "heading"; depth: number; text: string }
   | { type: "quote"; text: string }
+  | {
+      type: "table";
+      headers: string[];
+      rows: string[][];
+      alignments: TableAlignment[];
+    }
   | { type: "list"; ordered: boolean; items: string[] }
   | { type: "paragraph"; text: string };
+
+export type TableAlignment = "left" | "center" | "right" | null;
+
+function splitTableRow(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  const cells: string[] = [];
+  let cell = "";
+  let escaped = false;
+  for (const char of trimmed) {
+    if (escaped) {
+      cell += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "|") {
+      cells.push(cell.trim());
+      cell = "";
+      continue;
+    }
+    cell += char;
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+function parseTableSeparator(line: string): TableAlignment[] | null {
+  if (!line.includes("|")) return null;
+  const cells = splitTableRow(line);
+  if (cells.length === 0) return null;
+  const alignments: TableAlignment[] = [];
+  for (const cell of cells) {
+    const marker = cell.replace(/\s/g, "");
+    if (!/^:?-{3,}:?$/.test(marker)) return null;
+    const left = marker.startsWith(":");
+    const right = marker.endsWith(":");
+    alignments.push(left && right ? "center" : right ? "right" : left ? "left" : null);
+  }
+  return alignments;
+}
+
+function tableBlockAt(
+  lines: string[],
+  index: number,
+): { block: MarkdownBlock; nextIndex: number } | null {
+  if (index + 1 >= lines.length || !lines[index].includes("|")) return null;
+  const alignments = parseTableSeparator(lines[index + 1]);
+  if (!alignments) return null;
+
+  const headers = splitTableRow(lines[index]);
+  if (headers.length < 2 || headers.length !== alignments.length) return null;
+
+  const rows: string[][] = [];
+  let nextIndex = index + 2;
+  while (nextIndex < lines.length && lines[nextIndex].trim().includes("|")) {
+    const row = splitTableRow(lines[nextIndex]);
+    if (row.length === 0) break;
+    rows.push(headers.map((_, cellIndex) => row[cellIndex] ?? ""));
+    nextIndex += 1;
+  }
+
+  return {
+    block: { type: "table", headers, rows, alignments },
+    nextIndex,
+  };
+}
 
 export function parseMarkdownBlocks(source: string): MarkdownBlock[] {
   const lines = source.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
@@ -64,6 +140,13 @@ export function parseMarkdownBlocks(source: string): MarkdownBlock[] {
       continue;
     }
 
+    const table = tableBlockAt(lines, index);
+    if (table) {
+      blocks.push(table.block);
+      index = table.nextIndex;
+      continue;
+    }
+
     const listMatch = line.match(/^(\s*)([-*+]|\d+\.)\s+(.+)$/);
     if (listMatch) {
       const ordered = /\d+\./.test(listMatch[2]);
@@ -85,6 +168,7 @@ export function parseMarkdownBlocks(source: string): MarkdownBlock[] {
       !lines[index].match(/^```/) &&
       !lines[index].match(/^(#{1,3})\s+(.+)$/) &&
       !lines[index].match(/^>\s?/) &&
+      !tableBlockAt(lines, index) &&
       !lines[index].match(/^(\s*)([-*+]|\d+\.)\s+(.+)$/)
     ) {
       paragraph.push(lines[index]);

@@ -6,6 +6,7 @@
 
 import type { ComponentType } from "react";
 import {
+  IconAlertTriangle as TbAlertTriangle,
   IconCheck as TbCheck,
   IconChevronDown as TbChevronDown,
   IconChevronRight as TbChevronRight,
@@ -27,6 +28,10 @@ import {
   IconSearch as TbSearch,
   IconSend as TbSend,
   IconSettings as TbSettings,
+  IconShieldBolt as TbShieldBolt,
+  IconShieldCheck as TbShieldCheck,
+  IconShieldExclamation as TbShieldExclamation,
+  IconShieldQuestion as TbShieldQuestion,
   IconQuote as TbQuote,
   IconSquare as TbSquare,
   IconSun as TbSun,
@@ -150,3 +155,8 @@ export const IconRobot = wrap(TbRobot);
 export const IconPlug = wrap(TbPlug);
 export const IconThemeSun = wrap(TbSun);
 export const IconThemeMoon = wrap(TbMoon);
+export const IconRiskAsk = wrap(TbShieldQuestion);
+export const IconRiskAuto = wrap(TbShieldBolt);
+export const IconRiskReadOnly = wrap(TbShieldCheck);
+export const IconRiskFullAccess = wrap(TbShieldExclamation);
+export const IconRiskUnknown = wrap(TbAlertTriangle);

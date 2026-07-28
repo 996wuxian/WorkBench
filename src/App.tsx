@@ -124,7 +124,8 @@ export default function App() {
     left: number;
     top: number;
   } | null>(null);
-  const [deleteSessionId, setDeleteSessionId] = useState<string | null>(null);
+  const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([]);
+  const [deleteSessionIds, setDeleteSessionIds] = useState<string[]>([]);
   const [deleteSessionBusy, setDeleteSessionBusy] = useState(false);
   const [deleteSessionError, setDeleteSessionError] = useState<string | null>(null);
   const [syncingRuntime, setSyncingRuntime] = useState<RuntimeId | null>(null);
@@ -275,6 +276,7 @@ export default function App() {
   const messageScrollRef = useRef<HTMLDivElement | null>(null);
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const sessionSelectionAnchorRef = useRef<string | null>(null);
   const stickToBottomRef = useRef(true);
   const pendingHistoryRestoreRef = useRef<{
     scrollHeight: number;
@@ -704,7 +706,28 @@ export default function App() {
     [messagesBySession, resetChatViewport, sessions],
   );
 
-  async function selectSession(id: string) {
+  function selectSession(
+    id: string,
+    options?: { shiftKey: boolean; visibleSessionIds: string[] },
+  ) {
+    const visibleIds = options?.visibleSessionIds ?? [];
+    if (options?.shiftKey && visibleIds.length > 0) {
+      const anchorId = sessionSelectionAnchorRef.current ?? activeId ?? id;
+      const anchorIndex = visibleIds.indexOf(anchorId);
+      const targetIndex = visibleIds.indexOf(id);
+      if (anchorIndex >= 0 && targetIndex >= 0) {
+        const [from, to] =
+          anchorIndex <= targetIndex
+            ? [anchorIndex, targetIndex]
+            : [targetIndex, anchorIndex];
+        setSelectedSessionIds(visibleIds.slice(from, to + 1));
+      } else {
+        setSelectedSessionIds([id]);
+      }
+    } else {
+      sessionSelectionAnchorRef.current = id;
+      setSelectedSessionIds([]);
+    }
     void activateSession(id);
   }
 
@@ -722,30 +745,43 @@ export default function App() {
     }
   }, []);
 
-  const requestDeleteSession = useCallback((sessionId: string) => {
+  const requestDeleteSessions = useCallback((sessionIds: string[]) => {
+    const uniqueIds = Array.from(new Set(sessionIds.filter(Boolean)));
+    if (uniqueIds.length === 0) return;
     setSessionContextMenu(null);
     setDeleteSessionError(null);
-    setDeleteSessionId(sessionId);
+    setDeleteSessionIds(uniqueIds);
   }, []);
 
   const confirmDeleteSession = useCallback(async () => {
-    if (!deleteSessionId || deleteSessionBusy) return;
+    if (deleteSessionIds.length === 0 || deleteSessionBusy) return;
     if (!isTauri()) {
       setStatusLine("UI preview · delete unavailable");
-      setDeleteSessionId(null);
+      setDeleteSessionIds([]);
       return;
     }
-    const sessionId = deleteSessionId;
-    const target = sessions.find((s) => s.id === sessionId) ?? pendingSession;
-    const removedMessages = messagesBySession[sessionId] ?? [];
-    setDeleteSessionBusy(true);
-    setDeleteSessionError(null);
-    try {
-      const result = await deleteSessionById(sessionId);
-      setDeleteSessionId(null);
+    const sessionIds = deleteSessionIds;
+    const targets = sessionIds
+      .map(
+        (sessionId) =>
+          sessions.find((s) => s.id === sessionId) ??
+          (pendingSession?.id === sessionId ? pendingSession : null),
+      )
+      .filter((session): session is SessionMeta => Boolean(session));
+    const applyDeletedSessions = async (removedSessionIds: string[]) => {
+      const removedSessionIdSet = new Set(removedSessionIds);
+      const removedMessages = removedSessionIds.flatMap(
+        (sessionId) => messagesBySession[sessionId] ?? [],
+      );
+
+      setSelectedSessionIds((prev) =>
+        prev.filter((id) => !removedSessionIdSet.has(id)),
+      );
       setMessagesBySession((prev) => {
         const next = { ...prev };
-        delete next[sessionId];
+        for (const sessionId of removedSessionIds) {
+          delete next[sessionId];
+        }
         return next;
       });
       setAssistantTypingUntil((prev) => {
@@ -755,22 +791,16 @@ export default function App() {
         }
         return next;
       });
-      setPendingSession((prev) => (prev?.id === sessionId ? null : prev));
-      const nextSessions = sessions.filter((item) => item.id !== sessionId);
+      setPendingSession((prev) =>
+        prev && removedSessionIdSet.has(prev.id) ? null : prev,
+      );
+      const nextSessions = sessions.filter(
+        (item) => !removedSessionIdSet.has(item.id),
+      );
       setSessions(nextSessions);
 
-      if (result.activeSessionId) {
-        const nextMeta =
-          nextSessions.find((item) => item.id === result.activeSessionId) ??
-          nextSessions[0] ??
-          null;
-        if (nextMeta) {
-          await activateSession(nextMeta.id, nextMeta);
-        } else {
-          setActiveId(null);
-          setSnapshot(idleSnapshot());
-        }
-      } else if (activeId === sessionId) {
+      if (activeId && removedSessionIdSet.has(activeId)) {
+        setQuoteTarget(null);
         if (nextSessions.length > 0) {
           const nextMeta = nextSessions[0];
           await activateSession(nextMeta.id, nextMeta);
@@ -779,15 +809,40 @@ export default function App() {
           setSnapshot(idleSnapshot());
         }
       }
+    };
+
+    setDeleteSessionBusy(true);
+    setDeleteSessionError(null);
+    const successfulSessionIds: string[] = [];
+    try {
+      const results = [];
+      for (const sessionId of sessionIds) {
+        results.push(await deleteSessionById(sessionId));
+        successfulSessionIds.push(sessionId);
+      }
+      setDeleteSessionIds([]);
+      await applyDeletedSessions(sessionIds);
 
       setStatusLine(
-        `deleted session${target ? ` · ${target.title}` : ""} · ${result.deletedPath}`,
+        sessionIds.length === 1
+          ? `deleted session${targets[0] ? ` · ${targets[0].title}` : ""} · ${results[0]?.deletedPath ?? sessionIds[0]}`
+          : `deleted ${sessionIds.length} sessions`,
       );
-      setQuoteTarget((prev) => (prev?.messageId === sessionId ? null : prev));
     } catch (e) {
+      if (successfulSessionIds.length > 0) {
+        const successfulSessionIdSet = new Set(successfulSessionIds);
+        await applyDeletedSessions(successfulSessionIds);
+        setDeleteSessionIds((prev) =>
+          prev.filter((sessionId) => !successfulSessionIdSet.has(sessionId)),
+        );
+      }
       const message = `delete failed: ${String(e)}`;
       setDeleteSessionError(message);
-      setStatusLine(message);
+      setStatusLine(
+        successfulSessionIds.length > 0
+          ? `deleted ${successfulSessionIds.length} sessions · ${message}`
+          : message,
+      );
     } finally {
       setDeleteSessionBusy(false);
     }
@@ -795,7 +850,7 @@ export default function App() {
     activateSession,
     activeId,
     deleteSessionBusy,
-    deleteSessionId,
+    deleteSessionIds,
     messagesBySession,
     pendingSession,
     sessions,
@@ -808,6 +863,21 @@ export default function App() {
       (pendingSession?.id === sessionContextMenu.sessionId ? pendingSession : null)
     );
   }, [pendingSession, sessionContextMenu, sessions]);
+  const sessionContextTargetIds = useMemo(() => {
+    if (!sessionContextMenu) return [];
+    return selectedSessionIds.includes(sessionContextMenu.sessionId)
+      ? selectedSessionIds
+      : [sessionContextMenu.sessionId];
+  }, [selectedSessionIds, sessionContextMenu]);
+  const sessionContextTargetTitle =
+    sessionContextTargetIds.length > 1
+      ? `已选择 ${sessionContextTargetIds.length} 个会话`
+      : (sessionContextTarget?.title ?? "会话");
+
+  useEffect(() => {
+    sessionSelectionAnchorRef.current = null;
+    setSelectedSessionIds([]);
+  }, [runtimePick, sessionFilter]);
 
   const sessionPathFor = useCallback(
     (sessionId: string) =>
@@ -815,13 +885,20 @@ export default function App() {
     [appDataDir],
   );
 
-  const deleteTargetSession = useMemo(() => {
-    if (!deleteSessionId) return null;
-    return (
-      sessions.find((session) => session.id === deleteSessionId) ??
-      (pendingSession?.id === deleteSessionId ? pendingSession : null)
-    );
-  }, [deleteSessionId, pendingSession, sessions]);
+  const deleteTargetSessions = useMemo(
+    () =>
+      deleteSessionIds
+        .map(
+          (sessionId) =>
+            sessions.find((session) => session.id === sessionId) ??
+            (pendingSession?.id === sessionId ? pendingSession : null),
+        )
+        .filter((session): session is SessionMeta => Boolean(session)),
+    [deleteSessionIds, pendingSession, sessions],
+  );
+  const deleteTargetPath = deleteSessionIds
+    .map((sessionId) => sessionPathFor(sessionId))
+    .join("\n");
 
   useEffect(() => {
     if (!sessionContextMenu) return;
@@ -1300,7 +1377,8 @@ export default function App() {
             if (showSearch) setSessionFilter("");
           }}
           onSessionFilterChange={setSessionFilter}
-          onSelectSession={(id) => void selectSession(id)}
+          selectedSessionIds={selectedSessionIds}
+          onSelectSession={(id, options) => selectSession(id, options)}
           onSessionContextMenu={(sessionId, left, top) =>
             setSessionContextMenu({ sessionId, left, top })
           }
@@ -1477,20 +1555,22 @@ export default function App() {
         routeDiagnosticsPanel={routeDiagnosticsPanel}
         onCloseSettings={() => setSettingsOpen(false)}
         sessionContextMenu={sessionContextMenu}
-        sessionContextTargetTitle={sessionContextTarget?.title ?? "会话"}
+        sessionContextTargetTitle={sessionContextTargetTitle}
+        sessionContextTargetCount={sessionContextTargetIds.length}
+        sessionContextTargetIds={sessionContextTargetIds}
         sessionContextMenuRef={sessionContextMenuRef}
         onOpenSelectedSessionLocation={(sessionId) =>
           void openSelectedSessionLocation(sessionId)
         }
-        onRequestDeleteSession={(sessionId) => requestDeleteSession(sessionId)}
-        deleteSessionId={deleteSessionId}
-        deleteTargetSession={deleteTargetSession}
-        deleteTargetPath={deleteSessionId ? sessionPathFor(deleteSessionId) : ""}
+        onRequestDeleteSessions={(sessionIds) => requestDeleteSessions(sessionIds)}
+        deleteSessionIds={deleteSessionIds}
+        deleteTargetSessions={deleteTargetSessions}
+        deleteTargetPath={deleteTargetPath}
         deleteSessionBusy={deleteSessionBusy}
         deleteSessionError={deleteSessionError}
         onCloseDelete={() => {
           setDeleteSessionError(null);
-          setDeleteSessionId(null);
+          setDeleteSessionIds([]);
         }}
         onConfirmDelete={() => void confirmDeleteSession()}
       />

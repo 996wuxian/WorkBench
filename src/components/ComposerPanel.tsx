@@ -1,7 +1,17 @@
 import { type RefObject } from "react";
 
 import { ChoiceSelect, type ChoiceOption } from "./ChoiceSelect";
-import { IconClose, IconQuote, IconSend, IconStop } from "./icons";
+import {
+  IconClose,
+  IconQuote,
+  IconRiskAsk,
+  IconRiskAuto,
+  IconRiskFullAccess,
+  IconRiskReadOnly,
+  IconRiskUnknown,
+  IconSend,
+  IconStop,
+} from "./icons";
 import { compactLabel } from "../lib/format";
 import { runtimeLabel } from "../lib/runtimes";
 import type { PermissionMode, RuntimeId } from "../lib/types";
@@ -31,6 +41,38 @@ type Props = {
   onReasoningEffortChange: (value: string) => void;
   onPermissionChange: (value: string) => void;
 };
+
+function permissionRiskIcon(option: ChoiceOption) {
+  const value = option.value as PermissionMode;
+  switch (value) {
+    case "read_only":
+      return <IconRiskReadOnly className="permission-risk-icon" />;
+    case "ask":
+      return <IconRiskAsk className="permission-risk-icon" />;
+    case "auto":
+      return <IconRiskAuto className="permission-risk-icon" />;
+    case "full_access":
+      return <IconRiskFullAccess className="permission-risk-icon" />;
+    default:
+      return <IconRiskUnknown className="permission-risk-icon" />;
+  }
+}
+
+function permissionRiskClassName(option: ChoiceOption) {
+  const value = option.value as PermissionMode;
+  switch (value) {
+    case "read_only":
+      return "permission-risk--safe";
+    case "ask":
+      return "permission-risk--ask";
+    case "auto":
+      return "permission-risk--auto";
+    case "full_access":
+      return "permission-risk--danger";
+    default:
+      return "permission-risk--unknown";
+  }
+}
 
 export function ComposerPanel({
   runtimeId,
@@ -93,6 +135,8 @@ export function ComposerPanel({
             aria-label="当前会话权限"
             title="切换当前会话权限"
             placeholder="权限"
+            renderIcon={permissionRiskIcon}
+            getOptionClassName={permissionRiskClassName}
             onChange={onPermissionChange}
           />
         </div>

@@ -15,11 +15,13 @@ type Props = {
   onCloseSettings: () => void;
   sessionContextMenu: SessionContextMenu;
   sessionContextTargetTitle: string;
+  sessionContextTargetCount: number;
+  sessionContextTargetIds: string[];
   sessionContextMenuRef: RefObject<HTMLDivElement | null>;
   onOpenSelectedSessionLocation: (sessionId: string) => void;
-  onRequestDeleteSession: (sessionId: string) => void;
-  deleteSessionId: string | null;
-  deleteTargetSession: SessionMeta | null;
+  onRequestDeleteSessions: (sessionIds: string[]) => void;
+  deleteSessionIds: string[];
+  deleteTargetSessions: SessionMeta[];
   deleteTargetPath: string;
   deleteSessionBusy: boolean;
   deleteSessionError: string | null;
@@ -33,11 +35,13 @@ export function AppOverlays({
   onCloseSettings,
   sessionContextMenu,
   sessionContextTargetTitle,
+  sessionContextTargetCount,
+  sessionContextTargetIds,
   sessionContextMenuRef,
   onOpenSelectedSessionLocation,
-  onRequestDeleteSession,
-  deleteSessionId,
-  deleteTargetSession,
+  onRequestDeleteSessions,
+  deleteSessionIds,
+  deleteTargetSessions,
   deleteTargetPath,
   deleteSessionBusy,
   deleteSessionError,
@@ -88,20 +92,22 @@ export function AppOverlays({
               onMouseDown={(ev) => ev.stopPropagation()}
             >
               <div className="session-context-menu__title">{sessionContextTargetTitle}</div>
-              <button
-                type="button"
-                className="session-context-menu__item"
-                onMouseDown={(ev) => {
-                  ev.preventDefault();
-                  ev.stopPropagation();
-                  if (sessionContextMenu) {
-                    void onOpenSelectedSessionLocation(sessionContextMenu.sessionId);
-                  }
-                }}
-              >
-                <IconFolder size={14} />
-                <span>打开文件所在位置</span>
-              </button>
+              {sessionContextTargetCount <= 1 ? (
+                <button
+                  type="button"
+                  className="session-context-menu__item"
+                  onMouseDown={(ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    if (sessionContextMenu) {
+                      void onOpenSelectedSessionLocation(sessionContextMenu.sessionId);
+                    }
+                  }}
+                >
+                  <IconFolder size={14} />
+                  <span>打开文件所在位置</span>
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="session-context-menu__item session-context-menu__item--danger"
@@ -109,19 +115,23 @@ export function AppOverlays({
                   ev.preventDefault();
                   ev.stopPropagation();
                   if (sessionContextMenu) {
-                    onRequestDeleteSession(sessionContextMenu.sessionId);
+                    onRequestDeleteSessions(sessionContextTargetIds);
                   }
                 }}
               >
                 <IconClose size={14} />
-                <span>删除会话</span>
+                <span>
+                  {sessionContextTargetCount > 1
+                    ? `删除 ${sessionContextTargetCount} 个会话`
+                    : "删除会话"}
+                </span>
               </button>
             </div>,
             document.body,
           )
         : null}
 
-      {deleteSessionId
+      {deleteSessionIds.length > 0
         ? createPortal(
             <div
               className="settings-overlay"
@@ -133,7 +143,11 @@ export function AppOverlays({
               <section className="settings-dialog session-delete-dialog" role="dialog" aria-modal="true" aria-label="删除会话">
                 <div className="settings-dialog__head">
                   <div>
-                    <div className="settings-dialog__title">删除会话</div>
+                    <div className="settings-dialog__title">
+                      {deleteSessionIds.length > 1
+                        ? `删除 ${deleteSessionIds.length} 个会话`
+                        : "删除会话"}
+                    </div>
                     <div className="settings-dialog__sub">删除后会移除会话文件夹和记录</div>
                   </div>
                   <button type="button" className="btn btn--ghost" disabled={deleteSessionBusy} onClick={onCloseDelete}>
@@ -142,7 +156,16 @@ export function AppOverlays({
                 </div>
                 <div className="settings-dialog__body session-delete-dialog__body">
                   <div className="session-delete-dialog__title">
-                    {deleteTargetSession?.title ?? deleteSessionId}
+                    {deleteSessionIds.length === 1
+                      ? (deleteTargetSessions[0]?.title ?? deleteSessionIds[0])
+                      : deleteSessionIds
+                          .map(
+                            (sessionId) =>
+                              deleteTargetSessions.find(
+                                (session) => session.id === sessionId,
+                              )?.title ?? sessionId,
+                          )
+                          .join("、")}
                   </div>
                   <div className="session-delete-dialog__path">{deleteTargetPath}</div>
                   <div className="session-delete-dialog__note">

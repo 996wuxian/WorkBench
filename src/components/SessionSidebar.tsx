@@ -32,7 +32,11 @@ type Props = {
   onCreateSession: () => void;
   onToggleSearch: () => void;
   onSessionFilterChange: (value: string) => void;
-  onSelectSession: (sessionId: string) => void;
+  selectedSessionIds: string[];
+  onSelectSession: (
+    sessionId: string,
+    options: { shiftKey: boolean; visibleSessionIds: string[] },
+  ) => void;
   onSessionContextMenu: (sessionId: string, left: number, top: number) => void;
   onSyncNativeSessions: (mode: "reset" | "more") => void;
   onOpenSettings: () => void;
@@ -57,6 +61,7 @@ export function SessionSidebar({
   onCreateSession,
   onToggleSearch,
   onSessionFilterChange,
+  selectedSessionIds,
   onSelectSession,
   onSessionContextMenu,
   onSyncNativeSessions,
@@ -79,6 +84,14 @@ export function SessionSidebar({
         (session.nativeThreadId ?? "").toLowerCase().includes(q),
     );
   }, [scopedSessions, sessionFilter]);
+  const filteredSessionIds = useMemo(
+    () => filteredSessions.map((session) => session.id),
+    [filteredSessions],
+  );
+  const selectedSessionIdSet = useMemo(
+    () => new Set(selectedSessionIds),
+    [selectedSessionIds],
+  );
   const runtimeSessionCount = scopedSessions.length;
   const loadingMore = loadingMoreRuntime === runtimePick;
   const syncing = syncingRuntime === runtimePick;
@@ -199,7 +212,9 @@ export function SessionSidebar({
               type="button"
               key={session.id}
               className={
-                "session-item" + (activeId === session.id ? " session-item--active" : "")
+                "session-item" +
+                (activeId === session.id ? " session-item--active" : "") +
+                (selectedSessionIdSet.has(session.id) ? " session-item--selected" : "")
               }
               onContextMenu={(ev) => {
                 ev.preventDefault();
@@ -210,7 +225,12 @@ export function SessionSidebar({
                   Math.max(8, Math.min(ev.clientY, window.innerHeight - 120)),
                 );
               }}
-              onClick={() => onSelectSession(session.id)}
+              onClick={(ev) =>
+                onSelectSession(session.id, {
+                  shiftKey: ev.shiftKey,
+                  visibleSessionIds: filteredSessionIds,
+                })
+              }
             >
               <span className={`runtime-dot runtime-dot--${session.runtimeId}`} />
               <span className="session-item__body">

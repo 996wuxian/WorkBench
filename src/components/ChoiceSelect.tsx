@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { IconCheck, IconChevronDown } from "./icons";
 
@@ -20,6 +20,8 @@ type Props = {
   className?: string;
   placeholder?: string;
   placement?: "auto" | "top" | "bottom";
+  renderIcon?: (option: ChoiceOption) => ReactNode;
+  getOptionClassName?: (option: ChoiceOption) => string;
 };
 
 export function ChoiceSelect({
@@ -32,6 +34,8 @@ export function ChoiceSelect({
   className = "",
   placeholder = "—",
   placement = "auto",
+  renderIcon,
+  getOptionClassName,
 }: Props) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -116,6 +120,8 @@ export function ChoiceSelect({
             {options.map((o) => {
               const active = o.value === value;
               const optionDisabled = Boolean(o.disabled);
+              const icon = renderIcon?.(o);
+              const optionClassName = getOptionClassName?.(o) ?? "";
               return (
                 <button
                   key={o.value}
@@ -123,13 +129,24 @@ export function ChoiceSelect({
                   role="option"
                   aria-selected={active}
                   disabled={optionDisabled}
-                  className={"rt-select__option" + (active ? " is-selected" : "")}
+                  className={[
+                    "rt-select__option",
+                    active ? "is-selected" : "",
+                    optionClassName,
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
                   onClick={() => {
                     if (optionDisabled) return;
                     onChange(o.value);
                     setOpen(false);
                   }}
                   >
+                  {icon ? (
+                    <span className="rt-select__option-icon" aria-hidden>
+                      {icon}
+                    </span>
+                  ) : null}
                   <span className="rt-select__option-main">
                     <span className="rt-select__option-label">{o.label}</span>
                     {o.hint ? (
@@ -170,7 +187,23 @@ export function ChoiceSelect({
         title={title}
         onClick={() => !disabled && setOpen((v) => !v)}
       >
-        <span className="rt-select__value">{selected?.label ?? placeholder}</span>
+        <span
+          className={[
+            "rt-select__value",
+            selected ? (getOptionClassName?.(selected) ?? "") : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+        >
+          {selected && renderIcon ? (
+            <span className="rt-select__value-icon" aria-hidden>
+              {renderIcon(selected)}
+            </span>
+          ) : null}
+          <span className="rt-select__value-label">
+            {selected?.label ?? placeholder}
+          </span>
+        </span>
         <span className={"rt-select__chev" + (open ? " is-open" : "")} aria-hidden>
           <IconChevronDown size={14} />
         </span>
