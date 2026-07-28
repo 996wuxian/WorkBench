@@ -150,35 +150,43 @@
   {
     "id": "claude",
     "displayName": "Claude Code",
-    "protocol": "acp",
-    "enabled": false,
-    "command": "claude-code-acp",
+    "protocol": "claude_code",
+    "enabled": true,
+    "command": "claude",
     "preStdioArgs": [],
     "stdioArgs": [],
     "versionArgs": ["--version"],
     "probePaths": [
-      "%APPDATA%\\npm\\claude-code-acp.cmd",
-      "~/.local/bin/claude-code-acp"
+      "D:\\Nvm\\node\\node_global\\claude.cmd",
+      "D:\\Nvm\\node\\node_global\\claude.ps1",
+      "%APPDATA%\\npm\\claude.cmd",
+      "%APPDATA%\\npm\\claude.ps1",
+      "~/.local/bin/claude"
     ],
     "homeCandidates": ["~/.claude"],
     "homeMarkers": [".credentials.json", "settings.json"],
     "defaultPermissionMode": "ask",
-    "permissionModes": ["ask", "auto"],
-    "models": [],
+    "permissionModes": ["ask", "auto", "read_only", "full_access"],
+    "models": [
+      { "value": "default", "label": "default", "hint": "Claude Code 当前默认模型" },
+      { "value": "sonnet", "label": "sonnet", "hint": "Claude Code alias" },
+      { "value": "opus", "label": "opus", "hint": "Claude Code alias" },
+      { "value": "haiku", "label": "haiku", "hint": "Claude Code alias" }
+    ],
     "capabilities": {
       "streaming": true,
       "thoughts": true,
       "tools": true,
       "permissionGate": true,
-      "sessionResume": false,
+      "sessionResume": true,
       "multiTurn": true,
       "modelsList": false,
       "planMode": false,
       "slashCommands": false,
       "imagesIn": false,
       "imagesOut": false,
-      "protocol": "acp"
+      "protocol": "claude_code"
     },
-    "notes": "默认关闭。需先安装 ACP 桥（@zed-industries/claude-code-acp），或改用原生 stream-json 适配器（尚未实现）。"
+    "notes": "使用本机 Claude Code CLI 的 headless stream-json 模式；cc-switch 当前选择会随本机 claude 环境生效。"
   }
 ]

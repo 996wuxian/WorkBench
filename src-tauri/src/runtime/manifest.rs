@@ -29,6 +29,8 @@ pub enum RuntimeProtocol {
     Acp,
     /// `codex app-server --stdio`. Bespoke adapter.
     CodexAppServer,
+    /// `claude -p --output-format stream-json`. Bespoke Claude Code CLI adapter.
+    ClaudeCode,
 }
 
 /// Where the runtime's own session history lives, for read-only import.

@@ -11,7 +11,7 @@ type SessionContextMenu = {
 
 type Props = {
   settingsOpen: boolean;
-  routeDiagnosticsPanel: ReactNode;
+  diagnosticsPanel: ReactNode;
   onCloseSettings: () => void;
   sessionContextMenu: SessionContextMenu;
   sessionContextTargetTitle: string;
@@ -31,7 +31,7 @@ type Props = {
 
 export function AppOverlays({
   settingsOpen,
-  routeDiagnosticsPanel,
+  diagnosticsPanel,
   onCloseSettings,
   sessionContextMenu,
   sessionContextTargetTitle,
@@ -63,15 +63,15 @@ export function AppOverlays({
                 <div className="settings-dialog__head">
                   <div>
                     <div className="settings-dialog__title">设置</div>
-                    <div className="settings-dialog__sub">引擎路由</div>
+                    <div className="settings-dialog__sub">诊断 · 引擎路由 · Host</div>
                   </div>
                   <button type="button" className="btn btn--ghost" onClick={onCloseSettings}>
                     关闭
                   </button>
                 </div>
                 <div className="settings-dialog__body">
-                  <div className="sidebar__section-label">Codex / Grok</div>
-                  {routeDiagnosticsPanel}
+                  <div className="sidebar__section-label">Doctor</div>
+                  {diagnosticsPanel}
                 </div>
               </section>
             </div>,

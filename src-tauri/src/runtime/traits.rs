@@ -93,6 +93,7 @@ pub struct ConnectOpts {
     pub model_reasoning_effort: Option<String>,
     pub permission_mode: PermissionMode,
     pub cli_path: Option<PathBuf>,
+    pub claude_permission_bridge_script_path: Option<PathBuf>,
     pub native_session_id: Option<String>,
     pub native_thread_id: Option<String>,
     /// Host-side approval gate. Adapters must route every agent permission

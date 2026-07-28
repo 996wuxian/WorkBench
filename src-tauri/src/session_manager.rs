@@ -7,7 +7,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -705,6 +705,7 @@ impl SessionManager {
             model_reasoning_effort,
             permission_mode,
             cli_path: None,
+            claude_permission_bridge_script_path: resolve_claude_permission_bridge_script_path(app),
             native_session_id,
             native_thread_id,
             permissions,
@@ -1186,6 +1187,15 @@ impl SessionManager {
                     match &result {
                         Ok(()) => {
                             let _ = slot.fsm.end_stream();
+                            if let Some(native_session_id) = live.native_session_id() {
+                                slot.meta.native_session_id = Some(native_session_id);
+                            }
+                            if let Some(native_thread_id) = live.native_thread_id() {
+                                slot.meta.native_thread_id = Some(native_thread_id);
+                            }
+                            if let Some(native_home) = live.native_home() {
+                                slot.meta.native_home = Some(native_home);
+                            }
                         }
                         Err(e) => {
                             slot.fsm.disconnect(Some(e.clone()));
@@ -1337,6 +1347,23 @@ fn native_matches(meta: &SessionMeta, item: &NativeSessionItem) -> bool {
 fn default_project_dir() -> std::io::Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     Ok(workspace_root_from_dir(&cwd).unwrap_or(cwd))
+}
+
+fn resolve_claude_permission_bridge_script_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .resolve(
+            "runtime/claude_permission_bridge.mjs",
+            BaseDirectory::Resource,
+        )
+        .ok()
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("runtime")
+                .join("claude_permission_bridge.mjs");
+            path.is_file().then_some(path)
+        })
 }
 
 fn workspace_root_from_dir(dir: &Path) -> Option<PathBuf> {

@@ -32,6 +32,14 @@ pub fn run() {
         )
         .init();
 
+    match paths::cleanup_stale_claude_mcp_configs() {
+        Ok(removed) if removed > 0 => {
+            tracing::info!("removed {removed} stale Claude MCP temp config(s)");
+        }
+        Err(err) => tracing::warn!("failed to clean Claude MCP temp configs: {err}"),
+        _ => {}
+    }
+
     let session_mgr = Arc::new(SessionManager::new());
 
     tauri::Builder::default()

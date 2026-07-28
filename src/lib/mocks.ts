@@ -38,6 +38,20 @@ export function mockRuntimes(): RuntimeInfo[] {
       permissionModes: ["ask", "auto", "read_only", "full_access"],
       defaultPermissionMode: "ask",
     },
+    {
+      id: "claude",
+      displayName: "Claude Code",
+      enabled: true,
+      capabilities: {
+        ...capabilities,
+        permissionGate: true,
+        sessionResume: true,
+        protocol: "claude_code",
+      },
+      permissionModes: ["ask", "auto", "read_only", "full_access"],
+      defaultPermissionMode: "ask",
+      notes: "使用本机 Claude Code CLI 的 headless stream-json 模式。",
+    },
   ];
 }
 

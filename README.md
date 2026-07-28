@@ -1,103 +1,147 @@
 # Workbench
 
-**本机多 Agent 桌面指挥台**（P0：Grok Build + Codex）
+本机多 Agent 桌面指挥台。Workbench 是一个 Tauri Host 壳，用统一的会话、权限、流式事件和桌面 UI 管理本机已经安装的 Agent CLI；它不重写各家 Agent 的模型能力，也不把 CLI 或密钥打进安装包。
 
-> 参考架构：[grok-app](../grok-app) 的 Host 思想（Session FSM、每会话一进程、权限 Host、三栏工作台），扩展为 **Runtime Adapter** 多引擎模型。  
-> 方案文档：[`docs/MULTI-AGENT-WORKBENCH-方案.md`](./docs/MULTI-AGENT-WORKBENCH-方案.md)
+参考架构：`docs/MULTI-AGENT-WORKBENCH-方案.md`
 
-## 产品决策（已拍板）
+## 能力概览
 
-| 项 | 选择 |
-|----|------|
-| 产品名 | **Workbench** |
-| P0 引擎 | **Grok**（`grok agent stdio` / ACP）+ **Codex**（`codex app-server --stdio`） |
-| 后置 | Claude stream-json、Kimi ACP、工作流编排 |
+| Runtime | 接入方式 | 状态 | 说明 |
+|---|---|---|---|
+| Grok Build | ACP: `grok agent stdio` | 已启用 | 支持流式消息、工具事件、Host 权限门 |
+| Codex | `codex app-server --stdio` | 已启用 | 支持模型/推理档位、会话恢复、权限审批 |
+| Claude Code | `claude -p --output-format stream-json` | 已启用 | 支持 cc-switch/本机 Claude 配置、会话恢复、MCP 权限审批桥 |
+| Kimi Code | ACP | 已启用 | 依赖本机 CLI 与 ACP 可用性 |
+| Gemini CLI | experimental ACP | 已启用 | 依赖本机 CLI 与 experimental ACP |
 
-## 架构骨架
+Workbench 的重点是统一桌面体验：
 
-```
-UI (React)
-  → Tauri commands
-    → SessionManager + Session FSM
-      → Runtime Registry
-        → Grok adapter (ACP stub → real)
-        → Codex adapter (App Server stub → real)
+- 三栏工作台：会话列表、聊天窗口、会话/运行状态面板
+- 每个会话绑定一个 runtime，运行中不热切换 Agent
+- Host 管理连接、流式输出、工具事件、权限请求和会话落盘
+- 支持 `ask`、`auto`、`read_only`、`full_access` 等权限模式，具体可用项由 runtime manifest 决定
+- 本机 CLI 探测：PATH + 常见安装路径 + 用户 override
+- 运行数据独立存储在 Workbench app data，不写入仓库
+
+## 架构
+
+```text
+React UI
+  -> Tauri commands
+    -> SessionManager + Session FSM
+      -> Runtime Registry
+        -> ACP adapters
+        -> Codex App Server adapter
+        -> Claude stream-json adapter
 ```
 
 | 路径 | 职责 |
-|------|------|
-| `src/` | 三栏 UI、会话切换、Doctor 探测面板 |
+|---|---|
+| `src/` | React UI、会话切换、聊天渲染、权限条、运行状态面板 |
 | `src-tauri/src/session_fsm.rs` | Host 独占状态机 |
-| `src-tauri/src/session_manager.rs` | 会话生命周期 |
-| `src-tauri/src/runtime/` | Runtime trait + Grok/Codex adapters |
-| `src-tauri/src/host/events.rs` | 统一 HostEvent 模型 |
+| `src-tauri/src/session_manager.rs` | 会话生命周期、事件转发、消息 journal |
+| `src-tauri/src/runtime/` | Runtime trait、registry、各 CLI adapter |
+| `src-tauri/src/host/events.rs` | UI 消费的统一 HostEvent |
+| `src-tauri/runtimes/builtin.json` | 内置 runtime manifest |
+| `src-tauri/src/runtime/claude_permission_bridge.mjs` | Claude Code 权限审批 MCP bridge |
 
-## 本机 CLI（探测目标）
+## 本机数据与隐私
 
-| Runtime | 命令 | 常见路径 |
-|---------|------|----------|
-| Grok | `grok agent stdio` | `D:\tools\grok\bin\grok.exe` |
-| Codex | `codex app-server --stdio` | `D:\codex\codex.exe` |
+Workbench 默认不提交、不打包、不写入用户的 Agent 登录态或 API Key。
 
-## 开发
+- App 数据目录：Windows `%APPDATA%\workbench\Workbench`
+- 会话镜像：`sessions/`
+- 隔离 Agent home fallback：`agent-homes/`
+- 日志：`logs/`
+- Claude 权限桥临时配置：系统 temp 下的 `workbench-claude-mcp/`，启动时会清理超过 24 小时的旧文件
 
-### 依赖（本机已就绪）
+仓库 `.gitignore` 已排除：
 
-| 组件 | 位置 / 说明 |
-|------|-------------|
-| Node 20+ / pnpm | 已有 |
-| **Rust stable** | **D 盘**：`D:\tools\rustup` + `D:\tools\cargo`（`rustc 1.97.1`） |
-| MSVC | `X:\Visual-Studio\ide`（已有 VC Tools） |
-| WebView2 | 系统已装 |
-| Cargo 镜像 | `D:\tools\cargo\config.toml` → rsproxy（避免坏掉的系统代理） |
-| grok / codex | 可选；缺失时 Doctor 显示 missing |
+- `node_modules/`
+- `dist/`
+- `src-tauri/target/`
+- `.env`、`.env.*`
+- `*.log`
 
-用户环境变量（已写入）：`RUSTUP_HOME`、`CARGO_HOME`、PATH 含 `D:\tools\cargo\bin`。
+当前代码只读取本机 CLI 配置用于探测和显示，例如 Claude 模型 alias；不会把真实 key/token 写入仓库。发布前仍建议执行一次密钥扫描。
 
-### 命令
+## 开发环境
+
+本项目使用 Tauri 2 + Rust + React 19 + TypeScript + Vite。
+
+推荐 Windows 本机工具链：
+
+| 组件 | 说明 |
+|---|---|
+| Node / pnpm | 前端与 Tauri CLI |
+| Rust stable | 推荐使用 `D:\tools\rustup`、`D:\tools\cargo` |
+| MSVC Build Tools | `scripts/dev-env.ps1` 会加载本机 VC 环境 |
+| WebView2 | Windows 桌面运行需要 |
+
+常用命令：
 
 ```powershell
 cd X:\1_2026_project\work
 
-# 推荐：带 MSVC + D: Rust 环境启动桌面
+# 推荐桌面开发
 .\scripts\dev.ps1
 
-# 或先加载环境再 pnpm
-. .\scripts\dev-env.ps1
-pnpm dev
-
-# 仅前端（浏览器预览，mock 数据）
+# 仅前端预览
 pnpm dev:ui
 
 # 类型检查
 pnpm typecheck
+
+# 前端生产构建
+pnpm build:ui
+
+# Rust 检查
+. .\scripts\dev-env.ps1
+cd src-tauri
+cargo check
 ```
 
-> 新开终端若找不到 `cargo`，先重开一次 PowerShell（读用户 PATH），或执行 `. .\scripts\dev-env.ps1`。
+## 打包
 
-数据目录（独立，不污染 CLI home）：
+```powershell
+pnpm tauri build
+```
 
-- Windows: `%APPDATA%\workbench\Workbench`
-- 内含 `sessions/`、`agent-homes/grok|codex/`、`logs/`
+调试打包但跳过 installer：
 
-## 当前状态
+```powershell
+pnpm tauri build --debug --no-bundle
+```
 
-- [x] Tauri 2 + React + TS + Tailwind 工程
-- [x] 三栏工作台 UI（会话 / 对话 / Doctor）
-- [x] Runtime Registry（Grok/Codex 启用，Claude/Kimi 占位）
-- [x] Session FSM + SessionManager 命令面
-- [x] CLI 路径探测（PATH + 常见安装路径）
-- [x] **真 Grok ACP**（`grok agent stdio` + 流式 `session://stream`）
-- [x] 工具权限 MVP：Host 自动 allow（UI 审批条后置）
-- [ ] 真 Codex App Server 客户端
-- [ ] 权限条 UI / journal 落盘 / 项目信任选择器
+图标来自 `public/logo.png`。如果需要重新生成 Windows 任务栏、EXE、installer 图标：
 
-## 下一步建议
+```powershell
+pnpm tauri icon public\logo.png
+```
 
-1. SPIKE：`codex app-server --stdio` schema / 最小握手  
-2. 移植/实现通用流式 stdio 帧 + Grok ACP  
-3. Host 事件 `emit` 到前端，替换 stub 回复  
-4. 权限 Ask 条（对齐 grok-app）
+该命令会覆盖 `src-tauri/icons/` 下的 PNG/ICO/ICNS/Appx/iOS/Android 图标生成物。Windows installer/EXE 主要使用 `src-tauri/icons/icon.ico`。
+
+## 发布流程
+
+建议发布前执行：
+
+```powershell
+pnpm typecheck
+pnpm build:ui
+. .\scripts\dev-env.ps1
+cd src-tauri
+cargo check
+cargo test runtime::claude::tests
+```
+
+完整 release 建议：
+
+1. 确认 `README.md`、`src-tauri/tauri.conf.json`、`package.json`、`src-tauri/Cargo.toml` 版本一致。
+2. 执行 `pnpm tauri build` 生成安装包。
+3. 安装构建产物，验证 Grok/Codex/Claude 至少各一条消息。
+4. 对 Claude 验证 `ask`、`auto`、`full_access` 权限模式。
+5. 执行密钥扫描，确认无 `.env`、token、API key、日志或用户 home 数据进入提交。
+6. 创建 Git tag，推送并在 GitHub Release 上传安装包。
 
 ## License
 

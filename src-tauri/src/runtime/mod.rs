@@ -7,6 +7,7 @@
 pub mod acp;
 mod capabilities;
 pub mod catalog;
+mod claude;
 mod codex;
 mod id;
 pub mod manifest;

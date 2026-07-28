@@ -62,6 +62,7 @@ export function runtimeHasPermissionGate(
 export const runtimeAvatarSrc: Partial<Record<RuntimeId, string>> = {
   grok: "/runtime-icons/grok.webp",
   codex: "/runtime-icons/codex.png",
+  claude: "/runtime-icons/claude.png",
 };
 
 export function runtimeAvatarLabel(id: RuntimeId): string {

@@ -32,6 +32,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "src/runtime/claude_permission_bridge.mjs": "runtime/claude_permission_bridge.mjs"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",

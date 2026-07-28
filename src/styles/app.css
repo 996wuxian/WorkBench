@@ -664,7 +664,7 @@ select,
 }
 
 /*
- * Window controls are fixed to the *window* top-right (often over the Doctor
+ * Window controls are fixed to the *window* top-right (often over the Inspector
  * aside). Main column is narrower while aside is open — so only pad ~4px from
  * main's own right edge. When aside is hidden, clear the 3×46px chrome.
  */
@@ -788,6 +788,12 @@ select,
 .message--assistant {
   align-self: flex-start;
   border-radius: 12px 8px 12px 12px;
+}
+
+.message--thought {
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
 }
 
 /* Restored from a streaming checkpoint: the turn was cut short by a crash or a
@@ -1621,6 +1627,249 @@ select,
   padding: 8px 12px 16px;
 }
 
+.inspector__body {
+  padding-top: 10px;
+}
+
+.inspector-session-head {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.inspector-session-head__title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.inspector-session-head__title span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspector-session-head__meta {
+  margin-top: 4px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspector-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px;
+  margin: 12px 0 10px;
+  padding: 2px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-input);
+}
+
+.inspector-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.inspector-tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.inspector-tab--active {
+  border-color: var(--border-subtle);
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+.inspector-tab-panel {
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.inspector-section {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.inspector-section:first-child {
+  padding-top: 0;
+}
+
+.inspector-section:last-child {
+  border-bottom: none;
+}
+
+.inspector-section__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.inspector-section__head > span:last-child:not(:first-child) {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: none;
+}
+
+.inspector-title {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.inspector-summary {
+  margin-top: 5px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.inspector-grid {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 7px 10px;
+  margin-top: 10px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.inspector-grid span {
+  color: var(--text-tertiary);
+}
+
+.inspector-grid strong {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-weight: 500;
+  word-break: break-all;
+}
+
+.inspector-alert {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 10px;
+  padding: 8px 9px;
+  border: 1px solid rgba(240, 153, 61, 0.24);
+  border-radius: 8px;
+  background: rgba(240, 153, 61, 0.1);
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.inspector-alert span {
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.inspector-activity-summary {
+  margin-bottom: 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.inspector-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.inspector-list__item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.inspector-list__item span {
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.inspector-list__item small {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.inspector-muted,
+.inspector-error,
+.inspector-empty__sub {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.inspector-empty {
+  padding: 14px 2px 18px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.inspector-empty__title {
+  margin-bottom: 4px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.inspector-section--danger .inspector-section__head {
+  color: var(--danger);
+}
+
+.inspector-error {
+  color: var(--danger);
+}
+
+.settings-diagnostics__label {
+  margin-top: 10px;
+}
+
+.settings-diagnostics__host {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .probe-card {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
@@ -1808,6 +2057,8 @@ select,
   align-items: center;
   gap: 6px;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 500;
 }
 
@@ -1834,8 +2085,7 @@ select,
 .rt-select__menu {
   position: fixed;
   z-index: 12000;
-  width: max-content;
-  max-width: min(360px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
   overflow-y: auto;
   padding: 6px;
   border-radius: 12px;
@@ -1967,6 +2217,10 @@ select,
 }
 
 .rt-select__option-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 13px;
   font-weight: 500;
   line-height: 1.25;
@@ -2018,6 +2272,10 @@ select,
 }
 
 .rt-select__option-hint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 11px;
   color: var(--text-tertiary);
   line-height: 1.2;

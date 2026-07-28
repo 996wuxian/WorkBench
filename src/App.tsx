@@ -13,7 +13,7 @@ import { MessageList } from "./components/MessageList";
 import { PermissionBar } from "./components/PermissionBar";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { ComposerPanel } from "./components/ComposerPanel";
-import { DoctorRail } from "./components/DoctorRail";
+import { SessionInspector } from "./components/SessionInspector";
 import { AppOverlays } from "./components/AppOverlays";
 import {
   IconChat,
@@ -70,7 +70,7 @@ import type {
   SessionState,
 } from "./lib/types";
 import {
-  enabledRuntimes,
+  allRuntimes,
   hydrateRuntimes,
   runtimeInfo,
   runtimeLabel,
@@ -211,9 +211,6 @@ export default function App() {
     active?.runtimeId === "codex"
       ? activeSessionModelValue || activeCodexModelFallback || "default"
       : activeSessionModelValue;
-  const activeModelLabel = active
-    ? activeModelValue || "default"
-    : "default";
   const activeModelReasoningEffort = active?.runtimeId === "codex"
     ? (active?.modelReasoningEffort ??
         snapshot.modelReasoningEffort ??
@@ -234,6 +231,10 @@ export default function App() {
         : fallbackModelOptions(activeRuntimeId, activeModelValue),
     [activeRuntimeId, activeModelValue, activeControlCatalog],
   );
+  const activeModelLabel = active
+    ? (controlModelOptions.find((option) => option.value === activeModelValue)?.label ??
+        (activeModelValue || "default"))
+    : "default";
   const controlPermissionOptions = useMemo(
     () =>
       activeControlCatalog?.permissionOptions.length
@@ -249,10 +250,13 @@ export default function App() {
     !active || settingsBusy || !canChangeSessionSettings(snapshot.state);
   const runtimePickOptions = useMemo(
     () =>
-      (runtimes.length > 0 ? enabledRuntimes() : []).map((r) => ({
+      (runtimes.length > 0 ? allRuntimes() : []).map((r) => ({
         id: r.id,
         label: r.displayName,
-        hint: r.capabilities.protocol,
+        hint: r.enabled
+          ? r.capabilities.protocol
+          : `未启用 · ${r.notes ?? r.capabilities.protocol}`,
+        disabled: !r.enabled,
       })),
     [runtimes],
   );
@@ -1349,6 +1353,51 @@ export default function App() {
       </div>
     </>
   );
+  const doctorDiagnosticsPanel = (
+    <>
+      <button
+        type="button"
+        className="btn btn--block"
+        style={{ marginBottom: 12 }}
+        onClick={() => {
+          void refreshProbes();
+          void refreshCodexRoute();
+        }}
+      >
+        <IconRefresh size={15} />
+        重新探测
+      </button>
+      {probes.map((probe) => (
+        <div key={probe.runtimeId} className="probe-card">
+          <div className="probe-card__row">
+            <strong>{runtimeLabel(probe.runtimeId)}</strong>
+            <span
+              style={{
+                color: probe.found ? "var(--success)" : "var(--danger)",
+                fontSize: 11,
+              }}
+            >
+              {probe.found ? "found" : "missing"}
+            </span>
+          </div>
+          <div className="muted" style={{ fontSize: 11, marginTop: 6, wordBreak: "break-all" }}>
+            {probe.path ?? "-"}
+          </div>
+          <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+            {probe.version ?? probe.detail ?? ""}
+          </div>
+        </div>
+      ))}
+      <div className="sidebar__section-label settings-diagnostics__label">
+        路由
+      </div>
+      {routeDiagnosticsPanel}
+      <div className="sidebar__section-label settings-diagnostics__label">
+        Host
+      </div>
+      <div className="muted settings-diagnostics__host">{statusLine}</div>
+    </>
+  );
 
   return (
     <div className="app-shell platform-win has-custom-chrome" data-theme={theme}>
@@ -1385,6 +1434,7 @@ export default function App() {
           onSyncNativeSessions={(mode) => void syncNativeSessions(mode)}
           onOpenSettings={() => {
             setSettingsOpen(true);
+            void refreshProbes();
             void refreshCodexRoute();
           }}
         />
@@ -1440,7 +1490,7 @@ export default function App() {
               <button
                 type="button"
                 className={"chrome-btn" + (!asideHidden ? " is-on" : "")}
-                title={asideHidden ? "显示 Doctor" : "隐藏 Doctor"}
+                title={asideHidden ? "显示 Inspector" : "隐藏 Inspector"}
                 onClick={() => setAsideHidden((v) => !v)}
               >
                 <IconPanelRight size={16} />
@@ -1537,22 +1587,25 @@ export default function App() {
           )}
         </main>
 
-        <DoctorRail
+        <SessionInspector
           hidden={asideHidden}
-          probes={probes}
-          routeDiagnosticsPanel={routeDiagnosticsPanel}
+          active={active}
+          snapshot={snapshot}
+          messages={messages}
+          permissionQueue={activePermissionQueue}
+          activeRuntimeId={activeRuntimeId}
+          activeModelLabel={activeModelLabel}
+          activeModelReasoningEffort={activeModelReasoningEffort}
+          activePermissionMode={activePermissionMode}
+          appDataDir={appDataDir}
           statusLine={statusLine}
           onToggleMaximize={() => void toggleMaximizeFromTitlebar()}
-          onRefresh={() => {
-            void refreshProbes();
-            void refreshCodexRoute();
-          }}
         />
       </div>
 
       <AppOverlays
         settingsOpen={settingsOpen}
-        routeDiagnosticsPanel={routeDiagnosticsPanel}
+        diagnosticsPanel={doctorDiagnosticsPanel}
         onCloseSettings={() => setSettingsOpen(false)}
         sessionContextMenu={sessionContextMenu}
         sessionContextTargetTitle={sessionContextTargetTitle}

@@ -11,6 +11,7 @@ export type RuntimeOption = {
   id: RuntimeId;
   label?: string;
   hint?: string;
+  disabled?: boolean;
 };
 
 type Props = {
@@ -55,7 +56,7 @@ export function RuntimeSelect({
       setPos({
         top: openUp ? r.top - menuH - 6 : r.bottom + 6,
         left: r.left,
-        width: Math.max(r.width, 168),
+        width: r.width,
       });
     };
     place();
@@ -91,7 +92,7 @@ export function RuntimeSelect({
             style={{
               top: pos.top,
               left: pos.left,
-              minWidth: pos.width,
+              width: pos.width,
             }}
           >
             {options.map((o) => {
@@ -102,8 +103,14 @@ export function RuntimeSelect({
                   type="button"
                   role="option"
                   aria-selected={active}
-                  className={"rt-select__option" + (active ? " is-selected" : "")}
+                  disabled={o.disabled}
+                  className={
+                    "rt-select__option" +
+                    (active ? " is-selected" : "") +
+                    (o.disabled ? " is-disabled" : "")
+                  }
                   onClick={() => {
+                    if (o.disabled) return;
                     onChange(o.id);
                     setOpen(false);
                   }}

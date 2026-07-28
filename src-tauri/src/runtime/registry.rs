@@ -9,9 +9,10 @@ use serde::Serialize;
 
 use crate::runtime::acp::AcpRuntime;
 use crate::runtime::capabilities::RuntimeCapabilities;
+use crate::runtime::claude::ClaudeRuntime;
 use crate::runtime::codex::CodexRuntime;
-use crate::runtime::manifest::{self, RuntimeProtocol};
 use crate::runtime::id::RuntimeId;
+use crate::runtime::manifest::{self, RuntimeProtocol};
 use crate::runtime::traits::{AgentRuntime, PermissionMode, ProbeResult};
 
 #[derive(Debug, Clone, Serialize)]
@@ -41,6 +42,7 @@ pub fn registry() -> &'static [Arc<dyn AgentRuntime>] {
                 match m.protocol {
                     RuntimeProtocol::Acp => Arc::new(AcpRuntime::new(m)),
                     RuntimeProtocol::CodexAppServer => Arc::new(CodexRuntime::new(m)),
+                    RuntimeProtocol::ClaudeCode => Arc::new(ClaudeRuntime::new(m)),
                 }
             })
             .collect()

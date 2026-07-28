@@ -79,6 +79,7 @@ export function MessageList({
             if (m.role === "assistant" && !m.streaming && !m.content) {
               return null;
             }
+            const isThought = m.role === "thought";
             const visualRole =
               m.role === "thought" || m.role === "tool" ? "system" : m.role;
             const messageRuntime = m.runtimeId ?? fallbackRuntimeId ?? "grok";
@@ -104,7 +105,7 @@ export function MessageList({
                   ))
                 : null;
             const quoteLabel = messageRoleLabel(m, messageRuntimeLabel);
-            const canCopy = Boolean(m.content?.trim()) && !thinking;
+            const canCopy = Boolean(m.content?.trim()) && !thinking && !isThought;
             const canQuote = canCopy;
             const messageActionButtons =
               canCopy || canQuote ? (
@@ -185,9 +186,12 @@ export function MessageList({
                   className={`message-block message-block--${visualRole}`}
                 >
                   <div
-                    className={`message message--${visualRole}`}
+                    className={
+                      `message message--${visualRole}` +
+                      (isThought ? " message--thought" : "")
+                    }
                     style={
-                      m.role === "thought"
+                      isThought
                         ? { opacity: 0.75, fontStyle: "italic" }
                         : undefined
                     }
