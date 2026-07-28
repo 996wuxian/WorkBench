@@ -10,10 +10,12 @@ import type { PermissionMode, RuntimeId, RuntimeInfo } from "./types";
 
 let registry: RuntimeInfo[] = [];
 
+const RUNTIME_DISPLAY_ORDER = ["claude", "codex", "kimi", "grok"];
+
 /** Replace the cached registry. Returns the list for convenient chaining. */
 export function hydrateRuntimes(runtimes: RuntimeInfo[]): RuntimeInfo[] {
-  registry = runtimes;
-  return runtimes;
+  registry = sortRuntimes(runtimes);
+  return registry;
 }
 
 export function allRuntimes(): RuntimeInfo[] {
@@ -63,8 +65,22 @@ export const runtimeAvatarSrc: Partial<Record<RuntimeId, string>> = {
   grok: "/runtime-icons/grok.webp",
   codex: "/runtime-icons/codex.png",
   claude: "/runtime-icons/claude.png",
+  kimi: "/runtime-icons/kimi.png",
 };
 
 export function runtimeAvatarLabel(id: RuntimeId): string {
   return `${runtimeLabel(id)} avatar`;
+}
+
+export function sortRuntimes<T extends { id: RuntimeId; displayName?: string }>(
+  runtimes: T[],
+): T[] {
+  return [...runtimes].sort((a, b) => {
+    const ai = RUNTIME_DISPLAY_ORDER.indexOf(a.id);
+    const bi = RUNTIME_DISPLAY_ORDER.indexOf(b.id);
+    const ar = ai >= 0 ? ai : Number.MAX_SAFE_INTEGER;
+    const br = bi >= 0 ? bi : Number.MAX_SAFE_INTEGER;
+    if (ar !== br) return ar - br;
+    return (a.displayName ?? a.id).localeCompare(b.displayName ?? b.id);
+  });
 }

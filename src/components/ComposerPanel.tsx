@@ -1,7 +1,9 @@
-import { type MouseEvent, type RefObject } from "react";
+import { useEffect, useRef, useState, type MouseEvent, type RefObject } from "react";
+import { createPortal } from "react-dom";
 
 import { ChoiceSelect, type ChoiceOption } from "./ChoiceSelect";
 import {
+  IconClipboard,
   IconClose,
   IconQuote,
   IconRiskAsk,
@@ -13,12 +15,10 @@ import {
   IconStop,
 } from "./icons";
 import { compactLabel } from "../lib/format";
-import { runtimeLabel } from "../lib/runtimes";
-import type { PermissionMode, RuntimeId } from "../lib/types";
+import type { PermissionMode } from "../lib/types";
 import type { QuoteTarget } from "../lib/messages";
 
 type Props = {
-  runtimeId: RuntimeId;
   draft: string;
   busy: boolean;
   streaming: boolean;
@@ -41,6 +41,13 @@ type Props = {
   onReasoningEffortChange: (value: string) => void;
   onPermissionChange: (value: string) => void;
 };
+
+type ComposerContextMenu = {
+  left: number;
+  top: number;
+  selectionStart: number;
+  selectionEnd: number;
+} | null;
 
 function permissionRiskIcon(option: ChoiceOption) {
   const value = option.value as PermissionMode;
@@ -75,7 +82,6 @@ function permissionRiskClassName(option: ChoiceOption) {
 }
 
 export function ComposerPanel({
-  runtimeId,
   draft,
   busy,
   streaming,
@@ -98,24 +104,74 @@ export function ComposerPanel({
   onReasoningEffortChange,
   onPermissionChange,
 }: Props) {
-  const pasteClipboardAtCursor = async (event: MouseEvent<HTMLTextAreaElement>) => {
+  const [contextMenu, setContextMenu] = useState<ComposerContextMenu>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+
+    const close = () => setContextMenu(null);
+    const handleMouseDown = (event: globalThis.MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Node && contextMenuRef.current?.contains(target)) return;
+      close();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+
+    window.addEventListener("mousedown", handleMouseDown);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("blur", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+
+    return () => {
+      window.removeEventListener("mousedown", handleMouseDown);
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [contextMenu]);
+
+  const openContextMenu = (event: MouseEvent<HTMLTextAreaElement>) => {
     event.preventDefault();
+    const input = event.currentTarget;
+    const menuWidth = 148;
+    const menuHeight = 42;
+    const left = Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8));
+    const top = Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8));
+
+    setContextMenu({
+      left,
+      top,
+      selectionStart: input.selectionStart ?? draft.length,
+      selectionEnd: input.selectionEnd ?? input.selectionStart ?? draft.length,
+    });
+  };
+
+  const pasteFromContextMenu = async () => {
+    const menu = contextMenu;
+    setContextMenu(null);
+    if (!menu) return;
+
     const readText = navigator.clipboard?.readText;
     if (!readText) return;
 
     const text = await readText.call(navigator.clipboard).catch(() => "");
     if (!text) return;
 
-    const input = event.currentTarget;
-    const start = input.selectionStart ?? draft.length;
-    const end = input.selectionEnd ?? start;
+    const input = composerInputRef.current;
+    const start = Math.min(menu.selectionStart, draft.length);
+    const end = Math.min(Math.max(menu.selectionEnd, start), draft.length);
     const next = `${draft.slice(0, start)}${text}${draft.slice(end)}`;
     onDraftChange(next);
 
     requestAnimationFrame(() => {
-      input.focus();
+      input?.focus();
       const caret = start + text.length;
-      input.setSelectionRange(caret, caret);
+      input?.setSelectionRange(caret, caret);
     });
   };
 
@@ -183,10 +239,10 @@ export function ComposerPanel({
         <textarea
           ref={composerInputRef}
           className="composer__input"
-          placeholder={`Message ${runtimeLabel(runtimeId)}…`}
+          placeholder="请输入"
           value={draft}
           onChange={(e) => onDraftChange(e.target.value)}
-          onContextMenu={pasteClipboardAtCursor}
+          onContextMenu={openContextMenu}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
@@ -220,6 +276,32 @@ export function ComposerPanel({
           )}
         </div>
       </div>
+      {contextMenu
+        ? createPortal(
+            <div
+              ref={contextMenuRef}
+              className="composer-context-menu"
+              role="menu"
+              style={{ left: contextMenu.left, top: contextMenu.top }}
+              onMouseDown={(ev) => ev.stopPropagation()}
+            >
+              <button
+                type="button"
+                className="composer-context-menu__item"
+                role="menuitem"
+                onMouseDown={(ev) => {
+                  ev.preventDefault();
+                  ev.stopPropagation();
+                  void pasteFromContextMenu();
+                }}
+              >
+                <IconClipboard size={14} />
+                <span>粘贴</span>
+              </button>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

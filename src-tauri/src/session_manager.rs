@@ -188,6 +188,14 @@ struct Inner {
     active_id: Option<String>,
 }
 
+enum NativeHistoryImport {
+    AcpSummary {
+        runtime_id: RuntimeId,
+        native_session_id: String,
+    },
+    CodexThread(String),
+}
+
 impl SessionMeta {
     fn from_stored(stored: StoredSessionMeta) -> Self {
         let (model_id, model_reasoning_effort) = normalize_stored_settings(
@@ -366,18 +374,18 @@ impl SessionManager {
                     id.clone(),
                     LiveSessionSlot {
                         meta: meta.clone(),
-                    fsm: SessionFsm::new(),
-                    backend: "none".into(),
-                    live: None,
-                    permissions: None,
-                    mirror: StreamMirror::default(),
-                    prompt_started_at: None,
-                    prompt_paused_ms: 0,
-                    permission_pause_started_at: None,
-                    pending_permission_count: 0,
-                    persisted: true,
-                },
-            );
+                        fsm: SessionFsm::new(),
+                        backend: "none".into(),
+                        live: None,
+                        permissions: None,
+                        mirror: StreamMirror::default(),
+                        prompt_started_at: None,
+                        prompt_paused_ms: 0,
+                        permission_pause_started_at: None,
+                        pending_permission_count: 0,
+                        persisted: true,
+                    },
+                );
                 meta
             };
 
@@ -905,8 +913,7 @@ impl SessionManager {
             return false;
         };
         slot.finish_permission_pause(Utc::now());
-        if slot.fsm.state() != SessionState::AwaitingPermission
-            || slot.pending_permission_count > 0
+        if slot.fsm.state() != SessionState::AwaitingPermission || slot.pending_permission_count > 0
         {
             return false;
         }
@@ -1080,30 +1087,50 @@ impl SessionManager {
     }
 
     pub async fn messages(&self, session_id: &str) -> Result<Vec<StoredChatMessage>, String> {
-        let import_thread_id = {
+        let native_import = {
             let guard = self.inner.lock();
             let slot = guard
                 .sessions
                 .get(session_id)
                 .ok_or_else(|| "session not found".to_string())?;
             let messages = session_store::load_messages(session_id).map_err(|e| e.to_string())?;
-            let imports_from_app_server = runtime::manifest::get(slot.meta.runtime_id)
-                .and_then(|m| m.native_sessions)
-                == Some(NativeSessionSource::CodexAppServer);
-            if !messages.is_empty()
-                || !imports_from_app_server
-                || slot.meta.native_history_imported_at.is_some()
-            {
+            if !messages.is_empty() || slot.meta.native_history_imported_at.is_some() {
                 return Ok(messages);
             }
-            slot.meta.native_thread_id.clone()
+            match runtime::manifest::get(slot.meta.runtime_id).and_then(|m| m.native_sessions) {
+                Some(NativeSessionSource::AcpSummaryFiles) => slot
+                    .meta
+                    .native_session_id
+                    .clone()
+                    .map(|native_session_id| NativeHistoryImport::AcpSummary {
+                        runtime_id: slot.meta.runtime_id,
+                        native_session_id,
+                    }),
+                Some(NativeSessionSource::CodexAppServer) => slot
+                    .meta
+                    .native_thread_id
+                    .clone()
+                    .map(NativeHistoryImport::CodexThread),
+                None => None,
+            }
         };
 
-        let Some(thread_id) = import_thread_id else {
+        let Some(native_import) = native_import else {
             return session_store::load_messages(session_id).map_err(|e| e.to_string());
         };
 
-        let imported = crate::native_sessions::load_codex_thread_messages(&thread_id).await?;
+        let imported = match native_import {
+            NativeHistoryImport::AcpSummary {
+                runtime_id,
+                native_session_id,
+            } => crate::native_sessions::load_acp_summary_session_messages(
+                runtime_id,
+                &native_session_id,
+            )?,
+            NativeHistoryImport::CodexThread(thread_id) => {
+                crate::native_sessions::load_codex_thread_messages(&thread_id).await?
+            }
+        };
         if let Err(err) = session_store::append_messages(session_id, &imported) {
             return Err(err.to_string());
         }

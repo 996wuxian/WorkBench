@@ -4,6 +4,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { IconCheck, IconCopy } from "./icons";
 import { copyTextToClipboard } from "../lib/format";
 import { parseMarkdownBlocks, safeHref } from "../lib/markdown";
+import { emitToast } from "../lib/toast";
 
 type CodeTokenKind =
   | "comment"
@@ -180,10 +181,14 @@ function CodeBlock({ language, text }: { language: string; text: string }) {
             aria-label="复制代码"
             onClick={(ev) => {
               ev.stopPropagation();
-              void copyTextToClipboard(text).then(() => {
-                setCopied(true);
-                window.setTimeout(() => setCopied(false), 1200);
-              }, () => setCopied(false));
+              void copyTextToClipboard(text).then(
+                () => {
+                  setCopied(true);
+                  emitToast("已复制");
+                  window.setTimeout(() => setCopied(false), 1200);
+                },
+                () => setCopied(false),
+              );
             }}
           >
             {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}

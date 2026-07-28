@@ -1,7 +1,16 @@
 import { createPortal } from "react-dom";
+import { useEffect, useState } from "react";
 import { IconClose, IconFolder } from "./icons";
+import { SettingsDialog, type SettingsSection } from "./SettingsDialog";
 import type { RefObject, ReactNode } from "react";
-import type { SessionMeta } from "../lib/types";
+import type {
+  AppSettings,
+  ProbeResult,
+  RuntimeId,
+  RuntimeInfo,
+  SessionMeta,
+} from "../lib/types";
+import type { UiFontSize } from "../lib/fontSize";
 
 type SessionContextMenu = {
   sessionId: string;
@@ -11,8 +20,20 @@ type SessionContextMenu = {
 
 type Props = {
   settingsOpen: boolean;
-  diagnosticsPanel: ReactNode;
+  settingsSection: SettingsSection;
+  uiFontSize: UiFontSize;
+  runtimes: RuntimeInfo[];
+  probes: ProbeResult[];
+  appSettings: AppSettings | null;
+  settingsRuntimeBusy: string | null;
+  routeDiagnosticsPanel: ReactNode;
+  statusLine: string;
   onCloseSettings: () => void;
+  onSettingsSectionChange: (section: SettingsSection) => void;
+  onFontSizeChange: (value: UiFontSize) => void;
+  onRefreshSettingsDiagnostics: () => void;
+  onSaveRuntimeCliPath: (runtimeId: RuntimeId, cliPath: string) => void;
+  onClearRuntimeCliPath: (runtimeId: RuntimeId) => void;
   sessionContextMenu: SessionContextMenu;
   sessionContextTargetTitle: string;
   sessionContextTargetCount: number;
@@ -31,8 +52,20 @@ type Props = {
 
 export function AppOverlays({
   settingsOpen,
-  diagnosticsPanel,
+  settingsSection,
+  uiFontSize,
+  runtimes,
+  probes,
+  appSettings,
+  settingsRuntimeBusy,
+  routeDiagnosticsPanel,
+  statusLine,
   onCloseSettings,
+  onSettingsSectionChange,
+  onFontSizeChange,
+  onRefreshSettingsDiagnostics,
+  onSaveRuntimeCliPath,
+  onClearRuntimeCliPath,
   sessionContextMenu,
   sessionContextTargetTitle,
   sessionContextTargetCount,
@@ -48,6 +81,14 @@ export function AppOverlays({
   onCloseDelete,
   onConfirmDelete,
 }: Props) {
+  const [portalHost, setPortalHost] = useState<HTMLElement | null>(null);
+
+  useEffect(() => {
+    setPortalHost(document.querySelector(".app-shell") as HTMLElement | null);
+  }, []);
+
+  const overlayHost = portalHost ?? document.body;
+
   return (
     <>
       {settingsOpen
@@ -59,23 +100,24 @@ export function AppOverlays({
                 if (ev.target === ev.currentTarget) onCloseSettings();
               }}
             >
-              <section className="settings-dialog" role="dialog" aria-modal="true" aria-label="设置">
-                <div className="settings-dialog__head">
-                  <div>
-                    <div className="settings-dialog__title">设置</div>
-                    <div className="settings-dialog__sub">诊断 · 引擎路由 · Host</div>
-                  </div>
-                  <button type="button" className="btn btn--ghost" onClick={onCloseSettings}>
-                    关闭
-                  </button>
-                </div>
-                <div className="settings-dialog__body">
-                  <div className="sidebar__section-label">Doctor</div>
-                  {diagnosticsPanel}
-                </div>
-              </section>
+              <SettingsDialog
+                activeSection={settingsSection}
+                uiFontSize={uiFontSize}
+                runtimes={runtimes}
+                probes={probes}
+                appSettings={appSettings}
+                settingsRuntimeBusy={settingsRuntimeBusy}
+                routeDiagnosticsPanel={routeDiagnosticsPanel}
+                statusLine={statusLine}
+                onSectionChange={onSettingsSectionChange}
+                onFontSizeChange={onFontSizeChange}
+                onRefreshDiagnostics={onRefreshSettingsDiagnostics}
+                onSaveRuntimeCliPath={onSaveRuntimeCliPath}
+                onClearRuntimeCliPath={onClearRuntimeCliPath}
+                onClose={onCloseSettings}
+              />
             </div>,
-            document.body,
+            overlayHost,
           )
         : null}
 
@@ -127,7 +169,7 @@ export function AppOverlays({
                 </span>
               </button>
             </div>,
-            document.body,
+            overlayHost,
           )
         : null}
 
@@ -195,7 +237,7 @@ export function AppOverlays({
                 </div>
               </section>
             </div>,
-            document.body,
+            overlayHost,
           )
         : null}
     </>

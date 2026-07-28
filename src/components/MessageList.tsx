@@ -13,6 +13,7 @@ import { AssistantTiming, StreamingText, ThinkingIndicator } from "./ChatStream"
 import { IconChat, IconCopy, IconQuote } from "./icons";
 import { copyTextToClipboard } from "../lib/format";
 import { messageRoleLabel, toolMessageLabel, type QuoteTarget } from "../lib/messages";
+import { emitToast } from "../lib/toast";
 import { runtimeAvatarLabel, runtimeAvatarSrc, runtimeLabel } from "../lib/runtimes";
 import type { ChatMessage, RuntimeId } from "../lib/types";
 
@@ -35,7 +36,6 @@ export interface MessageListProps {
   assistantTypingUntil: Record<string, number>;
   onTypingProgress: () => void;
   onQuote: (target: QuoteTarget) => void;
-  onStatus: (line: string) => void;
 }
 
 export function MessageList({
@@ -49,16 +49,27 @@ export function MessageList({
   assistantTypingUntil,
   onTypingProgress,
   onQuote,
-  onStatus,
 }: MessageListProps) {
   return (
     <div className="message-list" ref={scrollRef} onScroll={onScroll}>
       {empty ? (
-        <div className="empty-state">
+        <div className="empty-state empty-state--chat">
           <div className="empty-state__icon">
-            <IconChat size={28} />
+            {fallbackRuntimeId && runtimeAvatarSrc[fallbackRuntimeId] ? (
+              <img
+                className={`empty-state__runtime-avatar empty-state__runtime-avatar--${fallbackRuntimeId}`}
+                src={runtimeAvatarSrc[fallbackRuntimeId]}
+                alt=""
+                title={runtimeAvatarLabel(fallbackRuntimeId)}
+                width={44}
+                height={44}
+                draggable={false}
+              />
+            ) : (
+              <IconChat size={42} />
+            )}
           </div>
-          直接输入发送。Grok 走真 ACP；Codex 仍为 stub。
+          直接输入发送。
         </div>
       ) : (
         <>
@@ -118,8 +129,11 @@ export function MessageList({
                       onClick={(ev) => {
                         ev.stopPropagation();
                         void copyTextToClipboard(m.content).then(
-                          () => onStatus("已复制消息"),
-                          (error) => onStatus(`复制失败: ${String(error)}`),
+                          () => emitToast("已复制"),
+                          (error) => emitToast({
+                            message: `复制失败: ${String(error)}`,
+                            tone: "danger",
+                          }),
                         );
                       }}
                     >

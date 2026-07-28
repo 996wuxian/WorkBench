@@ -15,6 +15,8 @@ import { SessionSidebar } from "./components/SessionSidebar";
 import { ComposerPanel } from "./components/ComposerPanel";
 import { SessionInspector } from "./components/SessionInspector";
 import { AppOverlays } from "./components/AppOverlays";
+import { ToastViewport } from "./components/Toast";
+import type { SettingsSection } from "./components/SettingsDialog";
 import {
   IconChat,
   IconPanelRight,
@@ -25,6 +27,12 @@ import {
 } from "./components/icons";
 import { useSessionEvents } from "./hooks/useSessionEvents";
 import { api, isTauri } from "./lib/api";
+import {
+  applyUiFontSize,
+  loadUiFontSize,
+  saveUiFontSize,
+  type UiFontSize,
+} from "./lib/fontSize";
 import { applyTheme, loadTheme, toggleTheme, type ThemeMode } from "./lib/theme";
 import {
   CODEX_REASONING_OPTIONS,
@@ -53,9 +61,12 @@ import {
   loadRuntimePick,
   mergeSessions,
   saveRuntimePick,
+  sessionDisplaySummary,
+  sessionDisplayTitle,
   stateDotClass,
 } from "./lib/sessions";
 import type {
+  AppSettings,
   ChatMessage,
   CodexRouteStatus,
   PermissionDecision,
@@ -117,6 +128,12 @@ export default function App() {
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const [asideHidden, setAsideHidden] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] =
+    useState<SettingsSection>("general");
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+  const [settingsRuntimeBusy, setSettingsRuntimeBusy] = useState<string | null>(
+    null,
+  );
   const [sessionFilter, setSessionFilter] = useState("");
   const [showSearch, setShowSearch] = useState(false);
   const [sessionContextMenu, setSessionContextMenu] = useState<{
@@ -139,6 +156,9 @@ export default function App() {
     Partial<Record<RuntimeId, boolean>>
   >({});
   const [theme, setTheme] = useState<ThemeMode>(() => loadTheme());
+  const [uiFontSize, setUiFontSize] = useState<UiFontSize>(() =>
+    loadUiFontSize(),
+  );
   const [appDataDir, setAppDataDir] = useState<string | null>(null);
   const [statusLine, setStatusLine] = useState(
     isTauri() ? "Connecting Host…" : "UI preview mode (no Tauri)",
@@ -148,6 +168,10 @@ export default function App() {
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
+
+  useEffect(() => {
+    applyUiFontSize(uiFontSize);
+  }, [uiFontSize]);
 
   useEffect(() => {
     saveRuntimePick(runtimePick);
@@ -260,6 +284,20 @@ export default function App() {
       })),
     [runtimes],
   );
+  const runtimeVisibleSessions = useMemo(() => {
+    const scoped = sessions.filter((session) => session.runtimeId === runtimePick);
+    const q = sessionFilter.trim().toLowerCase();
+    if (!q) return scoped;
+    return scoped.filter(
+      (session) =>
+        sessionDisplayTitle(session).toLowerCase().includes(q) ||
+        (sessionDisplaySummary(session) ?? "").toLowerCase().includes(q) ||
+        session.runtimeId.includes(q) ||
+        (session.modelId ?? "").toLowerCase().includes(q) ||
+        (session.nativeSessionId ?? "").toLowerCase().includes(q) ||
+        (session.nativeThreadId ?? "").toLowerCase().includes(q),
+    );
+  }, [runtimePick, sessionFilter, sessions]);
   const activeSupportsReasoningEffort =
     runtimeInfo(activeRuntimeId)?.capabilities.reasoningEffort ?? false;
   const activePermissionQueue = activeId
@@ -562,10 +600,10 @@ export default function App() {
     if (!isTauri()) {
       setProbes([
         {
-          runtimeId: "grok",
+          runtimeId: "claude",
           found: true,
-          path: "D:\\tools\\grok\\bin\\grok.exe",
-          version: "0.2.111",
+          path: "D:\\Nvm\\node\\node_global\\claude.cmd",
+          version: "1.0.64",
           detail: "browser mock",
         },
         {
@@ -573,6 +611,20 @@ export default function App() {
           found: true,
           path: "D:\\codex\\codex.exe",
           version: "0.144.4",
+          detail: "browser mock",
+        },
+        {
+          runtimeId: "kimi",
+          found: false,
+          path: null,
+          version: null,
+          detail: "browser mock · CLI not found",
+        },
+        {
+          runtimeId: "grok",
+          found: true,
+          path: "D:\\tools\\grok\\bin\\grok.exe",
+          version: "0.2.111",
           detail: "browser mock",
         },
       ]);
@@ -612,6 +664,98 @@ export default function App() {
       setStatusLine(`codex route probe failed: ${String(e)}`);
     }
   }, []);
+
+  const changeUiFontSize = useCallback((value: UiFontSize) => {
+    setUiFontSize(value);
+    saveUiFontSize(value);
+  }, []);
+
+  const refreshSettingsDiagnostics = useCallback(() => {
+    void refreshRuntimes();
+    void refreshProbes();
+    void refreshCodexRoute();
+  }, [refreshCodexRoute, refreshProbes, refreshRuntimes]);
+
+  const refreshAppSettings = useCallback(async () => {
+    if (!isTauri()) {
+      setAppSettings({ runtimes: {} });
+      return;
+    }
+    try {
+      setAppSettings(await api.getSettings());
+    } catch (e) {
+      setStatusLine(`settings load failed: ${String(e)}`);
+    }
+  }, []);
+
+  const saveRuntimeCliPath = useCallback(
+    async (runtimeId: RuntimeId, cliPath: string) => {
+      const path = cliPath.trim().replace(/^["']|["']$/g, "");
+      const current = appSettings?.runtimes[runtimeId] ?? {};
+      const patch = {
+        ...current,
+        cliPath: path.length > 0 ? path : null,
+      };
+
+      if (!isTauri()) {
+        setAppSettings((prev) => ({
+          runtimes: {
+            ...(prev?.runtimes ?? {}),
+            [runtimeId]: patch,
+          },
+        }));
+        setStatusLine(`${runtimeLabel(runtimeId)} CLI 路径已保存 · browser mock`);
+        return;
+      }
+
+      try {
+        setSettingsRuntimeBusy(runtimeId);
+        const next = await api.setRuntimeOverride(runtimeId, patch);
+        setAppSettings(next);
+        setStatusLine(`${runtimeLabel(runtimeId)} CLI 路径已保存`);
+        refreshSettingsDiagnostics();
+      } catch (e) {
+        setStatusLine(`save runtime path failed: ${String(e)}`);
+      } finally {
+        setSettingsRuntimeBusy(null);
+      }
+    },
+    [appSettings, refreshSettingsDiagnostics],
+  );
+
+  const clearRuntimeCliPath = useCallback(
+    async (runtimeId: RuntimeId) => {
+      const current = appSettings?.runtimes[runtimeId] ?? {};
+      const patch = {
+        ...current,
+        cliPath: null,
+      };
+
+      if (!isTauri()) {
+        setAppSettings((prev) => ({
+          runtimes: {
+            ...(prev?.runtimes ?? {}),
+            [runtimeId]: patch,
+          },
+        }));
+        setStatusLine(`${runtimeLabel(runtimeId)} 自定义 CLI 路径已清除 · browser mock`);
+        return;
+      }
+
+      try {
+        setSettingsRuntimeBusy(runtimeId);
+        const next = await api.setRuntimeOverride(runtimeId, patch);
+        setAppSettings(next);
+        setStatusLine(`${runtimeLabel(runtimeId)} 自定义 CLI 路径已清除`);
+        refreshSettingsDiagnostics();
+      } catch (e) {
+        setStatusLine(`clear runtime path failed: ${String(e)}`);
+      } finally {
+        setSettingsRuntimeBusy(null);
+      }
+    },
+    [appSettings, refreshSettingsDiagnostics],
+  );
 
   const loadSessions = useCallback(async () => {
     if (!isTauri()) {
@@ -671,7 +815,14 @@ export default function App() {
     });
     void refreshProbes();
     void refreshCodexRoute();
-  }, [loadSessions, refreshProbes, refreshCodexRoute, refreshRuntimes]);
+    void refreshAppSettings();
+  }, [
+    loadSessions,
+    refreshAppSettings,
+    refreshProbes,
+    refreshCodexRoute,
+    refreshRuntimes,
+  ]);
 
   // A stored engine pick can point at a runtime that was since disabled or
   // removed from the manifests; fall back to the first enabled one.
@@ -734,6 +885,23 @@ export default function App() {
     }
     void activateSession(id);
   }
+
+  useEffect(() => {
+    if (active?.runtimeId === runtimePick) return;
+
+    setQuoteTarget(null);
+    setDraft("");
+    setPendingSession(null);
+
+    const nextSession = runtimeVisibleSessions[0] ?? null;
+    if (nextSession) {
+      void activateSession(nextSession.id, nextSession);
+      return;
+    }
+
+    setActiveId(null);
+    setSnapshot(idleSnapshot());
+  }, [activateSession, active?.runtimeId, runtimePick, runtimeVisibleSessions]);
 
   const openSelectedSessionLocation = useCallback(async (sessionId: string) => {
     setSessionContextMenu(null);
@@ -1353,52 +1521,6 @@ export default function App() {
       </div>
     </>
   );
-  const doctorDiagnosticsPanel = (
-    <>
-      <button
-        type="button"
-        className="btn btn--block"
-        style={{ marginBottom: 12 }}
-        onClick={() => {
-          void refreshProbes();
-          void refreshCodexRoute();
-        }}
-      >
-        <IconRefresh size={15} />
-        重新探测
-      </button>
-      {probes.map((probe) => (
-        <div key={probe.runtimeId} className="probe-card">
-          <div className="probe-card__row">
-            <strong>{runtimeLabel(probe.runtimeId)}</strong>
-            <span
-              style={{
-                color: probe.found ? "var(--success)" : "var(--danger)",
-                fontSize: 11,
-              }}
-            >
-              {probe.found ? "found" : "missing"}
-            </span>
-          </div>
-          <div className="muted" style={{ fontSize: 11, marginTop: 6, wordBreak: "break-all" }}>
-            {probe.path ?? "-"}
-          </div>
-          <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-            {probe.version ?? probe.detail ?? ""}
-          </div>
-        </div>
-      ))}
-      <div className="sidebar__section-label settings-diagnostics__label">
-        路由
-      </div>
-      {routeDiagnosticsPanel}
-      <div className="sidebar__section-label settings-diagnostics__label">
-        Host
-      </div>
-      <div className="muted settings-diagnostics__host">{statusLine}</div>
-    </>
-  );
-
   return (
     <div className="app-shell platform-win has-custom-chrome" data-theme={theme}>
       <WindowControls visible={isTauri()} />
@@ -1434,8 +1556,8 @@ export default function App() {
           onSyncNativeSessions={(mode) => void syncNativeSessions(mode)}
           onOpenSettings={() => {
             setSettingsOpen(true);
-            void refreshProbes();
-            void refreshCodexRoute();
+            refreshSettingsDiagnostics();
+            void refreshAppSettings();
           }}
         />
 
@@ -1535,7 +1657,6 @@ export default function App() {
                   composerInputRef.current?.focus();
                   setStatusLine(`已引用 ${target.label}`);
                 }}
-                onStatus={setStatusLine}
               />
 
               {activePermissionRequest ? (
@@ -1550,7 +1671,6 @@ export default function App() {
               ) : null}
 
               <ComposerPanel
-                runtimeId={active.runtimeId}
                 draft={draft}
                 busy={busy}
                 streaming={streaming}
@@ -1605,8 +1725,20 @@ export default function App() {
 
       <AppOverlays
         settingsOpen={settingsOpen}
-        diagnosticsPanel={doctorDiagnosticsPanel}
+        settingsSection={settingsSection}
+        uiFontSize={uiFontSize}
+        runtimes={runtimes}
+        probes={probes}
+        appSettings={appSettings}
+        settingsRuntimeBusy={settingsRuntimeBusy}
+        routeDiagnosticsPanel={routeDiagnosticsPanel}
+        statusLine={statusLine}
         onCloseSettings={() => setSettingsOpen(false)}
+        onSettingsSectionChange={setSettingsSection}
+        onFontSizeChange={changeUiFontSize}
+        onRefreshSettingsDiagnostics={refreshSettingsDiagnostics}
+        onSaveRuntimeCliPath={saveRuntimeCliPath}
+        onClearRuntimeCliPath={clearRuntimeCliPath}
         sessionContextMenu={sessionContextMenu}
         sessionContextTargetTitle={sessionContextTargetTitle}
         sessionContextTargetCount={sessionContextTargetIds.length}
@@ -1627,6 +1759,7 @@ export default function App() {
         }}
         onConfirmDelete={() => void confirmDeleteSession()}
       />
+      <ToastViewport />
     </div>
   );
 }

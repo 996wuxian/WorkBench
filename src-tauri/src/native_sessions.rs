@@ -1,18 +1,20 @@
 //! Read-only import of runtime-native session indexes.
 
+use std::fs::File;
+use std::io::{BufRead, BufReader as StdBufReader};
 use std::path::Path;
 use std::process::Stdio;
 
+use crate::process_util;
+use crate::runtime::manifest::{self, RuntimeManifest};
+use crate::runtime::{NativeSessionSource, RuntimeId};
+use crate::session_store::StoredChatMessage;
 use chrono::{TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::time::{timeout, Duration};
-use crate::process_util;
-use crate::runtime::manifest::{self, RuntimeManifest};
-use crate::runtime::{NativeSessionSource, RuntimeId};
-use crate::session_store::StoredChatMessage;
 
 const CODEX_RPC_TIMEOUT_SECS: u64 = 45;
 const TOOL_SUMMARY_MAX_CHARS: usize = 240;
@@ -51,8 +53,8 @@ pub async fn sync_native_sessions(
     cursor: Option<String>,
 ) -> Result<NativeSessionPage, String> {
     let limit = limit.clamp(1, 100);
-    let manifest = manifest::get(runtime_id)
-        .ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
+    let manifest =
+        manifest::get(runtime_id).ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
     match manifest.native_sessions {
         Some(NativeSessionSource::AcpSummaryFiles) => {
             sync_summary_file_sessions(manifest, limit, cursor)
@@ -60,10 +62,7 @@ pub async fn sync_native_sessions(
         Some(NativeSessionSource::CodexAppServer) => {
             sync_codex_threads(manifest, limit, cursor).await
         }
-        None => Err(format!(
-            "{} 不提供可导入的历史会话",
-            manifest.display_name
-        )),
+        None => Err(format!("{} 不提供可导入的历史会话", manifest.display_name)),
     }
 }
 
@@ -195,6 +194,192 @@ fn parse_summary_file(
     })
 }
 
+pub fn load_acp_summary_session_messages(
+    runtime_id: RuntimeId,
+    native_session_id: &str,
+) -> Result<Vec<StoredChatMessage>, String> {
+    let manifest =
+        manifest::get(runtime_id).ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
+    if manifest.native_sessions != Some(NativeSessionSource::AcpSummaryFiles) {
+        return Err(format!(
+            "{} does not use ACP summary-file history",
+            manifest.display_name
+        ));
+    }
+
+    let home = manifest.resolve_home();
+    let root = home.join("sessions");
+    let Some(summary_path) = find_summary_file_for_session(&root, native_session_id)? else {
+        return Ok(Vec::new());
+    };
+    let Some(session_dir) = summary_path.parent() else {
+        return Ok(Vec::new());
+    };
+    let chat_path = session_dir.join("chat_history.jsonl");
+    if !chat_path.is_file() {
+        return Ok(Vec::new());
+    }
+
+    parse_acp_chat_history(runtime_id, &chat_path)
+}
+
+fn find_summary_file_for_session(
+    dir: &Path,
+    native_session_id: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_summary_file_for_session(&path, native_session_id)? {
+                return Ok(Some(found));
+            }
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) != Some("summary.json") {
+            continue;
+        }
+        let parent_matches = path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            == Some(native_session_id);
+        if parent_matches || summary_file_session_id(&path).as_deref() == Some(native_session_id) {
+            return Ok(Some(path));
+        }
+    }
+
+    Ok(None)
+}
+
+fn summary_file_session_id(path: &Path) -> Option<String> {
+    let value: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    value
+        .pointer("/info/id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+fn parse_acp_chat_history(
+    runtime_id: RuntimeId,
+    path: &Path,
+) -> Result<Vec<StoredChatMessage>, String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let mut messages = Vec::new();
+    for line in StdBufReader::new(file).lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(item) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        messages.extend(parse_acp_chat_item(runtime_id, &item));
+    }
+    Ok(messages)
+}
+
+fn parse_acp_chat_item(runtime_id: RuntimeId, item: &Value) -> Vec<StoredChatMessage> {
+    let created_at = timestamp_or_now(
+        item.get("created_at")
+            .or_else(|| item.get("timestamp"))
+            .or_else(|| item.get("ts")),
+    );
+    match item.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        "user" => message_from_text("user", acp_user_query_text(item), runtime_id, &created_at),
+        "assistant" => message_from_text(
+            "assistant",
+            acp_content_text(item.get("content")),
+            runtime_id,
+            &created_at,
+        ),
+        "reasoning" => message_from_text(
+            "thought",
+            acp_reasoning_text(item)
+                .or_else(|| reasoning_text(item))
+                .or_else(|| acp_content_text(item.get("content"))),
+            runtime_id,
+            &created_at,
+        ),
+        "tool_result" => message_from_text(
+            "tool",
+            acp_content_text(item.get("content")),
+            runtime_id,
+            &created_at,
+        ),
+        _ => Vec::new(),
+    }
+}
+
+fn acp_user_query_text(item: &Value) -> Option<String> {
+    let text = acp_content_text(item.get("content"))?;
+    if text.contains("<system-reminder>") || text.contains("<user_info>") {
+        return None;
+    }
+    extract_tag_text(&text, "user_query").or(Some(text))
+}
+
+fn acp_content_text(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) => clean_plain_text(text),
+        Value::Array(parts) => {
+            let chunks = parts
+                .iter()
+                .filter_map(|part| match part {
+                    Value::String(text) => clean_plain_text(text),
+                    Value::Object(_) => clean_str(part.get("text"))
+                        .or_else(|| clean_str(part.get("content")))
+                        .or_else(|| clean_str(part.get("url")).map(|url| format!("[image] {url}")))
+                        .or_else(|| {
+                            clean_str(part.get("path")).map(|path| format!("[file] {path}"))
+                        }),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            join_non_empty(chunks)
+        }
+        Value::Object(map) => clean_str(map.get("text")).or_else(|| clean_str(map.get("content"))),
+        _ => None,
+    }
+}
+
+fn acp_reasoning_text(item: &Value) -> Option<String> {
+    let parts = item
+        .get("summary")?
+        .as_array()?
+        .iter()
+        .filter_map(|part| {
+            part.as_str()
+                .map(str::to_string)
+                .or_else(|| clean_str(part.get("text")))
+        })
+        .collect::<Vec<_>>();
+    join_non_empty(parts)
+}
+
+fn extract_tag_text(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    clean_plain_text(&text[start..end])
+}
+
+fn clean_plain_text(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
 async fn sync_codex_threads(
     manifest: &RuntimeManifest,
     limit: usize,
@@ -313,8 +498,8 @@ fn parse_codex_thread(
 }
 
 pub async fn load_codex_thread_messages(thread_id: &str) -> Result<Vec<StoredChatMessage>, String> {
-    let manifest =
-        manifest::get(RuntimeId::CODEX).ok_or_else(|| "Codex runtime is not registered".to_string())?;
+    let manifest = manifest::get(RuntimeId::CODEX)
+        .ok_or_else(|| "Codex runtime is not registered".to_string())?;
     let cli = manifest
         .resolve_cli_path()
         .ok_or_else(|| format!("{} CLI not found", manifest.display_name))?;
@@ -421,12 +606,63 @@ mod tests {
     #[test]
     fn empty_or_missing_turns_do_not_import_anything() {
         assert!(parse_codex_thread_messages(&serde_json::json!({})).is_empty());
-        assert!(
-            parse_codex_thread_messages(&serde_json::json!({
-                "thread": { "turns": [] }
-            }))
-            .is_empty()
+        assert!(parse_codex_thread_messages(&serde_json::json!({
+            "thread": { "turns": [] }
+        }))
+        .is_empty());
+    }
+
+    #[test]
+    fn acp_chat_history_items_map_to_workbench_messages() {
+        let user = parse_acp_chat_item(
+            RuntimeId::GROK,
+            &serde_json::json!({
+                "type": "user",
+                "content": [{ "type": "text", "text": "<user_query>\n你好\n</user_query>" }],
+                "created_at": "2026-07-24T07:09:10Z"
+            }),
         );
+        let reminder = parse_acp_chat_item(
+            RuntimeId::GROK,
+            &serde_json::json!({
+                "type": "user",
+                "content": [{ "type": "text", "text": "<system-reminder>ignore</system-reminder>" }]
+            }),
+        );
+        let reasoning = parse_acp_chat_item(
+            RuntimeId::GROK,
+            &serde_json::json!({
+                "type": "reasoning",
+                "summary": [{ "type": "summary_text", "text": "thinking" }]
+            }),
+        );
+        let assistant = parse_acp_chat_item(
+            RuntimeId::GROK,
+            &serde_json::json!({
+                "type": "assistant",
+                "content": "done"
+            }),
+        );
+        let tool = parse_acp_chat_item(
+            RuntimeId::GROK,
+            &serde_json::json!({
+                "type": "tool_result",
+                "content": "read file"
+            }),
+        );
+
+        assert_eq!(user.len(), 1);
+        assert_eq!(user[0].role, "user");
+        assert_eq!(user[0].content, "你好");
+        assert_eq!(user[0].runtime_id, Some(RuntimeId::GROK));
+        assert_eq!(user[0].created_at, "2026-07-24T07:09:10Z");
+        assert!(reminder.is_empty());
+        assert_eq!(reasoning[0].role, "thought");
+        assert_eq!(reasoning[0].content, "thinking");
+        assert_eq!(assistant[0].role, "assistant");
+        assert_eq!(assistant[0].content, "done");
+        assert_eq!(tool[0].role, "tool");
+        assert_eq!(tool[0].content, "read file");
     }
 }
 

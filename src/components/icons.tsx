@@ -10,6 +10,7 @@ import {
   IconCheck as TbCheck,
   IconChevronDown as TbChevronDown,
   IconChevronRight as TbChevronRight,
+  IconClipboard as TbClipboard,
   IconDots as TbDots,
   IconEdit as TbEdit,
   IconCopy as TbCopy,
@@ -133,6 +134,7 @@ export function IconWorkbenchMark({
 export const IconSearch = wrap(TbSearch);
 export const IconNewChat = wrap(TbEdit);
 export const IconCopy = wrap(TbCopy);
+export const IconClipboard = wrap(TbClipboard);
 export const IconCheck = wrap(TbCheck, { stroke: 2 });
 export const IconChevronDown = wrap(TbChevronDown);
 export const IconChevronRight = wrap(TbChevronRight);
