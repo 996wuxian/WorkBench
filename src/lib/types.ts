@@ -66,15 +66,11 @@ export interface ProbeResult {
 export interface CodexRouteStatus {
   routeKind: string;
   ccSwitchDetected: boolean;
-  codexConfigPath?: string | null;
   modelProvider?: string | null;
   model?: string | null;
   modelReasoningEffort?: string | null;
   baseUrl?: string | null;
   wireApi?: string | null;
-  ccSwitchDir?: string | null;
-  ccSwitchDbPath?: string | null;
-  ccSwitchLogPath?: string | null;
   latestForwardUrl?: string | null;
   latestForwardModel?: string | null;
   latestError?: string | null;
@@ -82,7 +78,6 @@ export interface CodexRouteStatus {
 }
 
 export interface ClaudeRouteStatus {
-  configPath?: string | null;
   baseUrl?: string | null;
   model?: string | null;
   outputLimit?: string | null;

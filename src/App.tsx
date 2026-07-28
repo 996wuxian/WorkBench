@@ -20,8 +20,6 @@ import type { SettingsSection } from "./components/SettingsDialog";
 import {
   IconChat,
   IconPanelRight,
-  IconRefresh,
-  IconSettings,
   IconThemeMoon,
   IconThemeSun,
 } from "./components/icons";
@@ -101,6 +99,14 @@ function runtimeRouteMode(runtime: RuntimeInfo): string {
   if (runtime.id === "grok") return "native ACP";
   if (runtime.id === "kimi") return "ACP";
   return runtime.capabilities.protocol;
+}
+
+function runtimeConnectHint(runtimeId: RuntimeId): string {
+  if (runtimeId === "claude") return "claude -p --output-format stream-json";
+  if (runtimeId === "codex") return "codex app-server --stdio";
+  if (runtimeId === "grok") return "grok agent stdio";
+  if (runtimeId === "kimi") return "kimi acp";
+  return "runtime manifest";
 }
 
 function runtimeRouteDescription(runtime: RuntimeInfo): string {
@@ -670,18 +676,14 @@ export default function App() {
       setCodexRoute({
         routeKind: "cc-switch",
         ccSwitchDetected: true,
-        codexConfigPath: "C:\\Users\\kata\\.codex\\config.toml",
         modelProvider: "custom",
         model: "gpt-5.5",
         baseUrl: "http://127.0.0.1:15721/v1",
         wireApi: "responses",
-        ccSwitchDir: "C:\\Users\\kata\\.cc-switch",
-        ccSwitchDbPath: "C:\\Users\\kata\\.cc-switch\\cc-switch.db",
-        ccSwitchLogPath: "C:\\Users\\kata\\.cc-switch\\logs\\cc-switch.log",
         latestForwardUrl: "https://api.999555999.com/v1/responses",
         latestForwardModel: "gpt-5.5",
         latestError: null,
-        note: "Codex 通过 cc-switch 本地代理路由；Grok 保持原生 ACP，不走 cc-switch。",
+        note: "Codex CLI 当前配置指向 cc-switch 本地代理；Workbench 连接的是 Codex app-server，模型出口由 Codex CLI 配置决定。",
       });
       return;
     }
@@ -695,12 +697,11 @@ export default function App() {
   const refreshClaudeRoute = useCallback(async () => {
     if (!isTauri()) {
       setClaudeRoute({
-        configPath: "C:\\Users\\kata\\.claude\\settings.json",
         baseUrl: "https://api.deepseek.com/anthropic",
         model: "deepseek-v4-pro[1m]",
         outputLimit: "32000",
         routeKind: "direct-deepseek",
-        note: "Claude Code 连接本机 Claude CLI，模型出口由 ~/.claude/settings.json 中的 ANTHROPIC_BASE_URL 决定。当前示例为直连 DeepSeek Anthropic 兼容入口。",
+        note: "Claude Code 当前配置直连 DeepSeek 的 Anthropic 兼容入口；Workbench 连接的是 Claude CLI，模型出口由本机 Claude 配置决定。",
       });
       return;
     }
@@ -1490,6 +1491,8 @@ export default function App() {
   const nonCodexRouteRuntimes = sortRuntimes(runtimes).filter(
     (runtime) => runtime.id !== "codex" && runtime.id !== "claude",
   );
+  const claudeRuntime = runtimes.find((runtime) => runtime.id === "claude");
+  const codexRuntime = runtimes.find((runtime) => runtime.id === "codex");
   const routeDiagnosticsPanel = (
     <>
       <div className="probe-card">
@@ -1509,23 +1512,15 @@ export default function App() {
         </div>
         <div className="route-kv">
           <span>connect</span>
-          <strong>claude -p --output-format stream-json</strong>
+          <strong>{runtimeConnectHint("claude")}</strong>
         </div>
         <div className="route-kv">
-          <span>config</span>
-          <strong>{claudeRoute?.configPath ?? "—"}</strong>
+          <span>protocol</span>
+          <strong>{claudeRuntime?.capabilities.protocol ?? "claude_code"}</strong>
         </div>
         <div className="route-kv">
-          <span>base_url</span>
-          <strong>{claudeRoute?.baseUrl ?? "—"}</strong>
-        </div>
-        <div className="route-kv">
-          <span>model</span>
-          <strong>{claudeRoute?.model ?? "—"}</strong>
-        </div>
-        <div className="route-kv">
-          <span>output</span>
-          <strong>{claudeRoute?.outputLimit ?? "—"}</strong>
+          <span>permission</span>
+          <strong>{claudeRuntime?.capabilities.permissionGate === false ? "none" : "gated"}</strong>
         </div>
         <div className="route-note">{claudeRoute?.note ?? "正在检测 Claude Code 路由。"}</div>
       </div>
@@ -1547,68 +1542,22 @@ export default function App() {
         </div>
         <div className="route-kv">
           <span>connect</span>
-          <strong>codex app-server --stdio</strong>
+          <strong>{runtimeConnectHint("codex")}</strong>
         </div>
         <div className="route-kv">
-          <span>model route</span>
-          <strong>{codexRoute?.routeKind ?? "unknown"}</strong>
+          <span>protocol</span>
+          <strong>{codexRuntime?.capabilities.protocol ?? "codex_app_server"}</strong>
         </div>
         <div className="route-kv">
-          <span>provider</span>
-          <strong>{codexRoute?.modelProvider ?? "—"}</strong>
+          <span>permission</span>
+          <strong>{codexRuntime?.capabilities.permissionGate === false ? "none" : "gated"}</strong>
         </div>
-        <div className="route-kv">
-          <span>model</span>
-          <strong>{codexRoute?.model ?? codexRoute?.latestForwardModel ?? "—"}</strong>
-        </div>
-        <div className="route-kv">
-          <span>base_url</span>
-          <strong>{codexRoute?.baseUrl ?? "—"}</strong>
-        </div>
-        <div className="route-kv">
-          <span>wire_api</span>
-          <strong>{codexRoute?.wireApi ?? "—"}</strong>
-        </div>
-        {codexRoute?.latestForwardUrl ? (
-          <div className="route-kv">
-            <span>forward</span>
-            <strong>{codexRoute.latestForwardUrl}</strong>
-          </div>
-        ) : null}
         {codexRoute?.latestError ? (
           <div className="route-note route-note--warn">
             {codexRoute.latestError}
           </div>
         ) : null}
-        <div className="route-note">
-          {codexRoute?.routeKind === "cc-switch"
-            ? "Workbench 连接的是 Codex CLI app-server；cc-switch 是 Codex CLI 配置里的上游模型代理，本页根据 ~/.codex/config.toml 和 cc-switch 日志推断。"
-            : "Workbench 连接的是 Codex CLI app-server；模型出口由 Codex CLI 配置决定。当前未检测到 cc-switch 本地代理路由。"}
-        </div>
-        <div className="route-actions">
-          <button
-            type="button"
-            className="chip chip--btn"
-            onClick={() => void refreshCodexRoute()}
-          >
-            <IconRefresh size={13} />
-            刷新
-          </button>
-          <button
-            type="button"
-            className="chip chip--btn"
-            onClick={async () => {
-              try {
-                setStatusLine(await api.openCcSwitch());
-              } catch (e) {
-                setStatusLine(String(e));
-              }
-            }}
-          >
-            <IconSettings size={13} />
-            打开 cc-switch
-          </button>
-        </div>
+        <div className="route-note">{codexRoute?.note ?? "正在检测 Codex 路由。"}</div>
       </div>
       {nonCodexRouteRuntimes.map((runtime) => (
         <div key={runtime.id} className="probe-card">
@@ -1627,7 +1576,7 @@ export default function App() {
           </div>
           <div className="route-kv">
             <span>connect</span>
-            <strong>{runtimeRouteMode(runtime)}</strong>
+            <strong>{runtimeConnectHint(runtime.id)}</strong>
           </div>
           <div className="route-kv">
             <span>protocol</span>

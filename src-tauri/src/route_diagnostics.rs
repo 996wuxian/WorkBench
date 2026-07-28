@@ -9,15 +9,11 @@ use serde::Serialize;
 pub struct CodexRouteStatus {
     pub route_kind: String,
     pub cc_switch_detected: bool,
-    pub codex_config_path: Option<String>,
     pub model_provider: Option<String>,
     pub model: Option<String>,
     pub model_reasoning_effort: Option<String>,
     pub base_url: Option<String>,
     pub wire_api: Option<String>,
-    pub cc_switch_dir: Option<String>,
-    pub cc_switch_db_path: Option<String>,
-    pub cc_switch_log_path: Option<String>,
     pub latest_forward_url: Option<String>,
     pub latest_forward_model: Option<String>,
     pub latest_error: Option<String>,
@@ -27,7 +23,6 @@ pub struct CodexRouteStatus {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeRouteStatus {
-    pub config_path: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub output_limit: Option<String>,
@@ -65,10 +60,6 @@ pub fn codex_route_status() -> CodexRouteStatus {
 
     let cc_switch_dir = user_home().map(|home| home.join(".cc-switch"));
     let cc_switch_detected = cc_switch_dir.as_ref().is_some_and(|path| path.is_dir());
-    let cc_switch_db_path = cc_switch_dir
-        .as_ref()
-        .map(|dir| dir.join("cc-switch.db"))
-        .filter(|path| path.exists());
     let cc_switch_log_path = cc_switch_dir
         .as_ref()
         .map(|dir| dir.join("logs").join("cc-switch.log"))
@@ -90,30 +81,20 @@ pub fn codex_route_status() -> CodexRouteStatus {
         "default".to_string()
     };
     let note = if via_cc_switch {
-        "Codex 通过 cc-switch 本地代理路由；Grok 保持原生 ACP，不走 cc-switch。"
+        "Codex CLI 当前配置指向 cc-switch 本地代理；Workbench 连接的是 Codex app-server，模型出口由 Codex CLI 配置决定。"
     } else {
-        "Codex 未检测到 cc-switch 本地代理路由；Grok 保持原生 ACP。"
+        "Codex CLI 未检测到 cc-switch 本地代理；Workbench 连接的是 Codex app-server，模型出口由 Codex CLI 配置决定。"
     }
     .to_string();
 
     CodexRouteStatus {
         route_kind,
         cc_switch_detected,
-        codex_config_path: codex_config_path
-            .as_ref()
-            .filter(|path| path.exists())
-            .map(display_path),
         model_provider,
         model,
         model_reasoning_effort,
         base_url,
         wire_api,
-        cc_switch_dir: cc_switch_dir
-            .as_ref()
-            .filter(|path| path.exists())
-            .map(display_path),
-        cc_switch_db_path: cc_switch_db_path.as_ref().map(display_path),
-        cc_switch_log_path: cc_switch_log_path.as_ref().map(display_path),
         latest_forward_url,
         latest_forward_model,
         latest_error,
@@ -151,10 +132,6 @@ pub fn claude_route_status() -> ClaudeRouteStatus {
     .to_string();
 
     ClaudeRouteStatus {
-        config_path: config_path
-            .as_ref()
-            .filter(|path| path.exists())
-            .map(display_path),
         base_url,
         model,
         output_limit,
