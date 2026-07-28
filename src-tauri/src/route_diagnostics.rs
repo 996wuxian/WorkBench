@@ -24,6 +24,17 @@ pub struct CodexRouteStatus {
     pub note: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeRouteStatus {
+    pub config_path: Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub output_limit: Option<String>,
+    pub route_kind: String,
+    pub note: String,
+}
+
 pub fn codex_route_status() -> CodexRouteStatus {
     let codex_config_path = user_home().map(|home| home.join(".codex").join("config.toml"));
     let codex_config_text = codex_config_path
@@ -106,6 +117,48 @@ pub fn codex_route_status() -> CodexRouteStatus {
         latest_forward_url,
         latest_forward_model,
         latest_error,
+        note,
+    }
+}
+
+pub fn claude_route_status() -> ClaudeRouteStatus {
+    let config_path = user_home().map(|home| home.join(".claude").join("settings.json"));
+    let config_text = config_path
+        .as_ref()
+        .and_then(|path| fs::read_to_string(path).ok());
+    let env = config_text
+        .as_deref()
+        .and_then(claude_settings_env)
+        .unwrap_or_default();
+    let base_url = env.get("ANTHROPIC_BASE_URL").cloned();
+    let model = env.get("ANTHROPIC_MODEL").cloned();
+    let output_limit = env.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS").cloned();
+
+    let route_kind = match base_url.as_deref() {
+        Some(url) if is_local_proxy_url(url) => "cc-switch/local-proxy",
+        Some(url) if url.contains("deepseek.com/anthropic") => "direct-deepseek",
+        Some(_) => "custom",
+        None => "default",
+    }
+    .to_string();
+
+    let note = match route_kind.as_str() {
+        "cc-switch/local-proxy" => "Claude Code 当前配置指向本地代理；Workbench 连接的是 Claude CLI，模型出口由本机 settings.json 里的 ANTHROPIC_BASE_URL 决定。",
+        "direct-deepseek" => "Claude Code 当前配置直连 DeepSeek 的 Anthropic 兼容入口；Workbench 连接的是 Claude CLI，模型出口由本机 settings.json 决定。",
+        "custom" => "Claude Code 使用自定义 ANTHROPIC_BASE_URL；Workbench 连接的是 Claude CLI，模型出口由本机 settings.json 决定。",
+        _ => "Claude Code 当前未检测到自定义出口配置；Workbench 连接的是 Claude CLI，模型出口走默认配置。",
+    }
+    .to_string();
+
+    ClaudeRouteStatus {
+        config_path: config_path
+            .as_ref()
+            .filter(|path| path.exists())
+            .map(display_path),
+        base_url,
+        model,
+        output_limit,
+        route_kind,
         note,
     }
 }
@@ -269,6 +322,35 @@ fn toml_string_value(text: &str, key: &str) -> Option<String> {
             .and_then(|v| v.strip_suffix('"'))
             .map(|v| v.to_string())
     })
+}
+
+fn claude_settings_env(text: &str) -> Option<std::collections::HashMap<String, String>> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let env = value.get("env")?.as_object()?;
+    let allowed = [
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+    ];
+    let mut map = std::collections::HashMap::new();
+    for (key, value) in env {
+        if !allowed.contains(&key.as_str()) {
+            continue;
+        }
+        if let Some(text) = value.as_str() {
+            map.insert(key.clone(), text.to_string());
+        }
+    }
+    Some(map)
+}
+
+fn is_local_proxy_url(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    lower.contains("127.0.0.1") || lower.contains("localhost") || lower.contains("cc-switch")
 }
 
 fn display_path(path: &PathBuf) -> String {

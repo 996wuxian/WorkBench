@@ -84,6 +84,11 @@ pub fn codex_route_status() -> CodexRouteStatus {
 }
 
 #[tauri::command]
+pub fn claude_route_status() -> route_diagnostics::ClaudeRouteStatus {
+    route_diagnostics::claude_route_status()
+}
+
+#[tauri::command]
 pub fn open_cc_switch() -> Result<String, String> {
     route_diagnostics::open_cc_switch()
 }

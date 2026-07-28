@@ -60,6 +60,7 @@ pub fn run() {
             commands::probe_all,
             commands::probe_runtime,
             commands::codex_route_status,
+            commands::claude_route_status,
             commands::open_cc_switch,
             commands::session_list,
             commands::session_create,

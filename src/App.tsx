@@ -67,6 +67,7 @@ import {
 } from "./lib/sessions";
 import type {
   AppSettings,
+  ClaudeRouteStatus,
   ChatMessage,
   CodexRouteStatus,
   PermissionDecision,
@@ -85,6 +86,7 @@ import {
   hydrateRuntimes,
   runtimeInfo,
   runtimeLabel,
+  sortRuntimes,
 } from "./lib/runtimes";
 
 const ASSISTANT_LOADING_TEXT = "thinking";
@@ -92,6 +94,30 @@ const INITIAL_VISIBLE_MESSAGES = 60;
 const HISTORY_BATCH_SIZE = 40;
 const CHAT_BOTTOM_THRESHOLD = 80;
 const CHAT_TOP_THRESHOLD = 48;
+
+function runtimeRouteMode(runtime: RuntimeInfo): string {
+  if (!runtime.enabled) return "disabled";
+  if (runtime.id === "claude") return "stream-json";
+  if (runtime.id === "grok") return "native ACP";
+  if (runtime.id === "kimi") return "ACP";
+  return runtime.capabilities.protocol;
+}
+
+function runtimeRouteDescription(runtime: RuntimeInfo): string {
+  if (!runtime.enabled) {
+    return "该运行时当前已禁用，不会创建新会话。";
+  }
+  if (runtime.id === "claude") {
+    return "Workbench 连接本机 Claude CLI 的 headless stream-json 输出；权限通过 Workbench MCP 审批桥转回应用内确认。模型出口由 Claude Code 自身配置决定，当前页面不直接诊断 Claude 的上游代理。";
+  }
+  if (runtime.id === "grok") {
+    return "Workbench 启动 grok agent stdio 并通过原生 ACP 通信；模型出口由 Grok CLI 自身处理，Workbench 不经过 cc-switch。";
+  }
+  if (runtime.id === "kimi") {
+    return "Workbench 按 manifest 启动 kimi acp 并通过 ACP 通信；模型出口由 Kimi CLI 自身处理，是否可用取决于本机 Kimi CLI 是否安装并完成握手。";
+  }
+  return `Workbench 通过 ${runtime.capabilities.protocol} 协议连接 ${runtime.displayName}；具体命令和参数来自 runtime manifest，模型出口由该 CLI 自身处理。`;
+}
 
 
 export default function App() {
@@ -146,6 +172,7 @@ export default function App() {
   const [deleteSessionBusy, setDeleteSessionBusy] = useState(false);
   const [deleteSessionError, setDeleteSessionError] = useState<string | null>(null);
   const [syncingRuntime, setSyncingRuntime] = useState<RuntimeId | null>(null);
+  const [claudeRoute, setClaudeRoute] = useState<ClaudeRouteStatus | null>(null);
   const [loadingMoreRuntime, setLoadingMoreRuntime] = useState<RuntimeId | null>(
     null,
   );
@@ -665,6 +692,25 @@ export default function App() {
     }
   }, []);
 
+  const refreshClaudeRoute = useCallback(async () => {
+    if (!isTauri()) {
+      setClaudeRoute({
+        configPath: "C:\\Users\\kata\\.claude\\settings.json",
+        baseUrl: "https://api.deepseek.com/anthropic",
+        model: "deepseek-v4-pro[1m]",
+        outputLimit: "32000",
+        routeKind: "direct-deepseek",
+        note: "Claude Code 连接本机 Claude CLI，模型出口由 ~/.claude/settings.json 中的 ANTHROPIC_BASE_URL 决定。当前示例为直连 DeepSeek Anthropic 兼容入口。",
+      });
+      return;
+    }
+    try {
+      setClaudeRoute(await api.claudeRouteStatus());
+    } catch (e) {
+      setStatusLine(`claude route probe failed: ${String(e)}`);
+    }
+  }, []);
+
   const changeUiFontSize = useCallback((value: UiFontSize) => {
     setUiFontSize(value);
     saveUiFontSize(value);
@@ -674,7 +720,8 @@ export default function App() {
     void refreshRuntimes();
     void refreshProbes();
     void refreshCodexRoute();
-  }, [refreshCodexRoute, refreshProbes, refreshRuntimes]);
+    void refreshClaudeRoute();
+  }, [refreshClaudeRoute, refreshCodexRoute, refreshProbes, refreshRuntimes]);
 
   const refreshAppSettings = useCallback(async () => {
     if (!isTauri()) {
@@ -815,10 +862,12 @@ export default function App() {
     });
     void refreshProbes();
     void refreshCodexRoute();
+    void refreshClaudeRoute();
     void refreshAppSettings();
   }, [
     loadSessions,
     refreshAppSettings,
+    refreshClaudeRoute,
     refreshProbes,
     refreshCodexRoute,
     refreshRuntimes,
@@ -1438,11 +1487,52 @@ export default function App() {
   );
 
   const streaming = snapshot.state === "streaming";
+  const nonCodexRouteRuntimes = sortRuntimes(runtimes).filter(
+    (runtime) => runtime.id !== "codex" && runtime.id !== "claude",
+  );
   const routeDiagnosticsPanel = (
     <>
       <div className="probe-card">
         <div className="probe-card__row">
-          <strong>Codex 路由</strong>
+          <strong>Claude Code 连接 / 模型出口</strong>
+          <span
+            style={{
+              color:
+                claudeRoute?.routeKind === "cc-switch/local-proxy"
+                  ? "var(--success)"
+                  : "var(--text-secondary)",
+              fontSize: 11,
+            }}
+          >
+            {claudeRoute?.routeKind ?? "unknown"}
+          </span>
+        </div>
+        <div className="route-kv">
+          <span>connect</span>
+          <strong>claude -p --output-format stream-json</strong>
+        </div>
+        <div className="route-kv">
+          <span>config</span>
+          <strong>{claudeRoute?.configPath ?? "—"}</strong>
+        </div>
+        <div className="route-kv">
+          <span>base_url</span>
+          <strong>{claudeRoute?.baseUrl ?? "—"}</strong>
+        </div>
+        <div className="route-kv">
+          <span>model</span>
+          <strong>{claudeRoute?.model ?? "—"}</strong>
+        </div>
+        <div className="route-kv">
+          <span>output</span>
+          <strong>{claudeRoute?.outputLimit ?? "—"}</strong>
+        </div>
+        <div className="route-note">{claudeRoute?.note ?? "正在检测 Claude Code 路由。"}</div>
+      </div>
+
+      <div className="probe-card">
+        <div className="probe-card__row">
+          <strong>Codex 连接 / 模型出口</strong>
           <span
             style={{
               color:
@@ -1454,6 +1544,14 @@ export default function App() {
           >
             {codexRoute?.routeKind ?? "unknown"}
           </span>
+        </div>
+        <div className="route-kv">
+          <span>connect</span>
+          <strong>codex app-server --stdio</strong>
+        </div>
+        <div className="route-kv">
+          <span>model route</span>
+          <strong>{codexRoute?.routeKind ?? "unknown"}</strong>
         </div>
         <div className="route-kv">
           <span>provider</span>
@@ -1482,7 +1580,11 @@ export default function App() {
             {codexRoute.latestError}
           </div>
         ) : null}
-        <div className="route-note">{codexRoute?.note ?? "正在检测 Codex 路由。"}</div>
+        <div className="route-note">
+          {codexRoute?.routeKind === "cc-switch"
+            ? "Workbench 连接的是 Codex CLI app-server；cc-switch 是 Codex CLI 配置里的上游模型代理，本页根据 ~/.codex/config.toml 和 cc-switch 日志推断。"
+            : "Workbench 连接的是 Codex CLI app-server；模型出口由 Codex CLI 配置决定。当前未检测到 cc-switch 本地代理路由。"}
+        </div>
         <div className="route-actions">
           <button
             type="button"
@@ -1508,17 +1610,36 @@ export default function App() {
           </button>
         </div>
       </div>
-      <div className="probe-card">
-        <div className="probe-card__row">
-          <strong>Grok 路由</strong>
-          <span style={{ color: "var(--text-secondary)", fontSize: 11 }}>
-            native
-          </span>
+      {nonCodexRouteRuntimes.map((runtime) => (
+        <div key={runtime.id} className="probe-card">
+          <div className="probe-card__row">
+            <strong>{runtimeLabel(runtime.id)} 连接 / 模型出口</strong>
+            <span
+              style={{
+                color: runtime.enabled
+                  ? "var(--text-secondary)"
+                  : "var(--danger)",
+                fontSize: 11,
+              }}
+            >
+              {runtimeRouteMode(runtime)}
+            </span>
+          </div>
+          <div className="route-kv">
+            <span>connect</span>
+            <strong>{runtimeRouteMode(runtime)}</strong>
+          </div>
+          <div className="route-kv">
+            <span>protocol</span>
+            <strong>{runtime.capabilities.protocol}</strong>
+          </div>
+          <div className="route-kv">
+            <span>permission</span>
+            <strong>{runtime.capabilities.permissionGate ? "gated" : "none"}</strong>
+          </div>
+          <div className="route-note">{runtimeRouteDescription(runtime)}</div>
         </div>
-        <div className="route-note">
-          Grok 使用原生 ACP 会话，不读取也不经过 cc-switch。
-        </div>
-      </div>
+      ))}
     </>
   );
   return (

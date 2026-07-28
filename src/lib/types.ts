@@ -81,6 +81,15 @@ export interface CodexRouteStatus {
   note: string;
 }
 
+export interface ClaudeRouteStatus {
+  configPath?: string | null;
+  baseUrl?: string | null;
+  model?: string | null;
+  outputLimit?: string | null;
+  routeKind: string;
+  note: string;
+}
+
 export type PermissionMode = "ask" | "auto" | "read_only" | "full_access";
 
 export interface ChoiceOption {

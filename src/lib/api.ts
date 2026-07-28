@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
+  ClaudeRouteStatus,
   CodexRouteStatus,
   ChatMessage,
   PermissionDecision,
@@ -32,6 +33,7 @@ export const api = {
   probeAll: () => call<ProbeResult[]>("probe_all"),
   probeRuntime: (runtimeId: string) =>
     call<ProbeResult>("probe_runtime", { runtimeId }),
+  claudeRouteStatus: () => call<ClaudeRouteStatus>("claude_route_status"),
   codexRouteStatus: () => call<CodexRouteStatus>("codex_route_status"),
   openCcSwitch: () => call<string>("open_cc_switch"),
   openSessionLocation: (sessionId: string) =>
