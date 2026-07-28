@@ -21,22 +21,29 @@ export function PermissionBar({
   disabled,
   onRespond,
 }: PermissionBarProps) {
+  const title = request.title || request.toolName || "工具调用";
+  const preview = request.preview.trim();
+
   return (
-    <div className="permission-bar" role="alertdialog" aria-live="assertive">
-      <div className="permission-bar__body">
+    <div
+      className="permission-bar"
+      role="alertdialog"
+      aria-live="assertive"
+      aria-label={`权限请求：${title}`}
+    >
+      <div className="permission-bar__text">
         <div className="permission-bar__head">
           <span className="permission-bar__badge">需要授权</span>
-          <span className="permission-bar__title">
-            {request.title || request.toolName}
-          </span>
+          <span className="permission-bar__title">{title}</span>
+          <span className="permission-bar__question">是否允许？</span>
           {pendingCount > 1 ? (
             <span className="permission-bar__count">
               还有 {pendingCount - 1} 个待处理
             </span>
           ) : null}
         </div>
-        {request.preview ? (
-          <pre className="permission-bar__preview">{request.preview}</pre>
+        {preview ? (
+          <code className="permission-bar__preview">{preview}</code>
         ) : null}
       </div>
       <div className="permission-bar__actions">
@@ -44,9 +51,10 @@ export function PermissionBar({
           type="button"
           className="permission-btn permission-btn--allow"
           disabled={disabled}
+          title="允许执行一次"
           onClick={() => onRespond(request, "allow_once")}
         >
-          允许一次
+          确认
         </button>
         <button
           type="button"
@@ -55,7 +63,7 @@ export function PermissionBar({
           title={`本次会话内始终允许 ${request.toolName}`}
           onClick={() => onRespond(request, "allow_always")}
         >
-          本会话始终允许
+          本会话允许
         </button>
         <button
           type="button"

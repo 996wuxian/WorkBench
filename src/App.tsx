@@ -158,14 +158,14 @@ export default function App() {
       (pendingSession?.id === activeId ? pendingSession : null),
     [sessions, pendingSession, activeId],
   );
-  const activeModelValue = useMemo(
+  const activeRuntimeId = active?.runtimeId ?? snapshot.runtimeId ?? runtimePick;
+  const activeSessionModelValue = useMemo(
     () =>
       active?.runtimeId === "codex"
         ? normalizeCodexModelId(active?.modelId ?? snapshot.modelId ?? "")
         : active?.modelId ?? snapshot.modelId ?? "",
     [active?.modelId, active?.runtimeId, snapshot.modelId],
   );
-  const activeRuntimeId = active?.runtimeId ?? snapshot.runtimeId ?? runtimePick;
   const messages = activeId ? (messagesBySession[activeId] ?? []) : [];
   const visibleMessageCount = activeId
     ? (visibleMessageCounts[activeId] ?? INITIAL_VISIBLE_MESSAGES)
@@ -206,8 +206,12 @@ export default function App() {
           codexRoute?.model ?? codexRoute?.latestForwardModel ?? null,
         ) || null
       : null;
+  const activeModelValue =
+    active?.runtimeId === "codex"
+      ? activeSessionModelValue || activeCodexModelFallback || "default"
+      : activeSessionModelValue;
   const activeModelLabel = active
-    ? activeModelValue || activeCodexModelFallback || "default"
+    ? activeModelValue || "default"
     : "default";
   const activeModelReasoningEffort = active?.runtimeId === "codex"
     ? (active?.modelReasoningEffort ??
@@ -220,19 +224,21 @@ export default function App() {
     active?.permissionMode ??
     snapshot.permissionMode ??
     defaultPermissionMode(active?.runtimeId ?? snapshot.runtimeId);
+  const activeControlCatalog =
+    controlCatalog?.runtimeId === activeRuntimeId ? controlCatalog : null;
   const controlModelOptions = useMemo(
     () =>
-      controlCatalog?.modelOptions.length
-        ? controlCatalog.modelOptions
+      activeControlCatalog?.modelOptions.length
+        ? activeControlCatalog.modelOptions
         : fallbackModelOptions(activeRuntimeId, activeModelValue),
-    [activeRuntimeId, activeModelValue, controlCatalog],
+    [activeRuntimeId, activeModelValue, activeControlCatalog],
   );
   const controlPermissionOptions = useMemo(
     () =>
-      controlCatalog?.permissionOptions.length
-        ? controlCatalog.permissionOptions
+      activeControlCatalog?.permissionOptions.length
+        ? activeControlCatalog.permissionOptions
         : fallbackPermissionOptions(activeRuntimeId),
-    [activeRuntimeId, controlCatalog],
+    [activeRuntimeId, activeControlCatalog],
   );
   const controlReasoningOptions = useMemo(
     () => CODEX_REASONING_OPTIONS,

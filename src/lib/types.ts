@@ -151,6 +151,10 @@ export interface ChatMessage {
   runtimeId?: RuntimeId;
   createdAt?: string;
   completedAt?: string | null;
+  /** Milliseconds inside this turn spent waiting for user permission. */
+  elapsedPausedMs?: number;
+  /** Current permission wait start; live-only, not persisted by the UI. */
+  elapsedPauseStartedAt?: string | null;
   /** Runtime-native tool call id; repeated status updates share it. */
   toolCallId?: string | null;
   toolName?: string | null;

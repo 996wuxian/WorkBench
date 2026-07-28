@@ -18,7 +18,9 @@ import { api, isTauri } from "../lib/api";
 import {
   finalizeAssistantMessage,
   findLastStreamingMessageIndex,
+  finishAssistantElapsedPause,
   normalizeLoadedMessages,
+  startAssistantElapsedPause,
 } from "../lib/messages";
 import { nowIso, uid } from "../lib/format";
 import {
@@ -326,6 +328,9 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
               [request.sessionId]: [...queue, request],
             };
           });
+          ref.current.updateSessionMessages(request.sessionId, (m) =>
+            startAssistantElapsedPause(m),
+          );
         },
       );
       if (!cancelled) unsubs.push(u6);
@@ -338,12 +343,14 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
           const { setPermissionQueue, setPermissionBusy, updateSessionMessages } =
             ref.current;
           let resolved: PermissionRequestEvent | undefined;
+          let remainingPermissionCount = 0;
           setPermissionQueue((prev) => {
             const queue = prev[sessionId];
             if (!queue) return prev;
             resolved = queue.find((item) => item.requestId === requestId);
             if (!resolved) return prev;
             const next = queue.filter((item) => item.requestId !== requestId);
+            remainingPermissionCount = next.length;
             if (next.length === 0) {
               const { [sessionId]: _drop, ...rest } = prev;
               return rest;
@@ -351,6 +358,9 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
             return { ...prev, [sessionId]: next };
           });
           setPermissionBusy((prev) => (prev === requestId ? null : prev));
+          if (resolved && remainingPermissionCount === 0) {
+            updateSessionMessages(sessionId, (m) => finishAssistantElapsedPause(m));
+          }
           // The user already saw their own click; only surface decisions they
           // did not make, so a timeout or an abort is never silent.
           if (source === "user" || source === "mode") return;

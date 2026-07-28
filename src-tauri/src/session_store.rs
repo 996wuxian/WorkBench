@@ -64,6 +64,8 @@ pub struct StoredChatMessage {
     pub created_at: String,
     #[serde(default)]
     pub completed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub elapsed_paused_ms: u64,
     /// Runtime-native id of the tool call this record describes.
     #[serde(default)]
     pub tool_call_id: Option<String>,
@@ -95,6 +97,7 @@ impl StoredChatMessage {
             runtime_id,
             created_at,
             completed_at: None,
+            elapsed_paused_ms: 0,
             tool_call_id: None,
             tool_name: None,
             tool_title: None,
@@ -211,6 +214,10 @@ struct SessionIndex {
 
 fn default_resume_supported() -> bool {
     true
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 pub fn load_metas() -> std::io::Result<Vec<StoredSessionMeta>> {

@@ -1100,19 +1100,22 @@ select,
 .permission-bar {
   flex-shrink: 0;
   margin: 0 16px;
-  padding: 10px 12px;
-  border: 1px solid var(--warning);
+  padding: 9px 10px 9px 12px;
+  border: 1px solid var(--border-subtle);
   border-radius: 12px;
   background: var(--bg-input);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 8px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
 }
 
-.permission-bar__body {
+.permission-bar__text {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  align-items: stretch;
+  gap: 7px;
   min-width: 0;
 }
 
@@ -1120,8 +1123,8 @@ select,
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
   min-width: 0;
+  flex-wrap: wrap;
 }
 
 .permission-bar__badge {
@@ -1135,12 +1138,11 @@ select,
 
 .permission-bar__title {
   min-width: 0;
-  flex: 1;
-  font-size: 13px;
+  font-weight: 600;
   color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .permission-bar__count {
@@ -1149,33 +1151,46 @@ select,
   color: var(--text-tertiary);
 }
 
-.permission-bar__preview {
-  margin: 0;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: var(--bg-hover);
+.permission-bar__question {
   color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.permission-bar__preview {
+  display: block;
+  width: 100%;
+  max-height: 92px;
+  margin: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
   font-size: 12px;
-  line-height: 1.5;
-  max-height: 160px;
-  overflow: auto;
+  line-height: 1.45;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+  overflow: auto;
 }
 
 .permission-bar__actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  justify-content: flex-end;
+  gap: 6px;
+  width: 100%;
+  white-space: nowrap;
 }
 
 .permission-btn {
-  padding: 6px 12px;
+  min-height: 30px;
+  padding: 5px 10px;
   border-radius: 8px;
   border: 1px solid var(--border-subtle);
   background: var(--bg-hover);
   color: var(--text-primary);
   font-size: 12px;
+  font-weight: 500;
 }
 
 .permission-btn:hover:not(:disabled) {
@@ -1195,6 +1210,18 @@ select,
 .permission-btn--deny {
   border-color: var(--danger);
   color: var(--danger);
+}
+
+@media (max-width: 760px) {
+  .permission-bar__text {
+    align-items: stretch;
+  }
+
+  .permission-bar__actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    white-space: normal;
+  }
 }
 
 .composer {

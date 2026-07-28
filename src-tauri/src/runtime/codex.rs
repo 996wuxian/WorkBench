@@ -41,6 +41,14 @@ struct Pending {
     tx: oneshot::Sender<Result<Value, String>>,
 }
 
+enum CodexApprovalResponse {
+    Decision,
+    Permissions {
+        scope: Value,
+        permissions: Vec<Value>,
+    },
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ModelListResponse {
@@ -1078,7 +1086,13 @@ impl CodexAppServerClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                self.gate_approval(id, "commandExecution", "Command approval", preview);
+                self.gate_approval(
+                    id,
+                    "commandExecution",
+                    "Command approval",
+                    preview,
+                    CodexApprovalResponse::Decision,
+                );
             }
             "item/fileChange/requestApproval" => {
                 let preview = params
@@ -1087,7 +1101,13 @@ impl CodexAppServerClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                self.gate_approval(id, "fileChange", "File change approval", preview);
+                self.gate_approval(
+                    id,
+                    "fileChange",
+                    "File change approval",
+                    preview,
+                    CodexApprovalResponse::Decision,
+                );
             }
             "item/permissions/requestApproval" => {
                 let preview = params
@@ -1095,7 +1115,19 @@ impl CodexAppServerClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                self.gate_approval(id, "permissions", "Permission approval", preview);
+                let scope = params.get("scope").cloned().unwrap_or(Value::Null);
+                let permissions = params
+                    .get("permissions")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                self.gate_approval(
+                    id,
+                    "permissions",
+                    "Permission approval",
+                    preview,
+                    CodexApprovalResponse::Permissions { scope, permissions },
+                );
             }
             // Not permission gates but free-form input requests. There is no UI
             // for them yet, so decline rather than raise an approval card the
@@ -1122,7 +1154,14 @@ impl CodexAppServerClient {
 
     /// Route an approval through the Host gate and answer when it resolves.
     /// Spawned because the user may take minutes; the reader loop must not stall.
-    fn gate_approval(self: Arc<Self>, id: u64, tool_name: &str, title: &str, preview: String) {
+    fn gate_approval(
+        self: Arc<Self>,
+        id: u64,
+        tool_name: &str,
+        title: &str,
+        preview: String,
+        response: CodexApprovalResponse,
+    ) {
         let request = PermissionRequest {
             tool_name: tool_name.to_string(),
             title: title.to_string(),
@@ -1130,14 +1169,9 @@ impl CodexAppServerClient {
         };
         tokio::spawn(async move {
             let decision = self.permissions.request(request).await;
-            let verdict = match decision {
-                PermissionDecision::AllowOnce => "approved",
-                PermissionDecision::AllowAlways => "approved_for_session",
-                PermissionDecision::Deny => "denied",
-                PermissionDecision::Cancel => "abort",
-            };
-            tracing::info!("codex approval id={id} decision={verdict}");
-            self.reply_result(id, json!({ "decision": verdict })).await;
+            let result = codex_approval_result(response, decision);
+            tracing::info!("codex approval id={id} decision={}", decision.as_str());
+            self.reply_result(id, result).await;
         });
     }
 
@@ -1518,6 +1552,34 @@ fn normalize_codex_model_id(model: &str) -> String {
     trimmed.chars().take(120).collect()
 }
 
+fn codex_approval_result(
+    response: CodexApprovalResponse,
+    decision: PermissionDecision,
+) -> Value {
+    match response {
+        CodexApprovalResponse::Decision => {
+            let decision = match decision {
+                PermissionDecision::AllowOnce => "accept",
+                PermissionDecision::AllowAlways => "acceptForSession",
+                PermissionDecision::Deny => "decline",
+                PermissionDecision::Cancel => "cancel",
+            };
+            json!({ "decision": decision })
+        }
+        CodexApprovalResponse::Permissions { scope, permissions } => {
+            let permissions = if decision.is_allowed() {
+                permissions
+            } else {
+                Vec::new()
+            };
+            json!({
+                "scope": scope,
+                "permissions": permissions,
+            })
+        }
+    }
+}
+
 fn normalize_reasoning_effort(value: Option<&str>) -> Option<String> {
     let trimmed = value?.trim();
     if trimmed.is_empty() {
@@ -1618,6 +1680,54 @@ async fn read_version(path: &PathBuf) -> Option<String> {
         }
     } else {
         Some(line.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_approval_uses_codex_app_server_decisions() {
+        assert_eq!(
+            codex_approval_result(CodexApprovalResponse::Decision, PermissionDecision::AllowOnce),
+            json!({ "decision": "accept" })
+        );
+        assert_eq!(
+            codex_approval_result(CodexApprovalResponse::Decision, PermissionDecision::AllowAlways),
+            json!({ "decision": "acceptForSession" })
+        );
+        assert_eq!(
+            codex_approval_result(CodexApprovalResponse::Decision, PermissionDecision::Deny),
+            json!({ "decision": "decline" })
+        );
+    }
+
+    #[test]
+    fn permissions_approval_returns_granted_permissions() {
+        let response = CodexApprovalResponse::Permissions {
+            scope: json!({ "type": "project" }),
+            permissions: vec![json!({ "type": "write", "path": "X:\\tmp" })],
+        };
+        assert_eq!(
+            codex_approval_result(response, PermissionDecision::AllowOnce),
+            json!({
+                "scope": { "type": "project" },
+                "permissions": [{ "type": "write", "path": "X:\\tmp" }],
+            })
+        );
+
+        let response = CodexApprovalResponse::Permissions {
+            scope: json!({ "type": "project" }),
+            permissions: vec![json!({ "type": "write", "path": "X:\\tmp" })],
+        };
+        assert_eq!(
+            codex_approval_result(response, PermissionDecision::Deny),
+            json!({
+                "scope": { "type": "project" },
+                "permissions": [],
+            })
+        );
     }
 }
 

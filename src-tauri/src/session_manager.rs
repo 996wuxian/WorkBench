@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
@@ -73,7 +73,61 @@ struct LiveSessionSlot {
     permissions: Option<PermissionBroker>,
     mirror: StreamMirror,
     prompt_started_at: Option<String>,
+    prompt_paused_ms: u64,
+    permission_pause_started_at: Option<DateTime<Utc>>,
+    pending_permission_count: usize,
     persisted: bool,
+}
+
+impl LiveSessionSlot {
+    fn start_permission_pause(&mut self, now: DateTime<Utc>) {
+        if self.pending_permission_count == 0 {
+            self.permission_pause_started_at = Some(now);
+        }
+        self.pending_permission_count = self.pending_permission_count.saturating_add(1);
+    }
+
+    fn finish_permission_pause(&mut self, now: DateTime<Utc>) {
+        if self.pending_permission_count == 0 {
+            return;
+        }
+
+        self.pending_permission_count -= 1;
+        if self.pending_permission_count == 0 {
+            self.commit_active_permission_pause(now);
+        }
+    }
+
+    fn reset_prompt_timing(&mut self, started_at: DateTime<Utc>) {
+        self.prompt_started_at = Some(started_at.to_rfc3339());
+        self.prompt_paused_ms = 0;
+        self.permission_pause_started_at = None;
+        self.pending_permission_count = 0;
+    }
+
+    fn elapsed_paused_ms_through(&self, now: DateTime<Utc>) -> u64 {
+        let active_pause_ms = self
+            .permission_pause_started_at
+            .map(|started_at| positive_duration_ms(now - started_at))
+            .unwrap_or(0);
+        self.prompt_paused_ms.saturating_add(active_pause_ms)
+    }
+
+    fn close_prompt_timing(&mut self, completed_at: DateTime<Utc>) -> u64 {
+        self.commit_active_permission_pause(completed_at);
+        self.permission_pause_started_at = None;
+        self.pending_permission_count = 0;
+        self.prompt_started_at = None;
+        self.prompt_paused_ms
+    }
+
+    fn commit_active_permission_pause(&mut self, now: DateTime<Utc>) {
+        if let Some(started_at) = self.permission_pause_started_at.take() {
+            self.prompt_paused_ms = self
+                .prompt_paused_ms
+                .saturating_add(positive_duration_ms(now - started_at));
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -119,6 +173,10 @@ fn stream_role(kind: StreamKind) -> &'static str {
         StreamKind::Assistant => "assistant",
         StreamKind::Thought => "thought",
     }
+}
+
+fn positive_duration_ms(duration: chrono::Duration) -> u64 {
+    duration.num_milliseconds().max(0) as u64
 }
 
 pub struct SessionManager {
@@ -203,6 +261,9 @@ impl SessionManager {
                     permissions: None,
                     mirror: StreamMirror::default(),
                     prompt_started_at: None,
+                    prompt_paused_ms: 0,
+                    permission_pause_started_at: None,
+                    pending_permission_count: 0,
                     persisted: true,
                 },
             );
@@ -311,6 +372,9 @@ impl SessionManager {
                     permissions: None,
                     mirror: StreamMirror::default(),
                     prompt_started_at: None,
+                    prompt_paused_ms: 0,
+                    permission_pause_started_at: None,
+                    pending_permission_count: 0,
                     persisted: true,
                 },
             );
@@ -373,6 +437,9 @@ impl SessionManager {
             permissions: None,
             mirror: StreamMirror::default(),
             prompt_started_at: None,
+            prompt_paused_ms: 0,
+            permission_pause_started_at: None,
+            pending_permission_count: 0,
             persisted: false,
         };
 
@@ -836,7 +903,10 @@ impl SessionManager {
         let Some(slot) = guard.sessions.get_mut(session_id) else {
             return false;
         };
-        if slot.fsm.state() != SessionState::AwaitingPermission {
+        slot.finish_permission_pause(Utc::now());
+        if slot.fsm.state() != SessionState::AwaitingPermission
+            || slot.pending_permission_count > 0
+        {
             return false;
         }
         slot.fsm.resume_stream().is_ok()
@@ -868,6 +938,13 @@ impl SessionManager {
         let Some(slot) = guard.sessions.get_mut(session_id) else {
             return false;
         };
+        if !matches!(
+            slot.fsm.state(),
+            SessionState::Streaming | SessionState::AwaitingPermission
+        ) {
+            return false;
+        }
+        slot.start_permission_pause(Utc::now());
 
         if slot.fsm.await_permission().is_err() {
             return false;
@@ -893,6 +970,7 @@ impl SessionManager {
                 .prompt_started_at
                 .clone()
                 .unwrap_or_else(|| Utc::now().to_rfc3339());
+            let elapsed_paused_ms = slot.elapsed_paused_ms_through(Utc::now());
             let buffer = match kind {
                 StreamKind::Assistant => &mut slot.mirror.assistant,
                 StreamKind::Thought => &mut slot.mirror.thought,
@@ -913,13 +991,15 @@ impl SessionManager {
                 .get_or_insert_with(|| Uuid::new_v4().to_string())
                 .clone();
             buffer.checkpointed = buffer.text.len();
-            StoredChatMessage::checkpoint(
+            let mut checkpoint = StoredChatMessage::checkpoint(
                 id,
                 stream_role(kind),
                 buffer.text.clone(),
                 Some(runtime_id),
                 started_at,
-            )
+            );
+            checkpoint.elapsed_paused_ms = elapsed_paused_ms;
+            checkpoint
         };
         self.append_message(session_id, &checkpoint);
     }
@@ -942,7 +1022,9 @@ impl SessionManager {
                 .prompt_started_at
                 .clone()
                 .unwrap_or_else(|| Utc::now().to_rfc3339());
-            let completed_at = Utc::now().to_rfc3339();
+            let completed_at = Utc::now();
+            let elapsed_paused_ms = slot.close_prompt_timing(completed_at);
+            let completed_at = completed_at.to_rfc3339();
             let runtime_id = slot.meta.runtime_id;
             let mut messages = Vec::new();
             for (role, buffer) in [
@@ -953,16 +1035,17 @@ impl SessionManager {
                 if text.trim().is_empty() {
                     continue;
                 }
-                messages.push(StoredChatMessage::completed_with_id(
+                let mut message = StoredChatMessage::completed_with_id(
                     id.unwrap_or_else(|| Uuid::new_v4().to_string()),
                     role,
                     text,
                     Some(runtime_id),
                     started_at.clone(),
                     completed_at.clone(),
-                ));
+                );
+                message.elapsed_paused_ms = elapsed_paused_ms;
+                messages.push(message);
             }
-            slot.prompt_started_at = None;
             messages
         };
         for message in messages {
@@ -1065,7 +1148,7 @@ impl SessionManager {
                 return Err("session not connected after auto-connect".into());
             }
             slot.fsm.begin_stream().map_err(|e| e.to_string())?;
-            slot.prompt_started_at = Some(Utc::now().to_rfc3339());
+            slot.reset_prompt_timing(Utc::now());
             // A new turn gets fresh journal ids. Anything the previous turn left
             // behind is already on disk as a `partial` record.
             slot.mirror = StreamMirror::default();

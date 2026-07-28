@@ -108,7 +108,19 @@ export function assistantElapsedLabel(
       : message.streaming || message.pending
         ? now
         : startedAt;
-  const elapsed = Math.max(0, referenceTime - startedAt);
+  const pausedMs = Math.max(0, message.elapsedPausedMs ?? 0);
+  const pauseStartedAt = message.elapsedPauseStartedAt
+    ? new Date(message.elapsedPauseStartedAt).getTime()
+    : null;
+  const activePausedMs =
+    pauseStartedAt !== null &&
+    !Number.isNaN(pauseStartedAt) &&
+    (message.streaming || message.pending) &&
+    endedAt === null
+      ? Math.max(0, now - pauseStartedAt)
+      : 0;
+  const elapsed = Math.max(0, referenceTime - startedAt - pausedMs - activePausedMs);
+  if (!message.streaming && !message.pending && elapsed === 0) return null;
   const prefix = message.streaming || message.pending ? "耗时" : "总耗时";
   return `${prefix} ${formatElapsedSeconds(elapsed)}`;
 }
@@ -144,4 +156,41 @@ export function finalizeAssistantMessage(message: ChatMessage): ChatMessage {
     streaming: false,
     completedAt: message.completedAt ?? nowIso(),
   };
+}
+
+export function startAssistantElapsedPause(
+  messages: ChatMessage[],
+  pausedAt = nowIso(),
+): ChatMessage[] {
+  const index = findLastStreamingMessageIndex(messages, "assistant");
+  if (index < 0) return messages;
+  const message = messages[index];
+  if (message.elapsedPauseStartedAt) return messages;
+  const next = messages.slice();
+  next[index] = { ...message, elapsedPauseStartedAt: pausedAt };
+  return next;
+}
+
+export function finishAssistantElapsedPause(
+  messages: ChatMessage[],
+  resumedAt = nowIso(),
+): ChatMessage[] {
+  const index = findLastStreamingMessageIndex(messages, "assistant");
+  if (index < 0) return messages;
+  const message = messages[index];
+  if (!message.elapsedPauseStartedAt) return messages;
+
+  const pausedAt = new Date(message.elapsedPauseStartedAt).getTime();
+  const resumed = new Date(resumedAt).getTime();
+  const pausedMs =
+    Number.isNaN(pausedAt) || Number.isNaN(resumed)
+      ? 0
+      : Math.max(0, resumed - pausedAt);
+  const next = messages.slice();
+  next[index] = {
+    ...message,
+    elapsedPausedMs: Math.max(0, message.elapsedPausedMs ?? 0) + pausedMs,
+    elapsedPauseStartedAt: null,
+  };
+  return next;
 }
