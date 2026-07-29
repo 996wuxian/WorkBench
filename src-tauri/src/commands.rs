@@ -1,19 +1,28 @@
 //! Tauri command surface for the Workbench UI.
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
+use chrono::Utc;
 use tauri::{AppHandle, Manager};
 
+use crate::host::permissions::PermissionDecision;
 use crate::native_sessions;
 use crate::paths;
 use crate::route_diagnostics::{self, CodexRouteStatus};
-use crate::host::permissions::PermissionDecision;
 use crate::runtime::{self, RuntimeId, SessionSelectionCatalog};
-use crate::settings::{self, AppSettings, RuntimeOverride};
 use crate::session_manager::{SessionManager, SessionMeta, SessionSettingsPatch, SessionSnapshot};
 use crate::session_store::{self, StoredChatMessage};
+use crate::settings::{self, AppSettings, RuntimeOverride};
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPresentationPatch {
+    pub title: Option<String>,
+    pub pinned: Option<bool>,
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,6 +39,22 @@ pub struct SessionDeleteResult {
     pub deleted_session_id: String,
     pub deleted_path: String,
     pub active_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExportResult {
+    pub session_id: String,
+    pub path: String,
+    pub message_count: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTraceExportResult {
+    pub session_id: String,
+    pub path: String,
+    pub event_count: usize,
 }
 
 /// Sync native window fill with UI theme so rounded corners don't show a dark halo.
@@ -117,11 +142,35 @@ pub fn session_create(
 }
 
 #[tauri::command]
+pub fn session_update_presentation(
+    mgr: tauri::State<'_, Arc<SessionManager>>,
+    session_id: String,
+    patch: SessionPresentationPatch,
+) -> Result<SessionMeta, String> {
+    mgr.update_presentation(&session_id, patch.title, patch.pinned)
+}
+
+#[tauri::command]
+pub async fn session_set_archived(
+    app: AppHandle,
+    mgr: tauri::State<'_, Arc<SessionManager>>,
+    session_id: String,
+    archived: bool,
+) -> Result<SessionMeta, String> {
+    mgr.set_archived(&app, &session_id, archived).await
+}
+
+#[tauri::command]
 pub fn session_get_state(
     mgr: tauri::State<'_, Arc<SessionManager>>,
     session_id: Option<String>,
 ) -> SessionSnapshot {
     mgr.snapshot(session_id.as_deref())
+}
+
+#[tauri::command]
+pub fn session_list_states(mgr: tauri::State<'_, Arc<SessionManager>>) -> Vec<SessionSnapshot> {
+    mgr.snapshots()
 }
 
 #[tauri::command]
@@ -140,6 +189,61 @@ pub async fn session_get_messages(
     session_id: String,
 ) -> Result<Vec<StoredChatMessage>, String> {
     mgr.messages(&session_id).await
+}
+
+#[tauri::command]
+pub async fn session_export_markdown(
+    mgr: tauri::State<'_, Arc<SessionManager>>,
+    session_id: String,
+) -> Result<SessionExportResult, String> {
+    let meta = mgr.session_meta(&session_id)?;
+    let messages = mgr.messages(&session_id).await?;
+    let exported_at = Utc::now().to_rfc3339();
+    let markdown = render_session_markdown(
+        &meta.title,
+        meta.runtime_id,
+        meta.project_path.as_deref(),
+        &messages,
+        &exported_at,
+    );
+    let path = session_store::write_markdown_export(&session_id, &meta.title, &markdown)
+        .map_err(|err| err.to_string())?;
+    if let Some(parent) = path.parent() {
+        if let Err(err) = open_in_file_manager(parent) {
+            tracing::warn!(
+                "failed to open export directory {}: {err}",
+                parent.display()
+            );
+        }
+    }
+    Ok(SessionExportResult {
+        session_id,
+        path: path.display().to_string(),
+        message_count: messages.len(),
+    })
+}
+
+#[tauri::command]
+pub fn session_export_trace(
+    mgr: tauri::State<'_, Arc<SessionManager>>,
+    session_id: String,
+) -> Result<SessionTraceExportResult, String> {
+    let meta = mgr.session_meta(&session_id)?;
+    let (path, event_count) = session_store::write_trace_export(&session_id, &meta.title)
+        .map_err(|err| err.to_string())?;
+    if let Some(parent) = path.parent() {
+        if let Err(err) = open_in_file_manager(parent) {
+            tracing::warn!(
+                "failed to open trace export directory {}: {err}",
+                parent.display()
+            );
+        }
+    }
+    Ok(SessionTraceExportResult {
+        session_id,
+        path: path.display().to_string(),
+        event_count,
+    })
 }
 
 #[tauri::command]
@@ -239,6 +343,71 @@ pub async fn session_sync_native(
     })
 }
 
+fn render_session_markdown(
+    title: &str,
+    runtime_id: RuntimeId,
+    project_path: Option<&str>,
+    messages: &[StoredChatMessage],
+    exported_at: &str,
+) -> String {
+    let mut markdown = String::new();
+    let title = single_line_markdown(title);
+    let _ = writeln!(markdown, "# {title}\n");
+    let _ = writeln!(markdown, "- Runtime: `{}`", runtime_id.as_str());
+    if let Some(project_path) = project_path.filter(|path| !path.trim().is_empty()) {
+        let _ = writeln!(
+            markdown,
+            "- Project: `{}`",
+            single_line_markdown(project_path).replace('`', "'")
+        );
+    }
+    let _ = writeln!(markdown, "- Exported: `{exported_at}`");
+
+    if messages.is_empty() {
+        markdown.push_str("\n---\n\n_No messages._\n");
+        return markdown;
+    }
+
+    for message in messages {
+        let heading = match message.role.as_str() {
+            "user" => "User".to_string(),
+            "assistant" => "Assistant".to_string(),
+            "system" => "System".to_string(),
+            "thought" => "Reasoning".to_string(),
+            "tool" => {
+                let name = message
+                    .tool_title
+                    .as_deref()
+                    .or(message.tool_name.as_deref())
+                    .unwrap_or("Tool");
+                format!("Tool · {}", single_line_markdown(name))
+            }
+            other => single_line_markdown(other),
+        };
+        let _ = writeln!(markdown, "\n---\n\n## {heading}\n");
+        let _ = writeln!(markdown, "> {}", message.created_at);
+        if let Some(status) = message.tool_status.as_deref() {
+            let _ = writeln!(markdown, "> Status: {}", single_line_markdown(status));
+        }
+        if message.partial {
+            markdown.push_str("> Incomplete response checkpoint\n");
+        }
+        markdown.push('\n');
+        let content = message.content.trim_end();
+        if content.is_empty() {
+            markdown.push_str("_Empty message._\n");
+        } else {
+            markdown.push_str(content);
+            markdown.push('\n');
+        }
+    }
+    markdown
+}
+
+fn single_line_markdown(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn open_in_file_manager(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -308,4 +477,36 @@ pub async fn session_disconnect(
     session_id: String,
 ) -> Result<(), String> {
     mgr.disconnect(&app, &session_id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markdown_export_contains_metadata_and_messages() {
+        let mut tool = StoredChatMessage::new("tool", "read src/App.tsx", Some(RuntimeId::CODEX));
+        tool.tool_title = Some("Read file".into());
+        tool.tool_status = Some("completed".into());
+        let messages = vec![
+            StoredChatMessage::new("user", "Inspect the project", Some(RuntimeId::CODEX)),
+            StoredChatMessage::new("assistant", "Done.", Some(RuntimeId::CODEX)),
+            tool,
+        ];
+
+        let markdown = render_session_markdown(
+            "Review session",
+            RuntimeId::CODEX,
+            Some("X:\\work"),
+            &messages,
+            "2026-07-29T00:00:00Z",
+        );
+
+        assert!(markdown.contains("# Review session"));
+        assert!(markdown.contains("- Runtime: `codex`"));
+        assert!(markdown.contains("## User"));
+        assert!(markdown.contains("## Assistant"));
+        assert!(markdown.contains("## Tool · Read file"));
+        assert!(markdown.contains("> Status: completed"));
+    }
 }

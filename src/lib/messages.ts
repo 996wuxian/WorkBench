@@ -1,5 +1,5 @@
 /** Transcript helpers: labelling, quoting and reconciling chat messages. */
-import type { ChatMessage, RuntimeId } from "./types";
+import type { ChatMessage, RuntimeId, SessionSnapshot } from "./types";
 import { formatElapsedSeconds, nowIso } from "./format";
 
 export type QuoteTarget = {
@@ -132,8 +132,11 @@ export function assistantElapsedLabel(
  * the turn never finished; it is shown with an interrupted marker rather than
  * silently dressed up as a normal answer.
  */
-export function normalizeLoadedMessages(messages: ChatMessage[]): ChatMessage[] {
-  return messages.map((message) => {
+export function normalizeLoadedMessages(
+  messages: ChatMessage[],
+  snapshot?: SessionSnapshot,
+): ChatMessage[] {
+  const normalized = messages.map((message) => {
     if (
       message.role === "assistant" &&
       !message.streaming &&
@@ -146,6 +149,71 @@ export function normalizeLoadedMessages(messages: ChatMessage[]): ChatMessage[] 
     }
     return message;
   });
+
+  if (
+    !snapshot?.promptStartedAt ||
+    (snapshot.state !== "streaming" && snapshot.state !== "awaiting_permission")
+  ) {
+    return normalized;
+  }
+  const promptStartedAt = snapshot.promptStartedAt;
+
+  let lastUserIndex = -1;
+  for (let index = normalized.length - 1; index >= 0; index -= 1) {
+    if (normalized[index].role === "user") {
+      lastUserIndex = index;
+      break;
+    }
+  }
+
+  let hasActiveAssistant = false;
+  const live = normalized.map((message, index) => {
+    if (
+      index <= lastUserIndex ||
+      !message.partial ||
+      message.completedAt ||
+      (message.role !== "assistant" && message.role !== "thought")
+    ) {
+      return message;
+    }
+    if (message.role === "assistant") hasActiveAssistant = true;
+    return {
+      ...message,
+      createdAt: message.createdAt ?? promptStartedAt,
+      partial: false,
+      streaming: true,
+      pending: message.role === "assistant" && !message.content,
+    };
+  });
+
+  if (hasActiveAssistant) return live;
+  return [
+    ...live,
+    {
+      id: `live:${snapshot.sessionId ?? "session"}`,
+      role: "assistant",
+      content: "",
+      runtimeId: snapshot.runtimeId ?? undefined,
+      createdAt: promptStartedAt,
+      completedAt: null,
+      streaming: true,
+      pending: true,
+    },
+  ];
+}
+
+/** Keep live event state when revisiting a session; journal data is a fallback. */
+export function restoreSessionMessages(
+  cached: ChatMessage[] | undefined,
+  stored: ChatMessage[],
+  snapshot: SessionSnapshot,
+): ChatMessage[] {
+  if (!cached) return normalizeLoadedMessages(stored, snapshot);
+  return cached.map((message) =>
+    message.streaming && message.content
+      ? { ...message, revealImmediately: true }
+      : message,
+  );
 }
 
 export function finalizeAssistantMessage(message: ChatMessage): ChatMessage {
@@ -156,6 +224,14 @@ export function finalizeAssistantMessage(message: ChatMessage): ChatMessage {
     streaming: false,
     completedAt: message.completedAt ?? nowIso(),
   };
+}
+
+export function finalizeStreamingMessage(message: ChatMessage): ChatMessage {
+  if (!message.streaming) return message;
+  if (message.role === "assistant") {
+    return finalizeAssistantMessage(message);
+  }
+  return { ...message, streaming: false, pending: false };
 }
 
 export function startAssistantElapsedPause(

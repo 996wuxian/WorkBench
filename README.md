@@ -50,6 +50,8 @@ Workbench 默认不提交、不打包、不写入用户的 Agent 登录态或 AP
 
 - App 数据目录：Windows `%APPDATA%\workbench\Workbench`
 - 会话镜像：`sessions/`
+- 会话 trace：`sessions/<session-id>/trace.jsonl`；右键导出到 `exports/*.trace.jsonl`
+- trace 默认只记录时间、状态、耗时、字节数、工具名和错误码，不记录对话正文、权限 preview、工具命令或敏感路径
 - 隔离 Agent home fallback：`agent-homes/`
 - 日志：`logs/`
 - Claude 权限桥临时配置：系统 temp 下的 `workbench-claude-mcp/`，启动时会清理超过 24 小时的旧文件

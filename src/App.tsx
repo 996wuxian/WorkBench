@@ -38,11 +38,14 @@ import {
   fallbackModelOptions,
   normalizeCodexModelId,
 } from "./lib/codex";
-import { nowIso, uid } from "./lib/format";
+import { copyTextToClipboard, nowIso, uid } from "./lib/format";
+import { emitToast } from "./lib/toast";
+import { notifySessionResult } from "./lib/sessionNotifications";
 import {
   composeMessageText,
-  finalizeAssistantMessage,
+  finalizeStreamingMessage,
   normalizeLoadedMessages,
+  restoreSessionMessages,
   toolMessageKey,
   type QuoteTarget,
 } from "./lib/messages";
@@ -78,6 +81,7 @@ import type {
   SessionSelectionCatalog,
   SessionSnapshot,
   SessionState,
+  SessionUnreadKind,
 } from "./lib/types";
 import {
   allRuntimes,
@@ -131,6 +135,12 @@ export default function App() {
   const [pendingSession, setPendingSession] = useState<SessionMeta | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<SessionSnapshot>(idleSnapshot());
+  const [sessionSnapshots, setSessionSnapshots] = useState<
+    Record<string, SessionSnapshot>
+  >({});
+  const [sessionUnread, setSessionUnread] = useState<
+    Record<string, SessionUnreadKind>
+  >({});
   const [probes, setProbes] = useState<ProbeResult[]>([]);
   const [runtimes, setRuntimes] = useState<RuntimeInfo[]>([]);
   /** Approvals still waiting on the user, keyed by session. */
@@ -168,6 +178,7 @@ export default function App() {
   );
   const [sessionFilter, setSessionFilter] = useState("");
   const [showSearch, setShowSearch] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
   const [sessionContextMenu, setSessionContextMenu] = useState<{
     sessionId: string;
     left: number;
@@ -177,6 +188,10 @@ export default function App() {
   const [deleteSessionIds, setDeleteSessionIds] = useState<string[]>([]);
   const [deleteSessionBusy, setDeleteSessionBusy] = useState(false);
   const [deleteSessionError, setDeleteSessionError] = useState<string | null>(null);
+  const [renameSessionId, setRenameSessionId] = useState<string | null>(null);
+  const [renameSessionTitle, setRenameSessionTitle] = useState("");
+  const [renameSessionBusy, setRenameSessionBusy] = useState(false);
+  const [renameSessionError, setRenameSessionError] = useState<string | null>(null);
   const [syncingRuntime, setSyncingRuntime] = useState<RuntimeId | null>(null);
   const [claudeRoute, setClaudeRoute] = useState<ClaudeRouteStatus | null>(null);
   const [loadingMoreRuntime, setLoadingMoreRuntime] = useState<RuntimeId | null>(
@@ -304,7 +319,7 @@ export default function App() {
     [],
   );
   const settingsChangeDisabled =
-    !active || settingsBusy || !canChangeSessionSettings(snapshot.state);
+    !active || active.archived || settingsBusy || !canChangeSessionSettings(snapshot.state);
   const runtimePickOptions = useMemo(
     () =>
       (runtimes.length > 0 ? allRuntimes() : []).map((r) => ({
@@ -318,7 +333,10 @@ export default function App() {
     [runtimes],
   );
   const runtimeVisibleSessions = useMemo(() => {
-    const scoped = sessions.filter((session) => session.runtimeId === runtimePick);
+    const scoped = sessions.filter(
+      (session) =>
+        session.runtimeId === runtimePick && session.archived === showArchived,
+    );
     const q = sessionFilter.trim().toLowerCase();
     if (!q) return scoped;
     return scoped.filter(
@@ -330,7 +348,7 @@ export default function App() {
         (session.nativeSessionId ?? "").toLowerCase().includes(q) ||
         (session.nativeThreadId ?? "").toLowerCase().includes(q),
     );
-  }, [runtimePick, sessionFilter, sessions]);
+  }, [runtimePick, sessionFilter, sessions, showArchived]);
   const activeSupportsReasoningEffort =
     runtimeInfo(activeRuntimeId)?.capabilities.reasoningEffort ?? false;
   const activePermissionQueue = activeId
@@ -345,8 +363,6 @@ export default function App() {
     permissionBusy === activePermissionRequest?.requestId;
   const activeIdRef = useRef<string | null>(null);
   const activationRequestRef = useRef(0);
-  const sessionsRef = useRef<SessionMeta[]>([]);
-  const pendingSessionRef = useRef<SessionMeta | null>(null);
   const mockReplyTimerRef = useRef<number | null>(null);
   const sessionScrollRef = useRef<HTMLDivElement | null>(null);
   const messageScrollRef = useRef<HTMLDivElement | null>(null);
@@ -361,12 +377,22 @@ export default function App() {
   const assistantTypingTimersRef = useRef<Record<string, number>>({});
   const assistantTypingQueueRef = useRef<Record<string, string>>({});
   const assistantTypingSessionRef = useRef<Record<string, string>>({});
+  const sessionUnreadRef = useRef<Record<string, SessionUnreadKind>>({});
+  const notifiedSessionResultRef = useRef<Record<string, SessionUnreadKind>>({});
 
   const beginSessionActivation = useCallback((sessionId: string | null) => {
     const requestId = activationRequestRef.current + 1;
     activationRequestRef.current = requestId;
     activeIdRef.current = sessionId;
     setActiveId(sessionId);
+    if (sessionId) {
+      if (sessionId in sessionUnreadRef.current) {
+        const next = { ...sessionUnreadRef.current };
+        delete next[sessionId];
+        sessionUnreadRef.current = next;
+        setSessionUnread(next);
+      }
+    }
     return requestId;
   }, []);
 
@@ -376,14 +402,6 @@ export default function App() {
       activationRequestRef.current === requestId,
     [],
   );
-
-  useEffect(() => {
-    sessionsRef.current = sessions;
-  }, [sessions]);
-
-  useEffect(() => {
-    pendingSessionRef.current = pendingSession;
-  }, [pendingSession]);
 
   useEffect(() => {
     if (!active) {
@@ -442,6 +460,62 @@ export default function App() {
     },
     [],
   );
+
+  const applySettledSessionMeta = useCallback((meta: SessionMeta) => {
+    setSessions((prev) => mergeSessions(prev, [meta]));
+    setPendingSession((prev) => (prev?.id === meta.id ? null : prev));
+  }, []);
+
+  const applySessionSnapshot = useCallback((next: SessionSnapshot) => {
+    const sessionId = next.sessionId;
+    if (!sessionId) return;
+    if (next.state === "streaming") {
+      delete notifiedSessionResultRef.current[sessionId];
+    }
+    setSessionSnapshots((prev) => ({ ...prev, [sessionId]: next }));
+    if (activeIdRef.current === sessionId) {
+      setSnapshot(next);
+    }
+  }, []);
+
+  const markSessionResult = useCallback(
+    (sessionId: string, kind: SessionUnreadKind, meta?: SessionMeta) => {
+      const isBackgroundSession = activeIdRef.current !== sessionId;
+      const isWindowBackground =
+        !document.hasFocus() || document.visibilityState !== "visible";
+      if (isBackgroundSession && sessionUnreadRef.current[sessionId] !== kind) {
+        const next = { ...sessionUnreadRef.current, [sessionId]: kind };
+        sessionUnreadRef.current = next;
+        setSessionUnread(next);
+      }
+      if (!isBackgroundSession && !isWindowBackground) return;
+      if (notifiedSessionResultRef.current[sessionId] === kind) return;
+      notifiedSessionResultRef.current = {
+        ...notifiedSessionResultRef.current,
+        [sessionId]: kind,
+      };
+
+      const session = meta ?? sessions.find((item) => item.id === sessionId);
+      const title = session ? sessionDisplayTitle(session) : "后台会话";
+      const completed = kind === "completed";
+      const message = completed ? `${title} 已完成` : `${title} 发生异常`;
+      emitToast({
+        message,
+        tone: completed ? "success" : "danger",
+        duration: 5000,
+      });
+      void notifySessionResult(message, kind, isWindowBackground);
+    },
+    [sessions],
+  );
+
+  useEffect(() => {
+    if (!snapshot.sessionId) return;
+    setSessionSnapshots((prev) => ({
+      ...prev,
+      [snapshot.sessionId as string]: snapshot,
+    }));
+  }, [snapshot]);
 
   const scrollChatToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     const scroll = () => {
@@ -605,62 +679,19 @@ export default function App() {
     visibleMessages.length,
   ]);
 
-  const refreshSessionMeta = useCallback(async (sessionId: string) => {
-    if (!isTauri()) return;
-    const session =
-      sessionsRef.current.find((item) => item.id === sessionId) ??
-      (pendingSessionRef.current?.id === sessionId ? pendingSessionRef.current : null);
-    const runtimeId = session?.runtimeId;
-
-    try {
-      if (runtimeId === "grok" || runtimeId === "codex") {
-        const result = await api.syncNativeSessions(runtimeId, SESSION_PAGE_SIZE, null);
-        setSessions((prev) => mergeSessions(prev, result.sessions));
-        setNativeCursors((prev) => ({
-          ...prev,
-          [runtimeId]: result.nextCursor ?? null,
-        }));
-        setNativeHasMore((prev) => ({
-          ...prev,
-          [runtimeId]: result.hasMore,
-        }));
-        setPendingSession((prev) =>
-          prev && result.sessions.some((item) => item.id === prev.id) ? null : prev,
-        );
-        return;
-      }
-
-      const list = await api.listSessions();
-      setSessions(list);
-      setPendingSession((prev) =>
-        prev && list.some((item) => item.id === prev.id) ? null : prev,
-      );
-    } catch (error) {
-      try {
-        const list = await api.listSessions();
-        setSessions(list);
-        setPendingSession((prev) =>
-          prev && list.some((item) => item.id === prev.id) ? null : prev,
-        );
-      } catch {
-        setStatusLine(`refresh session meta failed: ${String(error)}`);
-      }
-    }
-  }, []);
-
   // Host → UI event fold. The listeners live in the hook; everything they need
   // is passed in, so App owns the state and the hook owns the protocol.
   useSessionEvents({
     activeSessionIdRef: activeIdRef,
     updateSessionMessages,
-    setMessagesBySession,
     setSnapshot,
+    applySessionSnapshot,
     setPermissionQueue,
     setPermissionBusy,
-    setStatusLine,
     queueAssistantTyping,
     clearAssistantTypingForSession,
-    refreshSessionMeta,
+    applySettledSessionMeta,
+    markSessionResult,
   });
 
   const refreshRuntimes = useCallback(async () => {
@@ -881,15 +912,18 @@ export default function App() {
       const list = await api.listSessions();
       setPendingSession(null);
       setSessions(list);
-      if (list.length > 0) {
-        const first = list[0];
+      const snapshots = await api.listSnapshots();
+      const snapshotMap = Object.fromEntries(
+        snapshots.flatMap((item) => (item.sessionId ? [[item.sessionId, item]] : [])),
+      );
+      setSessionSnapshots(snapshotMap);
+      const first = list.find((session) => !session.archived);
+      if (first) {
         const requestId = beginSessionActivation(first.id);
-        const [snap, storedMessages] = await Promise.all([
-          api.getSnapshot(first.id),
-          api.getMessages(first.id),
-        ]);
+        const storedMessages = await api.getMessages(first.id);
         if (!isCurrentSessionActivation(first.id, requestId)) return;
-        const restored = normalizeLoadedMessages(storedMessages);
+        const snap = snapshotMap[first.id] ?? idleSnapshot(first);
+        const restored = normalizeLoadedMessages(storedMessages, snap);
         setSnapshot(snap);
         setMessagesBySession((prev) => ({
           ...prev,
@@ -946,17 +980,30 @@ export default function App() {
         return;
       }
       try {
+        const cachedMessages = messagesBySession[id];
         const [snap, storedMessages] = await Promise.all([
           api.getSnapshot(id),
-          api.getMessages(id),
+          cachedMessages === undefined
+            ? api.getMessages(id)
+            : Promise.resolve<ChatMessage[] | null>(null),
         ]);
         if (!isCurrentSessionActivation(id, requestId)) return;
-        const restored = normalizeLoadedMessages(storedMessages);
+        const restored = restoreSessionMessages(
+          cachedMessages,
+          storedMessages ?? [],
+          snap,
+        );
         setSnapshot(snap);
-        setMessagesBySession((prev) => ({
-          ...prev,
-          [id]: restored,
-        }));
+        setMessagesBySession((prev) => {
+          const current = prev[id];
+          if (current !== undefined) {
+            return {
+              ...prev,
+              [id]: restoreSessionMessages(current, [], snap),
+            };
+          }
+          return storedMessages === null ? prev : { ...prev, [id]: restored };
+        });
         resetChatViewport(id, restored.length);
       } catch (e) {
         if (isCurrentSessionActivation(id, requestId)) {
@@ -1021,6 +1068,14 @@ export default function App() {
     runtimeVisibleSessions,
   ]);
 
+  const applySessionPresentationMeta = useCallback((meta: SessionMeta) => {
+    setSessions((prev) => mergeSessions(prev, [meta]));
+    setPendingSession((prev) => (prev?.id === meta.id ? meta : prev));
+    if (activeIdRef.current === meta.id) {
+      setSnapshot((prev) => ({ ...prev, title: meta.title }));
+    }
+  }, []);
+
   const openSelectedSessionLocation = useCallback(async (sessionId: string) => {
     setSessionContextMenu(null);
     if (!isTauri()) {
@@ -1034,6 +1089,217 @@ export default function App() {
       setStatusLine(`open location failed: ${String(e)}`);
     }
   }, []);
+
+  const toggleSessionPinned = useCallback(
+    async (sessionId: string, pinned: boolean) => {
+      setSessionContextMenu(null);
+      const target =
+        sessions.find((session) => session.id === sessionId) ??
+        (pendingSession?.id === sessionId ? pendingSession : null);
+      if (!target) return;
+
+      try {
+        const nextMeta = isTauri()
+          ? await api.updateSessionPresentation(sessionId, { pinned })
+          : { ...target, pinned };
+        applySessionPresentationMeta(nextMeta);
+        setStatusLine(`${pinned ? "已置顶" : "已取消置顶"} · ${sessionDisplayTitle(nextMeta)}`);
+      } catch (error) {
+        setStatusLine(`更新置顶状态失败: ${String(error)}`);
+      }
+    },
+    [applySessionPresentationMeta, pendingSession, sessions],
+  );
+
+  const requestRenameSession = useCallback(
+    (sessionId: string) => {
+      const target =
+        sessions.find((session) => session.id === sessionId) ??
+        (pendingSession?.id === sessionId ? pendingSession : null);
+      if (!target) return;
+      setSessionContextMenu(null);
+      setRenameSessionId(sessionId);
+      setRenameSessionTitle(sessionDisplayTitle(target));
+      setRenameSessionError(null);
+    },
+    [pendingSession, sessions],
+  );
+
+  const closeRenameSession = useCallback(() => {
+    if (renameSessionBusy) return;
+    setRenameSessionId(null);
+    setRenameSessionTitle("");
+    setRenameSessionError(null);
+  }, [renameSessionBusy]);
+
+  const confirmRenameSession = useCallback(async () => {
+    if (!renameSessionId || renameSessionBusy) return;
+    const title = renameSessionTitle.trim();
+    if (!title) {
+      setRenameSessionError("会话名称不能为空");
+      return;
+    }
+    if (Array.from(title).length > 120) {
+      setRenameSessionError("会话名称不能超过 120 个字符");
+      return;
+    }
+
+    const target =
+      sessions.find((session) => session.id === renameSessionId) ??
+      (pendingSession?.id === renameSessionId ? pendingSession : null);
+    if (!target) {
+      setRenameSessionError("会话不存在或已被删除");
+      return;
+    }
+
+    setRenameSessionBusy(true);
+    setRenameSessionError(null);
+    try {
+      const nextMeta = isTauri()
+        ? await api.updateSessionPresentation(renameSessionId, { title })
+        : { ...target, title };
+      applySessionPresentationMeta(nextMeta);
+      setRenameSessionId(null);
+      setRenameSessionTitle("");
+      setStatusLine(`已重命名会话 · ${title}`);
+    } catch (error) {
+      setRenameSessionError(`重命名失败: ${String(error)}`);
+    } finally {
+      setRenameSessionBusy(false);
+    }
+  }, [
+    applySessionPresentationMeta,
+    pendingSession,
+    renameSessionBusy,
+    renameSessionId,
+    renameSessionTitle,
+    sessions,
+  ]);
+
+  const copySessionId = useCallback(async (sessionId: string) => {
+    setSessionContextMenu(null);
+    try {
+      await copyTextToClipboard(sessionId);
+      setStatusLine(`已复制会话 ID · ${sessionId}`);
+    } catch (error) {
+      setStatusLine(`复制会话 ID 失败: ${String(error)}`);
+    }
+  }, []);
+
+  const exportSessionMarkdown = useCallback(async (sessionId: string) => {
+    setSessionContextMenu(null);
+    if (!isTauri()) {
+      setStatusLine("UI preview · Markdown export unavailable");
+      return;
+    }
+    try {
+      const result = await api.exportSessionMarkdown(sessionId);
+      emitToast({ message: `已导出 ${result.messageCount} 条消息`, tone: "success" });
+      setStatusLine(`已导出 Markdown · ${result.path}`);
+    } catch (error) {
+      emitToast({ message: "Markdown 导出失败", tone: "danger" });
+      setStatusLine(`Markdown 导出失败: ${String(error)}`);
+    }
+  }, []);
+
+  const exportSessionTrace = useCallback(async (sessionId: string) => {
+    setSessionContextMenu(null);
+    if (!isTauri()) {
+      setStatusLine("UI preview · trace export unavailable");
+      return;
+    }
+    try {
+      const result = await api.exportSessionTrace(sessionId);
+      emitToast({ message: `已导出 ${result.eventCount} 条 trace 事件`, tone: "success" });
+      setStatusLine(`已导出 trace · ${result.path}`);
+    } catch (error) {
+      const errorText = String(error);
+      const traceEmpty = errorText.includes("session has no trace events");
+      emitToast({
+        message: traceEmpty ? "该会话暂无可导出的 trace" : "trace 导出失败",
+        tone: traceEmpty ? "neutral" : "danger",
+      });
+      setStatusLine(
+        traceEmpty ? "该会话暂无可导出的 trace" : `trace 导出失败: ${errorText}`,
+      );
+    }
+  }, []);
+
+  const toggleSessionArchived = useCallback(
+    async (sessionId: string, archived: boolean) => {
+      setSessionContextMenu(null);
+      const target =
+        sessions.find((session) => session.id === sessionId) ??
+        (pendingSession?.id === sessionId ? pendingSession : null);
+      if (!target) return;
+
+      try {
+        const nextMeta = isTauri()
+          ? await api.setSessionArchived(sessionId, archived)
+          : { ...target, archived };
+        applySessionPresentationMeta(nextMeta);
+        setSelectedSessionIds([]);
+
+        if (archived) {
+          if (activeIdRef.current === sessionId) {
+            setDraft("");
+            setQuoteTarget(null);
+            const nextSession = mergeSessions(sessions, [nextMeta]).find(
+              (session) =>
+                session.runtimeId === runtimePick && !session.archived,
+            );
+            if (nextSession) {
+              await activateSession(nextSession.id, nextSession);
+            } else {
+              beginSessionActivation(null);
+              setSnapshot(idleSnapshot());
+            }
+          }
+          setStatusLine(`已归档 · ${sessionDisplayTitle(nextMeta)}`);
+          return;
+        }
+
+        setShowArchived(false);
+        setSessionFilter("");
+        await activateSession(nextMeta.id, nextMeta);
+        setStatusLine(`已恢复 · ${sessionDisplayTitle(nextMeta)}`);
+      } catch (error) {
+        const action = archived ? "归档" : "恢复";
+        emitToast({ message: `${action}会话失败`, tone: "danger" });
+        setStatusLine(`${action}会话失败: ${String(error)}`);
+      }
+    },
+    [
+      activateSession,
+      applySessionPresentationMeta,
+      beginSessionActivation,
+      pendingSession,
+      runtimePick,
+      sessions,
+    ],
+  );
+
+  const changeArchivedView = useCallback(
+    (nextShowArchived: boolean) => {
+      setShowArchived(nextShowArchived);
+      setSessionFilter("");
+      setSelectedSessionIds([]);
+      setDraft("");
+      setQuoteTarget(null);
+      const nextSession = sessions.find(
+        (session) =>
+          session.runtimeId === runtimePick &&
+          session.archived === nextShowArchived,
+      );
+      if (nextSession) {
+        void activateSession(nextSession.id, nextSession);
+      } else {
+        beginSessionActivation(null);
+        setSnapshot(idleSnapshot());
+      }
+    },
+    [activateSession, beginSessionActivation, runtimePick, sessions],
+  );
 
   const requestDeleteSessions = useCallback((sessionIds: string[]) => {
     const uniqueIds = Array.from(new Set(sessionIds.filter(Boolean)));
@@ -1074,6 +1340,20 @@ export default function App() {
         }
         return next;
       });
+      setSessionSnapshots((prev) => {
+        const next = { ...prev };
+        for (const sessionId of removedSessionIds) {
+          delete next[sessionId];
+        }
+        return next;
+      });
+      const nextUnread = { ...sessionUnreadRef.current };
+      for (const sessionId of removedSessionIds) {
+        delete nextUnread[sessionId];
+        delete notifiedSessionResultRef.current[sessionId];
+      }
+      sessionUnreadRef.current = nextUnread;
+      setSessionUnread(nextUnread);
       setPendingSession((prev) =>
         prev && removedSessionIdSet.has(prev.id) ? null : prev,
       );
@@ -1084,8 +1364,11 @@ export default function App() {
 
       if (activeId && removedSessionIdSet.has(activeId)) {
         setQuoteTarget(null);
-        if (nextSessions.length > 0) {
-          const nextMeta = nextSessions[0];
+        const nextMeta = nextSessions.find(
+          (session) =>
+            session.runtimeId === runtimePick && session.archived === showArchived,
+        );
+        if (nextMeta) {
           await activateSession(nextMeta.id, nextMeta);
         } else {
           beginSessionActivation(null);
@@ -1137,7 +1420,9 @@ export default function App() {
     deleteSessionBusy,
     deleteSessionIds,
     pendingSession,
+    runtimePick,
     sessions,
+    showArchived,
   ]);
 
   const sessionContextTarget = useMemo(() => {
@@ -1157,11 +1442,19 @@ export default function App() {
     sessionContextTargetIds.length > 1
       ? `已选择 ${sessionContextTargetIds.length} 个会话`
       : (sessionContextTarget?.title ?? "会话");
+  const sessionContextTargetSnapshot = sessionContextTarget
+    ? sessionSnapshots[sessionContextTarget.id]
+    : undefined;
+  const sessionContextArchiveDisabled = Boolean(
+    sessionContextTarget &&
+      !sessionContextTarget.archived &&
+      !canChangeSessionSettings(sessionContextTargetSnapshot?.state ?? "idle"),
+  );
 
   useEffect(() => {
     sessionSelectionAnchorRef.current = null;
     setSelectedSessionIds([]);
-  }, [runtimePick, sessionFilter]);
+  }, [runtimePick, sessionFilter, showArchived]);
 
   const sessionPathFor = useCallback(
     (sessionId: string) =>
@@ -1257,11 +1550,14 @@ export default function App() {
   async function createSession() {
     setBusy(true);
     try {
+      setShowArchived(false);
       setQuoteTarget(null);
       if (!isTauri()) {
         const meta: SessionMeta = {
           id: uid("sess"),
           title: `${runtimeLabel(runtimePick)} · 新会话`,
+          pinned: false,
+          archived: false,
           runtimeId: runtimePick,
           projectPath: "X:\\1_2026_project\\work",
           modelId: runtimePick === "grok" ? "grok-4.5" : "default",
@@ -1362,6 +1658,10 @@ export default function App() {
   async function sendMessage() {
     const body = draft.trim();
     if (!body || !active) return;
+    if (active.archived) {
+      setStatusLine("请先恢复归档会话再继续发送");
+      return;
+    }
     const text = composeMessageText(quoteTarget, body);
     const session = active;
     setDraft("");
@@ -1480,7 +1780,7 @@ export default function App() {
     updateSessionMessages(sessionId, (m) =>
       m
         .filter((msg) => !(msg.role === "assistant" && msg.pending))
-        .map((msg) => (msg.streaming ? finalizeAssistantMessage(msg) : msg)),
+        .map(finalizeStreamingMessage),
     );
     setSnapshot((s) =>
       s.state === "streaming" || s.state === "awaiting_permission"
@@ -1666,9 +1966,12 @@ export default function App() {
           runtimePick={runtimePick}
           runtimePickOptions={runtimePickOptions}
           sessions={sessions}
+          sessionSnapshots={sessionSnapshots}
+          sessionUnread={sessionUnread}
           activeId={activeId}
           busy={busy}
           showSearch={showSearch}
+          showArchived={showArchived}
           sessionFilter={sessionFilter}
           sessionScrollRef={sessionScrollRef}
           syncingRuntime={syncingRuntime}
@@ -1682,6 +1985,7 @@ export default function App() {
             setShowSearch((v) => !v);
             if (showSearch) setSessionFilter("");
           }}
+          onShowArchivedChange={changeArchivedView}
           onSessionFilterChange={setSessionFilter}
           selectedSessionIds={selectedSessionIds}
           onSelectSession={(id, options) => selectSession(id, options)}
@@ -1809,6 +2113,7 @@ export default function App() {
                 draft={draft}
                 busy={busy}
                 streaming={streaming}
+                readOnly={active.archived}
                 settingsChangeDisabled={settingsChangeDisabled}
                 activeModelValue={activeModelValue}
                 activeModelLabel={activeModelLabel}
@@ -1876,13 +2181,36 @@ export default function App() {
         onClearRuntimeCliPath={clearRuntimeCliPath}
         sessionContextMenu={sessionContextMenu}
         sessionContextTargetTitle={sessionContextTargetTitle}
+        sessionContextTargetPinned={sessionContextTarget?.pinned ?? false}
+        sessionContextTargetArchived={sessionContextTarget?.archived ?? false}
+        sessionContextArchiveDisabled={sessionContextArchiveDisabled}
         sessionContextTargetCount={sessionContextTargetIds.length}
         sessionContextTargetIds={sessionContextTargetIds}
         sessionContextMenuRef={sessionContextMenuRef}
         onOpenSelectedSessionLocation={(sessionId) =>
           void openSelectedSessionLocation(sessionId)
         }
+        onToggleSessionPinned={(sessionId, pinned) =>
+          void toggleSessionPinned(sessionId, pinned)
+        }
+        onRequestRenameSession={requestRenameSession}
+        onCopySessionId={(sessionId) => void copySessionId(sessionId)}
+        onExportSessionMarkdown={(sessionId) => void exportSessionMarkdown(sessionId)}
+        onExportSessionTrace={(sessionId) => void exportSessionTrace(sessionId)}
+        onToggleSessionArchived={(sessionId, archived) =>
+          void toggleSessionArchived(sessionId, archived)
+        }
         onRequestDeleteSessions={(sessionIds) => requestDeleteSessions(sessionIds)}
+        renameSessionId={renameSessionId}
+        renameSessionTitle={renameSessionTitle}
+        renameSessionBusy={renameSessionBusy}
+        renameSessionError={renameSessionError}
+        onRenameSessionTitleChange={(title) => {
+          setRenameSessionTitle(title);
+          setRenameSessionError(null);
+        }}
+        onCloseRename={closeRenameSession}
+        onConfirmRename={() => void confirmRenameSession()}
         deleteSessionIds={deleteSessionIds}
         deleteTargetSessions={deleteTargetSessions}
         deleteTargetPath={deleteTargetPath}

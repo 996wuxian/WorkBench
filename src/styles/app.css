@@ -353,6 +353,29 @@ select,
   color: var(--text-tertiary);
 }
 
+.sidebar__section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.sidebar__section-stats {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar__section-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
 .section-icon-btn {
   width: 26px;
   height: 26px;
@@ -366,6 +389,11 @@ select,
 
 .section-icon-btn:hover:not(:disabled) {
   background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.section-icon-btn.is-on {
+  background: var(--bg-active);
   color: var(--text-primary);
 }
 
@@ -453,6 +481,13 @@ select,
   min-width: 0;
 }
 
+.session-item__pin {
+  display: inline-flex;
+  align-self: center;
+  color: var(--accent-hover);
+  flex: 0 0 auto;
+}
+
 .session-item__title {
   font-size: 13px;
   font-weight: 500;
@@ -478,6 +513,47 @@ select,
   text-overflow: ellipsis;
   white-space: nowrap;
   line-height: 1.35;
+}
+
+.session-item__status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  min-height: 16px;
+  gap: 8px;
+}
+
+.session-item__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.session-item__unread {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.session-item__unread--completed {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 45%, var(--border-strong));
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+}
+
+.session-item__unread--error {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border-strong));
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
 .session-load-more,
@@ -1513,6 +1589,10 @@ select,
   border-color: var(--border-strong);
 }
 
+.composer__shell.is-read-only {
+  background: var(--bg-elevated);
+}
+
 .composer__toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -1610,6 +1690,12 @@ select,
   font: inherit;
   outline: none;
   line-height: 1.5;
+}
+
+.composer__input:disabled {
+  color: var(--text-tertiary);
+  cursor: default;
+  opacity: 1;
 }
 
 .composer__footer {
@@ -2626,8 +2712,10 @@ select,
 .session-context-menu {
   position: fixed;
   z-index: 12000;
-  width: 220px;
-  max-width: min(260px, calc(100vw - 16px));
+  width: 244px;
+  max-width: min(244px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   padding: 6px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -2665,7 +2753,8 @@ select,
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 9px 10px;
+  min-height: 32px;
+  padding: 7px 9px;
   border-radius: 8px;
   border: none;
   background: transparent;
@@ -2674,15 +2763,37 @@ select,
   cursor: pointer;
 }
 
-.session-context-menu__item:hover {
+.session-context-menu__item > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-context-menu__item:hover:not(:disabled),
+.session-context-menu__item:focus-visible {
   background: var(--bg-hover);
+  outline: none;
+}
+
+.session-context-menu__item:disabled {
+  color: var(--text-tertiary);
+  cursor: default;
+  opacity: 0.48;
+}
+
+.session-context-menu__separator {
+  height: 1px;
+  margin: 4px 7px;
+  background: var(--border-subtle);
 }
 
 .session-context-menu__item--danger {
   color: var(--danger);
 }
 
-.session-context-menu__item--danger:hover {
+.session-context-menu__item--danger:hover:not(:disabled),
+.session-context-menu__item--danger:focus-visible {
   background: rgba(240, 113, 120, 0.12);
 }
 
@@ -2908,6 +3019,49 @@ select,
   gap: 10px;
 }
 
+.session-rename-dialog {
+  width: min(420px, 100%);
+}
+
+.session-rename-dialog__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.session-rename-dialog__label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.session-rename-dialog__input {
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  outline: none;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.session-rename-dialog__input:focus {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.session-rename-dialog__input[aria-invalid="true"] {
+  border-color: rgba(240, 113, 120, 0.58);
+}
+
+.session-rename-dialog__error {
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .session-delete-dialog__title {
   font-size: 14px;
   font-weight: 600;
@@ -2983,6 +3137,7 @@ select,
 
 .session-filter__input,
 .session-item__title,
+.session-rename-dialog__input,
 .sidebar__footer,
 .main__title,
 .permission-bar__title,
@@ -3025,7 +3180,9 @@ select,
 .probe-card__row,
 .chip,
 .session-delete-dialog__note,
-.session-delete-dialog__error {
+.session-delete-dialog__error,
+.session-rename-dialog__label,
+.session-rename-dialog__error {
   font-size: var(--ui-text-sm);
 }
 

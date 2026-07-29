@@ -162,12 +162,13 @@ type HostEvent =
   | { type: "permission_request"; rpcId: string; toolName: string; title: string; preview: string; options: PermissionOption[] }
   | { type: "plan"; entries: unknown; body?: string }
   | { type: "prompt_complete"; stopReason: string }
+  | { type: "turn_settled"; stopReason: string; meta: SessionMeta }
   | { type: "error"; code: ErrorCode; message: string }
   | { type: "process_exited"; code?: number }
   | { type: "retry_state"; attempt: number; max: number; reason: string }
 ```
 
-**原则：** UI 永远只认 `HostEvent`，不认 ACP / Codex AppServer / Claude stream-json 细节。
+**原则：** UI 永远只认 `HostEvent`，不认 ACP / Codex AppServer / Claude stream-json 细节。Adapter 的 `prompt_complete` 只表示原生 CLI 已结束输出；Host 完成 journal、FSM 和原生 session id 落盘后，再发送 `turn_settled` 更新会话元数据。
 
 ### 4.4 Runtime Adapter 接口（Host 侧）
 
@@ -299,7 +300,8 @@ P2    编排 / 多 Agent 流水线
 
 1. **一个会话绑定一个 runtime**（切换引擎 = 新建会话或「用另一引擎继续」fork）  
 2. 禁止在同一 live 进程中途热切换 runtime（状态/工具/权限语义不一致）  
-3. 「用 Claude 继续这个 Grok 会话」= **fork**：把 journal 摘要 bootstrap 进新 runtime
+3. `journal` 是统一展示和崩溃恢复镜像；Codex thread、Claude session 等原生上下文仍由各 CLI 管理，正常多轮发送不重放 journal
+4. 「用 Claude 继续这个 Grok 会话」= **fork**：把 journal 摘要 bootstrap 进新 runtime
 
 ### 5.3 三种使用模式（分阶段交付）
 

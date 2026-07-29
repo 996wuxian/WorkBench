@@ -31,7 +31,7 @@ use crate::runtime::traits::{
 const HANDSHAKE_TIMEOUT_SECS: u64 = 45;
 const REQUEST_TIMEOUT_SECS: u64 = 60;
 const INTERRUPT_TIMEOUT_SECS: u64 = 5;
-const PROMPT_TIMEOUT_SECS: u64 = 60;
+const PROMPT_TIMEOUT_SECS: u64 = 60 * 20;
 const PROMPT_MAX_ATTEMPTS: usize = 3;
 const PROMPT_RETRY_BACKOFF_MS: u64 = 1000;
 static RPC_TRACE_LOCK: OnceLock<ParkingMutex<()>> = OnceLock::new();
@@ -418,6 +418,7 @@ struct CodexAppServerClient {
     completed_turns: ParkingMutex<HashMap<String, Result<String, String>>>,
     emitted_agent_message_items: ParkingMutex<HashSet<String>>,
     stopped: AtomicBool,
+    shutdown_requested: AtomicBool,
     reader_alive: AtomicBool,
     stderr_tail: ParkingMutex<Vec<String>>,
 }
@@ -499,6 +500,7 @@ impl CodexAppServerClient {
             completed_turns: ParkingMutex::new(HashMap::new()),
             emitted_agent_message_items: ParkingMutex::new(HashSet::new()),
             stopped: AtomicBool::new(false),
+            shutdown_requested: AtomicBool::new(false),
             reader_alive: AtomicBool::new(true),
             stderr_tail: ParkingMutex::new(Vec::new()),
         });
@@ -524,12 +526,15 @@ impl CodexAppServerClient {
                         }
                     }
                 }
+                let report_exit = !c.shutdown_requested.load(Ordering::SeqCst);
                 c.reader_alive.store(false, Ordering::SeqCst);
                 c.fail_all_pending("Codex app-server exited (stdout EOF)");
                 c.fail_all_turns("Codex app-server exited");
                 // Unblock anything waiting on an approval that can no longer be delivered.
                 c.permissions.abort_all();
-                let _ = c.event_tx.send(HostEvent::ProcessExited { code: None });
+                if report_exit {
+                    let _ = c.event_tx.send(HostEvent::ProcessExited { code: None });
+                }
             });
         }
 
@@ -700,18 +705,7 @@ impl CodexAppServerClient {
             "initialize",
             json!({
                 "clientInfo": { "name": client_name, "version": env!("CARGO_PKG_VERSION") },
-                "capabilities": {
-                    "experimentalApi": true,
-                    "requestAttestation": false,
-                    "optOutNotificationMethods": [
-                        "command/exec/outputDelta",
-                        "item/agentMessage/delta",
-                        "item/plan/delta",
-                        "item/fileChange/outputDelta",
-                        "item/reasoning/summaryTextDelta",
-                        "item/reasoning/textDelta"
-                    ]
-                }
+                "capabilities": codex_client_capabilities()
             }),
             HANDSHAKE_TIMEOUT_SECS,
         )
@@ -1025,6 +1019,7 @@ impl CodexAppServerClient {
     }
 
     async fn shutdown(&self) -> Result<(), AgentError> {
+        self.shutdown_requested.store(true, Ordering::SeqCst);
         self.stopped.store(true, Ordering::SeqCst);
         self.fail_all_pending("shutdown");
         self.fail_all_turns("shutdown");
@@ -1370,6 +1365,20 @@ impl CodexAppServerClient {
     }
 }
 
+fn codex_client_capabilities() -> Value {
+    json!({
+        "experimentalApi": true,
+        "requestAttestation": false,
+        // These high-volume events are not projected by Workbench. Assistant
+        // and reasoning deltas must remain enabled because they drive the chat.
+        "optOutNotificationMethods": [
+            "command/exec/outputDelta",
+            "item/plan/delta",
+            "item/fileChange/outputDelta"
+        ]
+    })
+}
+
 pub async fn read_selection_catalog(
     manifest: &'static RuntimeManifest,
     cwd: PathBuf,
@@ -1552,10 +1561,7 @@ fn normalize_codex_model_id(model: &str) -> String {
     trimmed.chars().take(120).collect()
 }
 
-fn codex_approval_result(
-    response: CodexApprovalResponse,
-    decision: PermissionDecision,
-) -> Value {
+fn codex_approval_result(response: CodexApprovalResponse, decision: PermissionDecision) -> Value {
     match response {
         CodexApprovalResponse::Decision => {
             let decision = match decision {
@@ -1611,9 +1617,11 @@ fn validate_reasoning_effort(value: &str) -> Result<Option<String>, String> {
     if trimmed.is_empty() {
         return Ok(None);
     }
-    normalize_reasoning_effort(Some(trimmed)).map(Some).ok_or(
-        format!("invalid Codex reasoning effort: {trimmed} (expected low, medium, or high)"),
-    )
+    normalize_reasoning_effort(Some(trimmed))
+        .map(Some)
+        .ok_or(format!(
+            "invalid Codex reasoning effort: {trimmed} (expected low, medium, or high)"
+        ))
 }
 
 fn codex_model_sort_key(option: &ChoiceOption) -> (String, i32, String) {
@@ -1688,13 +1696,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn client_capabilities_keep_visible_stream_deltas_enabled() {
+        let capabilities = codex_client_capabilities();
+        let opt_out = capabilities["optOutNotificationMethods"]
+            .as_array()
+            .expect("opt-out notification list");
+
+        for visible_method in [
+            "item/agentMessage/delta",
+            "item/reasoning/summaryTextDelta",
+            "item/reasoning/textDelta",
+        ] {
+            assert!(
+                !opt_out.iter().any(|method| method == visible_method),
+                "{visible_method} must be delivered to the chat projection"
+            );
+        }
+    }
+
+    #[test]
     fn command_approval_uses_codex_app_server_decisions() {
         assert_eq!(
-            codex_approval_result(CodexApprovalResponse::Decision, PermissionDecision::AllowOnce),
+            codex_approval_result(
+                CodexApprovalResponse::Decision,
+                PermissionDecision::AllowOnce
+            ),
             json!({ "decision": "accept" })
         );
         assert_eq!(
-            codex_approval_result(CodexApprovalResponse::Decision, PermissionDecision::AllowAlways),
+            codex_approval_result(
+                CodexApprovalResponse::Decision,
+                PermissionDecision::AllowAlways
+            ),
             json!({ "decision": "acceptForSession" })
         );
         assert_eq!(

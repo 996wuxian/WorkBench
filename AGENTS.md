@@ -137,6 +137,7 @@ App 数据根（运行时，非仓库）：Windows `%APPDATA%\workbench\Workbenc
 - **最小改动**：只改完成任务所需的文件；不做无关重构、不顺手「清理」。
 - **先读后改**：改 Host/协议前先读 `runtime/traits.rs`、`session_fsm.rs`、方案文档相关节。
 - **先定位渲染层**：UI 内容区问题看 React/CSS/public 资源；窗口壳、任务栏、Alt-Tab、exe 资源问题看 Tauri/Rust 配置与 `src-tauri/icons/`，不要混淆。
+- **弹窗关闭按钮**：Modal / Dialog 标题栏的关闭操作必须使用标准 X 图标按钮（优先复用 `IconClose`），禁止显示“关闭”文字；必须同时提供明确的 `title` 和 `aria-label`。弹窗底部的“取消”命令仍使用文字按钮。
 - **中文沟通**：与用户对话默认中文；代码标识符/协议字段用英文。
 - **密钥与日志**：禁止把 API Key、token 写入仓库或日志；UI 只显示 `hasKey` 类布尔。
 - **错误分类**：对外错误尽量映射 `AgentErrorCode`（CLI_NOT_FOUND / AUTH_FAILED / …），勿混淆文案。

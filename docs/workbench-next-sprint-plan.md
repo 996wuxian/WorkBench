@@ -1,8 +1,8 @@
 # Workbench 下一阶段方案
 
-状态：等待确认
-更新时间：2026-07-27
-下一步：等待 wuxian 确认后进入 `X:\WorkBench` 实施。
+状态：实施中
+更新时间：2026-07-29
+下一步：补空闲进程手动释放与健康检查；默认不限制活跃进程数，再进入 PTY Runtime SPIKE。
 阻塞：无
 
 ## 目标
@@ -44,6 +44,19 @@
 - 不新增无必要依赖
 
 ## 实施建议
+
+### Phase 0：展示链路收口
+
+状态：已完成。并行会话状态、后台完成/失败未读和窗口提醒已补齐。
+
+目标：保持各 CLI 原生上下文不变，减少 Workbench 展示镜像的重复 I/O。
+
+要点：
+
+1. Adapter 输出结束使用 `PromptComplete`，Host 落盘完成使用 `TurnSettled`。
+2. 正常 turn 完成后不再全量读取 journal。
+3. Native session 全量同步只在启动导入、手动刷新或低频后台刷新时执行。
+4. journal 仅用于统一展示、切换会话和崩溃恢复，不参与同一 runtime 的上下文重放。
 
 ### Phase 1：PTY Runtime 兜底
 

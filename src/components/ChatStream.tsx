@@ -49,13 +49,17 @@ export function AssistantTiming({ message }: { message: ChatMessage }) {
  */
 export function StreamingText({
   content,
+  revealImmediately = false,
   onProgress,
 }: {
   content: string;
+  revealImmediately?: boolean;
   onProgress?: () => void;
 }) {
   const characters = useMemo(() => Array.from(content), [content]);
-  const [visibleCount, setVisibleCount] = useState(0);
+  const [visibleCount, setVisibleCount] = useState(() =>
+    revealImmediately ? characters.length : 0,
+  );
 
   useEffect(() => {
     setVisibleCount((current) => Math.min(current, characters.length));

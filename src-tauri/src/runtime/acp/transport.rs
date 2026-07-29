@@ -65,6 +65,7 @@ pub struct AcpClient {
     runtime_id: RuntimeId,
     backend: String,
     stopped: AtomicBool,
+    shutdown_requested: AtomicBool,
     prompt_has_assistant_output: AtomicBool,
     reader_alive: AtomicBool,
     stderr_tail: ParkingMutex<Vec<String>>,
@@ -154,6 +155,7 @@ impl AcpClient {
             runtime_id: opts.runtime_id,
             backend: backend.clone(),
             stopped: AtomicBool::new(false),
+            shutdown_requested: AtomicBool::new(false),
             prompt_has_assistant_output: AtomicBool::new(false),
             reader_alive: AtomicBool::new(true),
             stderr_tail: ParkingMutex::new(Vec::new()),
@@ -181,11 +183,14 @@ impl AcpClient {
                         }
                     }
                 }
+                let report_exit = !c.shutdown_requested.load(Ordering::SeqCst);
                 c.reader_alive.store(false, Ordering::SeqCst);
                 c.fail_all_pending("Agent process exited (stdout EOF)");
                 // Unblock anything waiting on an approval that can no longer be delivered.
                 c.permissions.abort_all();
-                let _ = c.event_tx.send(HostEvent::ProcessExited { code: None });
+                if report_exit {
+                    let _ = c.event_tx.send(HostEvent::ProcessExited { code: None });
+                }
             });
         }
 
@@ -543,6 +548,7 @@ impl AcpClient {
     }
 
     pub async fn shutdown(&self) -> Result<(), AgentError> {
+        self.shutdown_requested.store(true, Ordering::SeqCst);
         self.stopped.store(true, Ordering::SeqCst);
         self.fail_all_pending("shutdown");
         let mut child = self.child.lock().await;

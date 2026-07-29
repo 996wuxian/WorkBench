@@ -13,6 +13,8 @@ export type SessionState =
   | "awaiting_permission"
   | "disconnected";
 
+export type SessionUnreadKind = "completed" | "error";
+
 export type AgentErrorCode =
   | "CLI_NOT_FOUND"
   | "AUTH_FAILED"
@@ -104,6 +106,8 @@ export interface SessionSelectionCatalog {
 export interface SessionMeta {
   id: string;
   title: string;
+  pinned: boolean;
+  archived: boolean;
   summary?: string | null;
   runtimeId: RuntimeId;
   projectPath?: string | null;
@@ -135,10 +139,23 @@ export interface SessionDeleteResult {
   activeSessionId?: string | null;
 }
 
+export interface SessionExportResult {
+  sessionId: string;
+  path: string;
+  messageCount: number;
+}
+
+export interface SessionTraceExportResult {
+  sessionId: string;
+  path: string;
+  eventCount: number;
+}
+
 export interface SessionSnapshot {
   sessionId?: string | null;
   runtimeId?: RuntimeId | null;
   state: SessionState;
+  promptStartedAt?: string | null;
   lastError?: AgentError | null;
   backend: string;
   modelId?: string | null;
@@ -173,6 +190,8 @@ export interface ChatMessage {
   streaming?: boolean;
   /** True before first assistant content arrives */
   pending?: boolean;
+  /** Live-only: revisiting this stream should not replay received text from zero. */
+  revealImmediately?: boolean;
 }
 
 /** A pending tool approval waiting on the user. */
@@ -204,6 +223,12 @@ export interface PermissionResolvedEvent {
   requestId: string;
   decision: PermissionDecision;
   source: PermissionDecisionSource;
+}
+
+export interface TurnSettledEvent {
+  sessionId: string;
+  stopReason: string;
+  meta: SessionMeta;
 }
 
 export interface RuntimeOverride {

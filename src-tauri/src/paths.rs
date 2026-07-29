@@ -29,6 +29,10 @@ pub fn logs_dir() -> PathBuf {
     data_dir().join("logs")
 }
 
+pub fn exports_dir() -> PathBuf {
+    data_dir().join("exports")
+}
+
 pub fn agent_homes_dir() -> PathBuf {
     data_dir().join("agent-homes")
 }
@@ -46,6 +50,7 @@ pub fn ensure_app_dirs() -> std::io::Result<()> {
     fs::create_dir_all(data_dir())?;
     fs::create_dir_all(sessions_dir())?;
     fs::create_dir_all(logs_dir())?;
+    fs::create_dir_all(exports_dir())?;
     fs::create_dir_all(agent_homes_dir())?;
     fs::create_dir_all(runtimes_dir())?;
     Ok(())

@@ -224,6 +224,9 @@ pub trait LiveSession: Send + Sync {
     fn native_home(&self) -> Option<String> {
         None
     }
+    /// A successful prompt must emit `HostEvent::PromptComplete` before this
+    /// future resolves. SessionManager uses that event as the authoritative
+    /// point to commit the UI journal and settle the Host-owned FSM.
     async fn prompt(&self, input: PromptInput) -> Result<(), AgentError>;
     async fn cancel(&self) -> Result<(), AgentError>;
     async fn shutdown(&self) -> Result<(), AgentError>;

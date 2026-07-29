@@ -70,6 +70,8 @@ export function mockSessions(): SessionMeta[] {
     {
       id: "sess_demo_grok",
       title: "Grok · 示例会话",
+      pinned: false,
+      archived: false,
       runtimeId: "grok",
       projectPath: "X:\\1_2026_project\\work",
       modelId: "grok-4.5",
@@ -80,6 +82,8 @@ export function mockSessions(): SessionMeta[] {
     {
       id: "sess_demo_codex",
       title: "Codex · 示例会话",
+      pinned: false,
+      archived: false,
       runtimeId: "codex",
       projectPath: "X:\\1_2026_project\\work",
       modelId: "default",

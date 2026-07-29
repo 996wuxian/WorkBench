@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -14,11 +15,20 @@ use serde::{Deserialize, Serialize};
 use crate::paths;
 use crate::runtime::{PermissionMode, RuntimeId};
 
+const TRACE_SCHEMA_VERSION: u8 = 1;
+static TRACE_IO_LOCK: Mutex<()> = Mutex::new(());
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredSessionMeta {
     pub id: String,
     pub title: String,
+    #[serde(default)]
+    pub title_is_custom: bool,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub archived: bool,
     #[serde(default)]
     pub summary: Option<String>,
     pub runtime_id: RuntimeId,
@@ -80,6 +90,37 @@ pub struct StoredChatMessage {
     /// means the turn was cut short by a crash or a killed process.
     #[serde(default)]
     pub partial: bool,
+}
+
+/// A privacy-safe execution timeline record.
+///
+/// `details` only contains metrics and protocol state selected by the Host.
+/// Prompt/response text, permission previews, tool commands and paths must not
+/// be passed into this type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredTraceEvent {
+    pub schema_version: u8,
+    pub timestamp: String,
+    pub session_id: String,
+    pub event: String,
+    pub details: serde_json::Value,
+}
+
+impl StoredTraceEvent {
+    pub fn new(
+        session_id: impl Into<String>,
+        event: impl Into<String>,
+        details: serde_json::Value,
+    ) -> Self {
+        Self {
+            schema_version: TRACE_SCHEMA_VERSION,
+            timestamp: Utc::now().to_rfc3339(),
+            session_id: session_id.into(),
+            event: event.into(),
+            details,
+        }
+    }
 }
 
 impl StoredChatMessage {
@@ -243,7 +284,11 @@ pub fn load_metas() -> std::io::Result<Vec<StoredSessionMeta>> {
             None => tracing::warn!("invalid session meta skipped: {}", path.display()),
         }
     }
-    metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    metas.sort_by(|a, b| {
+        b.pinned
+            .cmp(&a.pinned)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
     Ok(metas)
 }
 
@@ -258,6 +303,37 @@ pub fn save_meta(meta: &StoredSessionMeta) -> std::io::Result<()> {
 
 pub fn session_dir_path(session_id: &str) -> std::io::Result<PathBuf> {
     session_dir(session_id)
+}
+
+pub fn write_markdown_export(
+    session_id: &str,
+    title: &str,
+    markdown: &str,
+) -> std::io::Result<PathBuf> {
+    session_dir(session_id)?;
+    let dir = paths::exports_dir();
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(markdown_export_file_name(session_id, title));
+    atomic_write(&path, markdown.as_bytes())?;
+    Ok(path)
+}
+
+pub fn write_trace_export(session_id: &str, title: &str) -> std::io::Result<(PathBuf, usize)> {
+    session_dir(session_id)?;
+    let events = load_trace(session_id)?;
+    if events.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "session has no trace events",
+        ));
+    }
+    let contents = serialize_trace_events(&events)?;
+    let dir = paths::exports_dir();
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(trace_export_file_name(session_id, title));
+    let _guard = TRACE_IO_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    atomic_write(&path, &contents)?;
+    Ok((path, events.len()))
 }
 
 pub fn delete_session(session_id: &str) -> std::io::Result<PathBuf> {
@@ -292,6 +368,62 @@ pub fn append_messages(session_id: &str, messages: &[StoredChatMessage]) -> std:
         file.write_all(b"\n")?;
     }
     Ok(())
+}
+
+pub fn append_trace_event(session_id: &str, event: &StoredTraceEvent) -> std::io::Result<()> {
+    let dir = session_dir(session_id)?;
+    let mut line = serde_json::to_vec(event)?;
+    line.push(b'\n');
+
+    let _guard = TRACE_IO_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("trace.jsonl");
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(&line)
+}
+
+pub fn load_trace(session_id: &str) -> std::io::Result<Vec<StoredTraceEvent>> {
+    let _guard = TRACE_IO_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    load_trace_unlocked(session_id)
+}
+
+fn load_trace_unlocked(session_id: &str) -> std::io::Result<Vec<StoredTraceEvent>> {
+    let path = session_dir(session_id)?.join("trace.jsonl");
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+
+    let file = File::open(path)?;
+    Ok(parse_trace_lines(
+        BufReader::new(file).lines().map_while(Result::ok),
+    ))
+}
+
+fn parse_trace_lines(lines: impl Iterator<Item = String>) -> Vec<StoredTraceEvent> {
+    lines
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(
+            |line| match serde_json::from_str::<StoredTraceEvent>(&line) {
+                Ok(event) => Some(event),
+                Err(err) => {
+                    tracing::warn!("invalid session trace line skipped: {err}");
+                    None
+                }
+            },
+        )
+        .collect()
+}
+
+fn serialize_trace_events(events: &[StoredTraceEvent]) -> std::io::Result<Vec<u8>> {
+    let mut contents = Vec::new();
+    for event in events {
+        serde_json::to_writer(&mut contents, event)?;
+        contents.push(b'\n');
+    }
+    Ok(contents)
 }
 
 /// Replay the journal into the transcript the UI shows.
@@ -345,6 +477,35 @@ fn session_dir(session_id: &str) -> std::io::Result<PathBuf> {
         ));
     }
     Ok(paths::sessions_dir().join(session_id))
+}
+
+fn markdown_export_file_name(session_id: &str, title: &str) -> String {
+    format!("{}.md", export_file_stem(session_id, title))
+}
+
+fn trace_export_file_name(session_id: &str, title: &str) -> String {
+    format!("{}.trace.jsonl", export_file_stem(session_id, title))
+}
+
+fn export_file_stem(session_id: &str, title: &str) -> String {
+    let mut safe_title = title
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || matches!(ch, ' ' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(80)
+        .collect::<String>();
+    safe_title = safe_title.trim_matches([' ', '_']).to_string();
+    if safe_title.is_empty() {
+        safe_title = "session".to_string();
+    }
+    let id_prefix = session_id.chars().take(8).collect::<String>();
+    format!("{safe_title}-{id_prefix}")
 }
 
 fn atomic_write(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
@@ -407,6 +568,101 @@ mod tests {
     }
 
     #[test]
+    fn legacy_session_meta_defaults_presentation_fields() {
+        let legacy = r#"{
+            "id": "session-1",
+            "title": "Legacy session",
+            "runtimeId": "codex",
+            "createdAt": "2026-07-29T00:00:00Z",
+            "updatedAt": "2026-07-29T00:00:00Z"
+        }"#;
+
+        let meta: StoredSessionMeta = serde_json::from_str(legacy).expect("legacy session meta");
+
+        assert!(!meta.pinned);
+        assert!(!meta.title_is_custom);
+        assert!(!meta.archived);
+    }
+
+    #[test]
+    fn markdown_export_file_names_are_safe_and_stable() {
+        assert_eq!(
+            markdown_export_file_name("12345678-abcd", "  Plan: API / UI?  "),
+            "Plan_ API _ UI-12345678.md"
+        );
+        assert_eq!(
+            markdown_export_file_name("abcdefgh", "***"),
+            "session-abcdefgh.md"
+        );
+        assert_eq!(
+            trace_export_file_name("12345678-abcd", "  Plan: API / UI?  "),
+            "Plan_ API _ UI-12345678.trace.jsonl"
+        );
+    }
+
+    #[test]
+    fn trace_export_lines_are_valid_json() {
+        let events = vec![
+            StoredTraceEvent::new(
+                "session-1",
+                "prompt_submitted",
+                serde_json::json!({ "textChars": 12, "textBytes": 16 }),
+            ),
+            StoredTraceEvent::new(
+                "session-1",
+                "prompt_completed",
+                serde_json::json!({ "elapsedMs": 42, "stopReason": "end_turn" }),
+            ),
+        ];
+
+        let output = serialize_trace_events(&events).expect("serialize trace");
+        let text = String::from_utf8(output).expect("utf8 trace");
+        let lines = text.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 2);
+        for line in lines {
+            serde_json::from_str::<serde_json::Value>(line).expect("valid JSONL record");
+        }
+    }
+
+    #[test]
+    fn old_session_without_trace_loads_as_empty() {
+        let session_id = format!("legacy-no-trace-{}", uuid::Uuid::new_v4());
+        assert!(load_trace(&session_id)
+            .expect("load missing trace")
+            .is_empty());
+    }
+
+    #[test]
+    fn empty_trace_export_is_rejected_before_creating_a_file() {
+        let session_id = format!("legacy-no-trace-{}", uuid::Uuid::new_v4());
+        let title = "Legacy session";
+        let expected_path = paths::exports_dir().join(trace_export_file_name(&session_id, title));
+        let error =
+            write_trace_export(&session_id, title).expect_err("empty trace must not export");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(error.to_string(), "session has no trace events");
+        assert!(!expected_path.exists());
+    }
+
+    #[test]
+    fn invalid_trace_tail_is_excluded_from_export() {
+        let valid = serde_json::to_string(&StoredTraceEvent::new(
+            "session-1",
+            "connection_started",
+            serde_json::json!({ "runtimeId": "codex" }),
+        ))
+        .unwrap();
+
+        let parsed = parse_trace_lines(vec![valid, "{\"schemaVersion\":1".into()].into_iter());
+        let output = serialize_trace_events(&parsed).expect("serialize parsed trace");
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(String::from_utf8(output).unwrap().lines().count(), 1);
+    }
+
+    #[test]
     fn tool_updates_collapse_onto_one_record() {
         let pending = StoredChatMessage::tool("call-1", "read", "Read main.rs", "pending", None);
         let done = StoredChatMessage::tool("call-1", "read", "Read main.rs", "completed", None);
@@ -434,7 +690,8 @@ mod tests {
         let user = StoredChatMessage::new("user", "hi", None);
         let turn_id = "turn-1".to_string();
         let early = StoredChatMessage::checkpoint(turn_id.clone(), "assistant", "he", None, "t0");
-        let later = StoredChatMessage::checkpoint(turn_id.clone(), "assistant", "hello", None, "t0");
+        let later =
+            StoredChatMessage::checkpoint(turn_id.clone(), "assistant", "hello", None, "t0");
         let tool = StoredChatMessage::tool("call-1", "read", "Read", "completed", None);
         let done = StoredChatMessage::completed_with_id(
             turn_id,

@@ -14,12 +14,11 @@
 import { useEffect, useRef, type Dispatch, type RefObject, type SetStateAction } from "react";
 import { listen } from "@tauri-apps/api/event";
 
-import { api, isTauri } from "../lib/api";
+import { isTauri } from "../lib/api";
 import {
-  finalizeAssistantMessage,
+  finalizeStreamingMessage,
   findLastStreamingMessageIndex,
   finishAssistantElapsedPause,
-  normalizeLoadedMessages,
   startAssistantElapsedPause,
 } from "../lib/messages";
 import { nowIso, uid } from "../lib/format";
@@ -36,8 +35,11 @@ import type {
   ChatMessage,
   PermissionRequestEvent,
   PermissionResolvedEvent,
+  SessionMeta,
   SessionSnapshot,
   SessionState,
+  SessionUnreadKind,
+  TurnSettledEvent,
 } from "../lib/types";
 
 /** Placeholder shown between "turn started" and the first token. */
@@ -50,20 +52,24 @@ export interface SessionEventHandlers {
     sessionId: string,
     updater: (messages: ChatMessage[]) => ChatMessage[],
   ) => void;
-  setMessagesBySession: Dispatch<SetStateAction<Record<string, ChatMessage[]>>>;
   setSnapshot: Dispatch<SetStateAction<SessionSnapshot>>;
+  applySessionSnapshot: (snapshot: SessionSnapshot) => void;
   setPermissionQueue: Dispatch<
     SetStateAction<Record<string, PermissionRequestEvent[]>>
   >;
   setPermissionBusy: Dispatch<SetStateAction<string | null>>;
-  setStatusLine: (line: string) => void;
   queueAssistantTyping: (
     sessionId: string,
     messageId: string,
     content: string,
   ) => void;
   clearAssistantTypingForSession: (sessionId: string) => void;
-  refreshSessionMeta: (sessionId: string) => Promise<void>;
+  applySettledSessionMeta: (meta: SessionMeta) => void;
+  markSessionResult: (
+    sessionId: string,
+    kind: SessionUnreadKind,
+    meta?: SessionMeta,
+  ) => void;
 }
 
 export function useSessionEvents(handlers: SessionEventHandlers): void {
@@ -168,10 +174,7 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
 
       const u2 = await listen<SessionSnapshot>("session://state", (ev) => {
         if (cancelled) return;
-        const snap = ev.payload;
-        if (snap.sessionId && snap.sessionId === ref.current.activeSessionIdRef.current) {
-          ref.current.setSnapshot(snap);
-        }
+        ref.current.applySessionSnapshot(ev.payload);
       });
       if (!cancelled) unsubs.push(u2);
 
@@ -232,10 +235,11 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
         message: string;
       }>("session://error", (ev) => {
         if (cancelled) return;
+        ref.current.markSessionResult(ev.payload.sessionId, "error");
         ref.current.updateSessionMessages(ev.payload.sessionId, (m) => {
           const closed = m
             .filter((msg) => !(msg.role === "assistant" && msg.pending))
-            .map((msg) => (msg.streaming ? finalizeAssistantMessage(msg) : msg));
+            .map(finalizeStreamingMessage);
           return [
             ...closed,
             {
@@ -255,10 +259,7 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
           const sessionId = ev.payload.sessionId;
           const {
             updateSessionMessages,
-            setMessagesBySession,
             clearAssistantTypingForSession,
-            setStatusLine,
-            refreshSessionMeta,
           } = ref.current;
           updateSessionMessages(sessionId, (m) =>
             m.map((msg) => {
@@ -272,26 +273,10 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
                   content: `error EMPTY_RESPONSE: ${runtimeName} 本轮已结束，但没有返回任何可显示内容（stopReason: ${ev.payload.stopReason}）。`,
                 };
               }
-              return msg.streaming ? finalizeAssistantMessage(msg) : msg;
+              return finalizeStreamingMessage(msg);
             }),
           );
-          // Re-read the journal: the Host has just written the authoritative
-          // record of the turn, including anything the stream events missed.
-          void (async () => {
-            try {
-              const restored = normalizeLoadedMessages(
-                await api.getMessages(sessionId),
-              );
-              setMessagesBySession((prev) => ({
-                ...prev,
-                [sessionId]: restored,
-              }));
-              clearAssistantTypingForSession(sessionId);
-              await refreshSessionMeta(sessionId);
-            } catch (error) {
-              setStatusLine(`reload messages failed: ${String(error)}`);
-            }
-          })();
+          clearAssistantTypingForSession(sessionId);
         },
       );
       if (!cancelled) unsubs.push(u5);
@@ -384,10 +369,10 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
             permissionQueueRef.current = nextQueue;
             ref.current.setPermissionQueue(nextQueue);
           }
+          ref.current.clearAssistantTypingForSession(sessionId);
+          ref.current.markSessionResult(sessionId, "error");
           ref.current.updateSessionMessages(sessionId, (m) => [
-            ...m.map((msg) =>
-              msg.streaming ? finalizeAssistantMessage(msg) : msg,
-            ),
+            ...m.map(finalizeStreamingMessage),
             {
               id: uid("sys"),
               role: "system",
@@ -415,6 +400,20 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
         );
       });
       if (!cancelled) unsubs.push(u9);
+
+      const u10 = await listen<TurnSettledEvent>(
+        "session://turn_settled",
+        (ev) => {
+          if (cancelled) return;
+          ref.current.applySettledSessionMeta(ev.payload.meta);
+          ref.current.markSessionResult(
+            ev.payload.sessionId,
+            "completed",
+            ev.payload.meta,
+          );
+        },
+      );
+      if (!cancelled) unsubs.push(u10);
     })();
 
     return () => {

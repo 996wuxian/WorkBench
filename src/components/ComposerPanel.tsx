@@ -22,6 +22,7 @@ type Props = {
   draft: string;
   busy: boolean;
   streaming: boolean;
+  readOnly: boolean;
   settingsChangeDisabled: boolean;
   activeModelValue: string;
   activeModelLabel: string;
@@ -85,6 +86,7 @@ export function ComposerPanel({
   draft,
   busy,
   streaming,
+  readOnly,
   settingsChangeDisabled,
   activeModelValue,
   activeModelLabel,
@@ -177,7 +179,7 @@ export function ComposerPanel({
 
   return (
     <div className="composer">
-      <div className="composer__shell">
+      <div className={"composer__shell" + (readOnly ? " is-read-only" : "")}>
         <div className="composer__toolbar">
           <ChoiceSelect
             className="composer-control composer-control--model"
@@ -239,8 +241,9 @@ export function ComposerPanel({
         <textarea
           ref={composerInputRef}
           className="composer__input"
-          placeholder="请输入"
+          placeholder={readOnly ? "归档会话为只读" : "请输入"}
           value={draft}
+          disabled={readOnly}
           onChange={(e) => onDraftChange(e.target.value)}
           onContextMenu={openContextMenu}
           onKeyDown={(e) => {
@@ -252,7 +255,7 @@ export function ComposerPanel({
         />
         <div className="composer__footer">
           <span className="muted" style={{ fontSize: 12 }}>
-            Enter 发送 · Shift+Enter 换行
+            {readOnly ? "归档会话 · 只读" : "Enter 发送 · Shift+Enter 换行"}
           </span>
           {streaming ? (
             <button
@@ -268,7 +271,7 @@ export function ComposerPanel({
               type="button"
               className="composer__send"
               title="发送"
-              disabled={!draft.trim() || busy}
+              disabled={readOnly || !draft.trim() || busy}
               onClick={onSend}
             >
               <IconSend size={16} />

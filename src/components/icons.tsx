@@ -7,6 +7,8 @@
 import type { ComponentType } from "react";
 import {
   IconAlertTriangle as TbAlertTriangle,
+  IconArchive as TbArchive,
+  IconArchiveOff as TbArchiveOff,
   IconCheck as TbCheck,
   IconChevronDown as TbChevronDown,
   IconChevronRight as TbChevronRight,
@@ -14,8 +16,12 @@ import {
   IconDots as TbDots,
   IconEdit as TbEdit,
   IconCopy as TbCopy,
+  IconFileExport as TbFileExport,
+  IconFileText as TbFileText,
   IconFirstAidKit as TbFirstAidKit,
   IconFolder as TbFolder,
+  IconGitFork as TbGitFork,
+  IconHistory as TbHistory,
   IconLayoutSidebar as TbLayoutSidebar,
   IconLayoutSidebarRight as TbLayoutSidebarRight,
   IconMessage as TbMessage,
@@ -24,6 +30,10 @@ import {
   IconPlayerStop as TbPlayerStop,
   IconPlug as TbPlug,
   IconPlus as TbPlus,
+  IconPackageExport as TbPackageExport,
+  IconPinned as TbPinned,
+  IconPinnedFilled as TbPinnedFilled,
+  IconPinnedOff as TbPinnedOff,
   IconRefresh as TbRefresh,
   IconRobot as TbRobot,
   IconSearch as TbSearch,
@@ -36,6 +46,7 @@ import {
   IconQuote as TbQuote,
   IconSquare as TbSquare,
   IconSun as TbSun,
+  IconTrash as TbTrash,
   IconX as TbX,
 } from "@tabler/icons-react";
 
@@ -133,6 +144,7 @@ export function IconWorkbenchMark({
 
 export const IconSearch = wrap(TbSearch);
 export const IconNewChat = wrap(TbEdit);
+export const IconEdit = wrap(TbEdit);
 export const IconCopy = wrap(TbCopy);
 export const IconClipboard = wrap(TbClipboard);
 export const IconCheck = wrap(TbCheck, { stroke: 2 });
@@ -141,6 +153,17 @@ export const IconChevronRight = wrap(TbChevronRight);
 export const IconPlus = wrap(TbPlus);
 export const IconMore = wrap(TbDots);
 export const IconFolder = wrap(TbFolder);
+export const IconArchive = wrap(TbArchive);
+export const IconArchiveOff = wrap(TbArchiveOff);
+export const IconFileExport = wrap(TbFileExport);
+export const IconFileText = wrap(TbFileText);
+export const IconGitFork = wrap(TbGitFork);
+export const IconHistory = wrap(TbHistory);
+export const IconPackageExport = wrap(TbPackageExport);
+export const IconPinned = wrap(TbPinned);
+export const IconPinnedFilled = wrap(TbPinnedFilled);
+export const IconPinnedOff = wrap(TbPinnedOff);
+export const IconTrash = wrap(TbTrash);
 export const IconClose = wrap(TbX);
 export const IconSend = wrap(TbSend);
 export const IconPanel = wrap(TbLayoutSidebar);

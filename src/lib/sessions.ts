@@ -23,6 +23,48 @@ export function stateDotClass(state: SessionState): string {
   return "status-dot--idle";
 }
 
+export function sessionStateLabel(snapshot?: SessionSnapshot): string {
+  switch (snapshot?.state ?? "idle") {
+    case "connecting":
+      return "连接中";
+    case "ready":
+      return "就绪";
+    case "streaming":
+      return "生成中";
+    case "awaiting_permission":
+      return "等待授权";
+    case "disconnected":
+      return snapshot?.lastError ? "异常断开" : "已断开";
+    default:
+      return "未连接";
+  }
+}
+
+export type SessionProcessStats = {
+  total: number;
+  running: number;
+  processes: number;
+};
+
+/** Counts for one runtime's sidebar list. Search filtering does not change them. */
+export function sessionProcessStats(
+  sessions: SessionMeta[],
+  snapshots: Record<string, SessionSnapshot>,
+): SessionProcessStats {
+  let running = 0;
+  let processes = 0;
+  for (const session of sessions) {
+    const state = snapshots[session.id]?.state ?? "idle";
+    if (["connecting", "streaming", "awaiting_permission"].includes(state)) {
+      running += 1;
+    }
+    if (["connecting", "ready", "streaming", "awaiting_permission"].includes(state)) {
+      processes += 1;
+    }
+  }
+  return { total: sessions.length, running, processes };
+}
+
 /** Settings are owned by the Host while a turn is in flight; don't let the UI race it. */
 export function canChangeSessionSettings(state: SessionState): boolean {
   return !["connecting", "streaming", "awaiting_permission"].includes(state);
@@ -68,9 +110,10 @@ export function mergeSessions(
   for (const session of incoming) {
     map.set(session.id, { ...(map.get(session.id) ?? {}), ...session });
   }
-  return [...map.values()].sort(
-    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
-  );
+  return [...map.values()].sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+    return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+  });
 }
 
 /**
@@ -100,6 +143,7 @@ export const idleSnapshot = (session?: SessionMeta | null): SessionSnapshot => (
   sessionId: session?.id ?? null,
   runtimeId: session?.runtimeId ?? null,
   state: "idle",
+  promptStartedAt: null,
   lastError: null,
   backend: session ? `${session.runtimeId}_stub` : "none",
   modelId: session?.modelId ?? null,

@@ -9,6 +9,8 @@ import type {
   RuntimeOverride,
   NativeSessionSyncResult,
   SessionDeleteResult,
+  SessionExportResult,
+  SessionTraceExportResult,
   SessionSelectionCatalog,
   PermissionMode,
   RuntimeInfo,
@@ -42,8 +44,19 @@ export const api = {
   listSessions: () => call<SessionMeta[]>("session_list"),
   createSession: (runtimeId: string, projectPath?: string | null) =>
     call<SessionMeta>("session_create", { runtimeId, projectPath }),
+  updateSessionPresentation: (
+    sessionId: string,
+    patch: { title?: string; pinned?: boolean },
+  ) =>
+    call<SessionMeta>("session_update_presentation", {
+      sessionId,
+      patch,
+    }),
+  setSessionArchived: (sessionId: string, archived: boolean) =>
+    call<SessionMeta>("session_set_archived", { sessionId, archived }),
   getSnapshot: (sessionId?: string | null) =>
     call<SessionSnapshot>("session_get_state", { sessionId }),
+  listSnapshots: () => call<SessionSnapshot[]>("session_list_states"),
   getSessionControlOptions: (sessionId: string) =>
     call<SessionSelectionCatalog>("session_control_options", { sessionId }),
   updateSessionSettings: (
@@ -60,6 +73,10 @@ export const api = {
     }),
   getMessages: (sessionId: string) =>
     call<ChatMessage[]>("session_get_messages", { sessionId }),
+  exportSessionMarkdown: (sessionId: string) =>
+    call<SessionExportResult>("session_export_markdown", { sessionId }),
+  exportSessionTrace: (sessionId: string) =>
+    call<SessionTraceExportResult>("session_export_trace", { sessionId }),
   deleteSession: (sessionId: string) =>
     call<SessionDeleteResult>("session_delete", { sessionId }),
   syncNativeSessions: (

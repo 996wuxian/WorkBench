@@ -168,6 +168,7 @@ export function MessageList({
                 ) : typing ? (
                   <StreamingText
                     content={m.content || ""}
+                    revealImmediately={m.revealImmediately}
                     onProgress={onTypingProgress}
                   />
                 ) : (
