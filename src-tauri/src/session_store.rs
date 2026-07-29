@@ -252,7 +252,7 @@ pub fn save_meta(meta: &StoredSessionMeta) -> std::io::Result<()> {
     fs::create_dir_all(&dir)?;
     let path = dir.join("meta.json");
     let text = serde_json::to_string_pretty(meta)?;
-    fs::write(path, text)?;
+    atomic_write(&path, text.as_bytes())?;
     write_index(Some(&meta.id))
 }
 
@@ -345,6 +345,27 @@ fn session_dir(session_id: &str) -> std::io::Result<PathBuf> {
         ));
     }
     Ok(paths::sessions_dir().join(session_id))
+}
+
+fn atomic_write(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("data");
+    let tmp = path.with_file_name(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+
+    let result = (|| {
+        let mut file = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path)
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn write_index(extra_id: Option<&str>) -> std::io::Result<()> {

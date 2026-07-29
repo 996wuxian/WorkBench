@@ -5,9 +5,24 @@
 
 $ErrorActionPreference = "Stop"
 
-$env:RUSTUP_HOME = "D:\Rust\rustup"
-$env:CARGO_HOME  = "D:\Rust\cargo"
-$cargoBin = "D:\Rust\cargo\bin"
+$rustCandidates = @(
+  @{ Rustup = "D:\tools\rustup"; Cargo = "D:\tools\cargo" },
+  @{ Rustup = "D:\Rust\rustup"; Cargo = "D:\Rust\cargo" }
+)
+$rustHome = $rustCandidates |
+  Where-Object {
+    (Test-Path (Join-Path $_.Cargo "bin\cargo.exe")) -and
+    (Test-Path (Join-Path $_.Cargo "bin\rustc.exe")) -and
+    (Test-Path (Join-Path $_.Rustup "toolchains"))
+  } |
+  Select-Object -First 1
+if (-not $rustHome) {
+  Write-Error "Rust toolchain not found. Expected D:\tools\cargo + D:\tools\rustup."
+}
+
+$env:RUSTUP_HOME = $rustHome.Rustup
+$env:CARGO_HOME  = $rustHome.Cargo
+$cargoBin = Join-Path $env:CARGO_HOME "bin"
 if ($env:Path -notlike "*$cargoBin*") {
   $env:Path = "$cargoBin;$env:Path"
 }
@@ -67,9 +82,18 @@ if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
   Write-Warning "link.exe not on PATH — MSVC env may be incomplete"
 }
 
+$rustcVersion = (& rustc --version 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "rustc is unavailable for RUSTUP_HOME=$env:RUSTUP_HOME"
+}
+$cargoVersion = (& cargo --version 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "cargo is unavailable for CARGO_HOME=$env:CARGO_HOME"
+}
+
 Write-Host "Workbench env ready:"
-Write-Host "  rustc  $(& rustc --version)"
-Write-Host "  cargo  $(& cargo --version)"
+Write-Host "  rustc  $rustcVersion"
+Write-Host "  cargo  $cargoVersion"
 Write-Host "  link   $((Get-Command link.exe -ErrorAction SilentlyContinue).Source)"
 Write-Host "  RUSTUP_HOME=$env:RUSTUP_HOME"
 Write-Host "  CARGO_HOME=$env:CARGO_HOME"

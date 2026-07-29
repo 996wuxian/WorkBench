@@ -3,9 +3,18 @@ import { runtimeInfo } from "./runtimes";
 import type {
   PermissionDecision,
   PermissionMode,
+  PermissionRequestEvent,
   RuntimeId,
   SessionSelectionCatalog,
 } from "./types";
+
+export type PermissionQueue = Record<string, PermissionRequestEvent[]>;
+
+export type PermissionQueueResolution = {
+  queue: PermissionQueue;
+  resolved: PermissionRequestEvent | null;
+  remainingCount: number;
+};
 
 export const PERMISSION_MODE_ORDER: PermissionMode[] = [
   "ask",
@@ -43,6 +52,52 @@ export const PERMISSION_SOURCE_LABEL: Record<string, string> = {
   timeout: "超时策略",
   aborted: "进程退出",
 };
+
+export function enqueuePermissionRequest(
+  queue: PermissionQueue,
+  request: PermissionRequestEvent,
+): PermissionQueue {
+  const current = queue[request.sessionId] ?? [];
+  if (current.some((item) => item.requestId === request.requestId)) {
+    return queue;
+  }
+  return {
+    ...queue,
+    [request.sessionId]: [...current, request],
+  };
+}
+
+export function resolvePermissionRequest(
+  queue: PermissionQueue,
+  sessionId: string,
+  requestId: string,
+): PermissionQueueResolution {
+  const current = queue[sessionId] ?? [];
+  const resolved = current.find((item) => item.requestId === requestId) ?? null;
+  if (!resolved) {
+    return { queue, resolved: null, remainingCount: current.length };
+  }
+
+  const remaining = current.filter((item) => item.requestId !== requestId);
+  if (remaining.length === 0) {
+    const { [sessionId]: _removed, ...rest } = queue;
+    return { queue: rest, resolved, remainingCount: 0 };
+  }
+  return {
+    queue: { ...queue, [sessionId]: remaining },
+    resolved,
+    remainingCount: remaining.length,
+  };
+}
+
+export function clearPermissionRequests(
+  queue: PermissionQueue,
+  sessionId: string,
+): PermissionQueue {
+  if (!(sessionId in queue)) return queue;
+  const { [sessionId]: _removed, ...rest } = queue;
+  return rest;
+}
 
 /** Manifest-declared default; "ask" is the safe fallback before the registry loads. */
 export function defaultPermissionMode(

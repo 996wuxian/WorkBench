@@ -344,6 +344,7 @@ export default function App() {
     permissionBusy !== null &&
     permissionBusy === activePermissionRequest?.requestId;
   const activeIdRef = useRef<string | null>(null);
+  const activationRequestRef = useRef(0);
   const sessionsRef = useRef<SessionMeta[]>([]);
   const pendingSessionRef = useRef<SessionMeta | null>(null);
   const mockReplyTimerRef = useRef<number | null>(null);
@@ -359,9 +360,22 @@ export default function App() {
   } | null>(null);
   const assistantTypingTimersRef = useRef<Record<string, number>>({});
   const assistantTypingQueueRef = useRef<Record<string, string>>({});
-  useEffect(() => {
-    activeIdRef.current = activeId;
-  }, [activeId]);
+  const assistantTypingSessionRef = useRef<Record<string, string>>({});
+
+  const beginSessionActivation = useCallback((sessionId: string | null) => {
+    const requestId = activationRequestRef.current + 1;
+    activationRequestRef.current = requestId;
+    activeIdRef.current = sessionId;
+    setActiveId(sessionId);
+    return requestId;
+  }, []);
+
+  const isCurrentSessionActivation = useCallback(
+    (sessionId: string, requestId: number) =>
+      activeIdRef.current === sessionId &&
+      activationRequestRef.current === requestId,
+    [],
+  );
 
   useEffect(() => {
     sessionsRef.current = sessions;
@@ -506,11 +520,41 @@ export default function App() {
         return next;
       });
       delete assistantTypingTimersRef.current[messageId];
+      delete assistantTypingSessionRef.current[messageId];
     }, duration);
   }, []);
 
-  const queueAssistantTyping = useCallback((messageId: string, content: string) => {
-    assistantTypingQueueRef.current[messageId] = content;
+  const queueAssistantTyping = useCallback(
+    (sessionId: string, messageId: string, content: string) => {
+      assistantTypingSessionRef.current[messageId] = sessionId;
+      assistantTypingQueueRef.current[messageId] = content;
+    },
+    [],
+  );
+
+  const clearAssistantTypingForSession = useCallback((sessionId: string) => {
+    const messageIds = Object.entries(assistantTypingSessionRef.current)
+      .filter(([, ownerSessionId]) => ownerSessionId === sessionId)
+      .map(([messageId]) => messageId);
+    if (messageIds.length === 0) return;
+
+    for (const messageId of messageIds) {
+      const timer = assistantTypingTimersRef.current[messageId];
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+      delete assistantTypingTimersRef.current[messageId];
+      delete assistantTypingQueueRef.current[messageId];
+      delete assistantTypingSessionRef.current[messageId];
+    }
+
+    setAssistantTypingUntil((prev) => {
+      const next = { ...prev };
+      for (const messageId of messageIds) {
+        delete next[messageId];
+      }
+      return next;
+    });
   }, []);
 
   useEffect(() => {
@@ -519,6 +563,8 @@ export default function App() {
         window.clearTimeout(timer);
       }
       assistantTypingTimersRef.current = {};
+      assistantTypingQueueRef.current = {};
+      assistantTypingSessionRef.current = {};
     };
   }, []);
 
@@ -608,12 +654,12 @@ export default function App() {
     activeSessionIdRef: activeIdRef,
     updateSessionMessages,
     setMessagesBySession,
-    setAssistantTypingUntil,
     setSnapshot,
     setPermissionQueue,
     setPermissionBusy,
     setStatusLine,
     queueAssistantTyping,
+    clearAssistantTypingForSession,
     refreshSessionMeta,
   });
 
@@ -810,7 +856,7 @@ export default function App() {
       const list = mockSessions();
       setPendingSession(null);
       setSessions(list);
-      setActiveId(list[0]?.id ?? null);
+      beginSessionActivation(list[0]?.id ?? null);
       setSnapshot(idleSnapshot(list[0]));
       if (list[0]) {
         setMessagesBySession({
@@ -837,23 +883,27 @@ export default function App() {
       setSessions(list);
       if (list.length > 0) {
         const first = list[0];
-        setActiveId(first.id);
-        const snap = await api.getSnapshot(first.id);
+        const requestId = beginSessionActivation(first.id);
+        const [snap, storedMessages] = await Promise.all([
+          api.getSnapshot(first.id),
+          api.getMessages(first.id),
+        ]);
+        if (!isCurrentSessionActivation(first.id, requestId)) return;
+        const restored = normalizeLoadedMessages(storedMessages);
         setSnapshot(snap);
-        const restored = normalizeLoadedMessages(await api.getMessages(first.id));
         setMessagesBySession((prev) => ({
           ...prev,
           [first.id]: restored,
         }));
         resetChatViewport(first.id, restored.length);
       } else {
-        setActiveId(null);
+        beginSessionActivation(null);
         setSnapshot(idleSnapshot());
       }
     } catch (e) {
       setStatusLine(`host error: ${String(e)}`);
     }
-  }, []);
+  }, [beginSessionActivation, isCurrentSessionActivation, resetChatViewport]);
 
   useEffect(() => {
     // Runtimes first: labels, default modes and the engine picker all read the
@@ -887,7 +937,7 @@ export default function App() {
   const activateSession = useCallback(
     async (id: string, metaOverride?: SessionMeta | null) => {
       setPendingSession(null);
-      setActiveId(id);
+      const requestId = beginSessionActivation(id);
       setQuoteTarget(null);
       const meta = metaOverride ?? sessions.find((s) => s.id === id) ?? null;
       if (!isTauri()) {
@@ -896,19 +946,31 @@ export default function App() {
         return;
       }
       try {
-        const snap = await api.getSnapshot(id);
+        const [snap, storedMessages] = await Promise.all([
+          api.getSnapshot(id),
+          api.getMessages(id),
+        ]);
+        if (!isCurrentSessionActivation(id, requestId)) return;
+        const restored = normalizeLoadedMessages(storedMessages);
         setSnapshot(snap);
-        const restored = normalizeLoadedMessages(await api.getMessages(id));
         setMessagesBySession((prev) => ({
           ...prev,
           [id]: restored,
         }));
         resetChatViewport(id, restored.length);
       } catch (e) {
-        setStatusLine(String(e));
+        if (isCurrentSessionActivation(id, requestId)) {
+          setStatusLine(String(e));
+        }
       }
     },
-    [messagesBySession, resetChatViewport, sessions],
+    [
+      beginSessionActivation,
+      isCurrentSessionActivation,
+      messagesBySession,
+      resetChatViewport,
+      sessions,
+    ],
   );
 
   function selectSession(
@@ -949,9 +1011,15 @@ export default function App() {
       return;
     }
 
-    setActiveId(null);
+    beginSessionActivation(null);
     setSnapshot(idleSnapshot());
-  }, [activateSession, active?.runtimeId, runtimePick, runtimeVisibleSessions]);
+  }, [
+    activateSession,
+    active?.runtimeId,
+    beginSessionActivation,
+    runtimePick,
+    runtimeVisibleSessions,
+  ]);
 
   const openSelectedSessionLocation = useCallback(async (sessionId: string) => {
     setSessionContextMenu(null);
@@ -992,24 +1060,17 @@ export default function App() {
       .filter((session): session is SessionMeta => Boolean(session));
     const applyDeletedSessions = async (removedSessionIds: string[]) => {
       const removedSessionIdSet = new Set(removedSessionIds);
-      const removedMessages = removedSessionIds.flatMap(
-        (sessionId) => messagesBySession[sessionId] ?? [],
-      );
 
       setSelectedSessionIds((prev) =>
         prev.filter((id) => !removedSessionIdSet.has(id)),
       );
+      for (const sessionId of removedSessionIds) {
+        clearAssistantTypingForSession(sessionId);
+      }
       setMessagesBySession((prev) => {
         const next = { ...prev };
         for (const sessionId of removedSessionIds) {
           delete next[sessionId];
-        }
-        return next;
-      });
-      setAssistantTypingUntil((prev) => {
-        const next = { ...prev };
-        for (const message of removedMessages) {
-          delete next[message.id];
         }
         return next;
       });
@@ -1027,7 +1088,7 @@ export default function App() {
           const nextMeta = nextSessions[0];
           await activateSession(nextMeta.id, nextMeta);
         } else {
-          setActiveId(null);
+          beginSessionActivation(null);
           setSnapshot(idleSnapshot());
         }
       }
@@ -1071,9 +1132,10 @@ export default function App() {
   }, [
     activateSession,
     activeId,
+    beginSessionActivation,
+    clearAssistantTypingForSession,
     deleteSessionBusy,
     deleteSessionIds,
-    messagesBySession,
     pendingSession,
     sessions,
   ]);
@@ -1209,7 +1271,7 @@ export default function App() {
           updatedAt: nowIso(),
         };
         setPendingSession(meta);
-        setActiveId(meta.id);
+        beginSessionActivation(meta.id);
         setSnapshot(idleSnapshot(meta));
         resetChatViewport(meta.id, 0);
         updateSessionMessages(meta.id, () => []);
@@ -1217,8 +1279,9 @@ export default function App() {
       }
       const meta = await api.createSession(runtimePick, null);
       setPendingSession(meta);
-      setActiveId(meta.id);
+      const requestId = beginSessionActivation(meta.id);
       const snap = await api.getSnapshot(meta.id);
+      if (!isCurrentSessionActivation(meta.id, requestId)) return;
       setSnapshot(snap);
       resetChatViewport(meta.id, 0);
       updateSessionMessages(meta.id, () => []);
@@ -1331,7 +1394,7 @@ export default function App() {
         updateSessionMessages(session.id, (m) => {
           const replyId = uid("a");
           const replyContent = `[${runtimeLabel(session.runtimeId)} stub]\n收到：${text}\n\n下一步会接入真实 Adapter（Grok ACP / Codex App Server）。`;
-          queueAssistantTyping(replyId, replyContent);
+          queueAssistantTyping(session.id, replyId, replyContent);
           const last = m[m.length - 1];
           const reply: ChatMessage = {
             id: replyId,
@@ -1429,9 +1492,11 @@ export default function App() {
     if (!isTauri()) return;
 
     try {
-      await api.stop(active.id);
-      const snap = await api.getSnapshot(active.id);
-      setSnapshot(snap);
+      await api.stop(sessionId);
+      const snap = await api.getSnapshot(sessionId);
+      if (activeIdRef.current === sessionId) {
+        setSnapshot(snap);
+      }
     } catch (e) {
       setStatusLine(`stop failed: ${String(e)}`);
     }

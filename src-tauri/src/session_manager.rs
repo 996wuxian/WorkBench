@@ -635,8 +635,30 @@ impl SessionManager {
         app: &AppHandle,
         session_id: &str,
     ) -> Result<SessionSnapshot, String> {
+        // Resolve the runtime before moving the FSM into `Connecting`. A stored
+        // session can outlive a runtime being disabled in settings; returning
+        // after the transition would otherwise leave the session permanently
+        // stuck in `Connecting`.
+        let runtime_id = {
+            let guard = self.inner.lock();
+            let slot = guard
+                .sessions
+                .get(session_id)
+                .ok_or_else(|| "session not found".to_string())?;
+            if matches!(
+                slot.fsm.state(),
+                SessionState::Connecting
+                    | SessionState::Ready
+                    | SessionState::Streaming
+                    | SessionState::AwaitingPermission
+            ) {
+                return Ok(Self::snapshot_from_slot(slot));
+            }
+            slot.meta.runtime_id
+        };
+        let runtime = runtime::get_enabled_runtime(runtime_id)?;
+
         let (
-            runtime_id,
             cwd,
             model_id,
             model_reasoning_effort,
@@ -650,8 +672,8 @@ impl SessionManager {
                 .get_mut(session_id)
                 .ok_or_else(|| "session not found".to_string())?;
 
-            // Already connected or still connecting: return current snapshot without
-            // re-entering the session mutex.
+            // Another caller may have connected while runtime availability was
+            // being resolved outside the lock.
             if matches!(
                 slot.fsm.state(),
                 SessionState::Connecting
@@ -681,7 +703,6 @@ impl SessionManager {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| default_project_dir().unwrap_or_else(|_| PathBuf::from(".")));
             (
-                slot.meta.runtime_id,
                 cwd,
                 slot.meta.model_id.clone(),
                 slot.meta.model_reasoning_effort.clone(),
@@ -693,7 +714,6 @@ impl SessionManager {
 
         self.emit_state(app, session_id);
 
-        let runtime = runtime::get_enabled_runtime(runtime_id)?;
         // Legacy sessions may predate a runtime's defaults; fill the gap from the
         // adapter rather than special-casing a runtime id here.
         let model_reasoning_effort =

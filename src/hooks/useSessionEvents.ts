@@ -24,8 +24,12 @@ import {
 } from "../lib/messages";
 import { nowIso, uid } from "../lib/format";
 import {
+  clearPermissionRequests,
+  enqueuePermissionRequest,
   PERMISSION_DECISION_LABEL,
   PERMISSION_SOURCE_LABEL,
+  resolvePermissionRequest,
+  type PermissionQueue,
 } from "../lib/permissions";
 import { runtimeLabel } from "../lib/runtimes";
 import type {
@@ -47,19 +51,24 @@ export interface SessionEventHandlers {
     updater: (messages: ChatMessage[]) => ChatMessage[],
   ) => void;
   setMessagesBySession: Dispatch<SetStateAction<Record<string, ChatMessage[]>>>;
-  setAssistantTypingUntil: Dispatch<SetStateAction<Record<string, number>>>;
   setSnapshot: Dispatch<SetStateAction<SessionSnapshot>>;
   setPermissionQueue: Dispatch<
     SetStateAction<Record<string, PermissionRequestEvent[]>>
   >;
   setPermissionBusy: Dispatch<SetStateAction<string | null>>;
   setStatusLine: (line: string) => void;
-  queueAssistantTyping: (messageId: string, content: string) => void;
+  queueAssistantTyping: (
+    sessionId: string,
+    messageId: string,
+    content: string,
+  ) => void;
+  clearAssistantTypingForSession: (sessionId: string) => void;
   refreshSessionMeta: (sessionId: string) => Promise<void>;
 }
 
 export function useSessionEvents(handlers: SessionEventHandlers): void {
   const ref = useRef(handlers);
+  const permissionQueueRef = useRef<PermissionQueue>({});
   ref.current = handlers;
 
   useEffect(() => {
@@ -110,7 +119,7 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
                 return [...m.slice(0, streamIndex), ...m.slice(streamIndex + 1)];
               }
               const nextContent = p.text || last.content || ASSISTANT_LOADING_TEXT;
-              queueAssistantTyping(last.id, nextContent);
+              queueAssistantTyping(p.sessionId, last.id, nextContent);
               return [
                 ...m.slice(0, streamIndex),
                 {
@@ -126,7 +135,7 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
             }
             const nextContent = last.content + (p.text || "");
             if (p.text) {
-              queueAssistantTyping(last.id, nextContent);
+              queueAssistantTyping(p.sessionId, last.id, nextContent);
             }
             const next = {
               ...last,
@@ -138,7 +147,7 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
           }
           if (p.text) {
             const messageId = uid("a");
-            queueAssistantTyping(messageId, p.text);
+            queueAssistantTyping(p.sessionId, messageId, p.text);
             return [
               ...m,
               {
@@ -247,7 +256,7 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
           const {
             updateSessionMessages,
             setMessagesBySession,
-            setAssistantTypingUntil,
+            clearAssistantTypingForSession,
             setStatusLine,
             refreshSessionMeta,
           } = ref.current;
@@ -273,22 +282,11 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
               const restored = normalizeLoadedMessages(
                 await api.getMessages(sessionId),
               );
-              let staleIds: string[] = [];
-              setMessagesBySession((prev) => {
-                staleIds = (prev[sessionId] ?? []).map((message) => message.id);
-                return { ...prev, [sessionId]: restored };
-              });
-              if (staleIds.length > 0) {
-                // The optimistic ids are gone, so their typewriter timers would
-                // never be cleared by the normal path.
-                setAssistantTypingUntil((prev) => {
-                  const next = { ...prev };
-                  for (const id of staleIds) {
-                    delete next[id];
-                  }
-                  return next;
-                });
-              }
+              setMessagesBySession((prev) => ({
+                ...prev,
+                [sessionId]: restored,
+              }));
+              clearAssistantTypingForSession(sessionId);
               await refreshSessionMeta(sessionId);
             } catch (error) {
               setStatusLine(`reload messages failed: ${String(error)}`);
@@ -318,16 +316,14 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
             ]);
             return;
           }
-          ref.current.setPermissionQueue((prev) => {
-            const queue = prev[request.sessionId] ?? [];
-            if (queue.some((item) => item.requestId === request.requestId)) {
-              return prev;
-            }
-            return {
-              ...prev,
-              [request.sessionId]: [...queue, request],
-            };
-          });
+          const nextQueue = enqueuePermissionRequest(
+            permissionQueueRef.current,
+            request,
+          );
+          if (nextQueue !== permissionQueueRef.current) {
+            permissionQueueRef.current = nextQueue;
+            ref.current.setPermissionQueue(nextQueue);
+          }
           ref.current.updateSessionMessages(request.sessionId, (m) =>
             startAssistantElapsedPause(m),
           );
@@ -342,29 +338,26 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
           const { sessionId, requestId, decision, source } = ev.payload;
           const { setPermissionQueue, setPermissionBusy, updateSessionMessages } =
             ref.current;
-          let resolved: PermissionRequestEvent | undefined;
-          let remainingPermissionCount = 0;
-          setPermissionQueue((prev) => {
-            const queue = prev[sessionId];
-            if (!queue) return prev;
-            resolved = queue.find((item) => item.requestId === requestId);
-            if (!resolved) return prev;
-            const next = queue.filter((item) => item.requestId !== requestId);
-            remainingPermissionCount = next.length;
-            if (next.length === 0) {
-              const { [sessionId]: _drop, ...rest } = prev;
-              return rest;
-            }
-            return { ...prev, [sessionId]: next };
-          });
+          const resolution = resolvePermissionRequest(
+            permissionQueueRef.current,
+            sessionId,
+            requestId,
+          );
+          if (resolution.queue !== permissionQueueRef.current) {
+            permissionQueueRef.current = resolution.queue;
+            setPermissionQueue(resolution.queue);
+          }
           setPermissionBusy((prev) => (prev === requestId ? null : prev));
-          if (resolved && remainingPermissionCount === 0) {
+          if (resolution.resolved && resolution.remainingCount === 0) {
             updateSessionMessages(sessionId, (m) => finishAssistantElapsedPause(m));
           }
           // The user already saw their own click; only surface decisions they
           // did not make, so a timeout or an abort is never silent.
           if (source === "user" || source === "mode") return;
-          const title = resolved?.title ?? resolved?.toolName ?? "工具调用";
+          const title =
+            resolution.resolved?.title ??
+            resolution.resolved?.toolName ??
+            "工具调用";
           updateSessionMessages(sessionId, (m) => [
             ...m,
             {
@@ -383,11 +376,14 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
           if (cancelled) return;
           const { sessionId, code } = ev.payload;
           // The process is gone: nothing can answer a queued approval anymore.
-          ref.current.setPermissionQueue((prev) => {
-            if (!prev[sessionId]) return prev;
-            const { [sessionId]: _drop, ...rest } = prev;
-            return rest;
-          });
+          const nextQueue = clearPermissionRequests(
+            permissionQueueRef.current,
+            sessionId,
+          );
+          if (nextQueue !== permissionQueueRef.current) {
+            permissionQueueRef.current = nextQueue;
+            ref.current.setPermissionQueue(nextQueue);
+          }
           ref.current.updateSessionMessages(sessionId, (m) => [
             ...m.map((msg) =>
               msg.streaming ? finalizeAssistantMessage(msg) : msg,
