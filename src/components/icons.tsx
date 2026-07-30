@@ -11,6 +11,9 @@ import {
   IconArchiveOff as TbArchiveOff,
   IconCheck as TbCheck,
   IconChevronDown as TbChevronDown,
+  IconChevronsDown as TbChevronsDown,
+  IconChevronsUp as TbChevronsUp,
+  IconChevronUp as TbChevronUp,
   IconChevronRight as TbChevronRight,
   IconClipboard as TbClipboard,
   IconDots as TbDots,
@@ -29,6 +32,7 @@ import {
   IconMoon as TbMoon,
   IconPlayerStop as TbPlayerStop,
   IconPlug as TbPlug,
+  IconPuzzle as TbPuzzle,
   IconPlus as TbPlus,
   IconPackageExport as TbPackageExport,
   IconPinned as TbPinned,
@@ -149,6 +153,9 @@ export const IconCopy = wrap(TbCopy);
 export const IconClipboard = wrap(TbClipboard);
 export const IconCheck = wrap(TbCheck, { stroke: 2 });
 export const IconChevronDown = wrap(TbChevronDown);
+export const IconChevronsDown = wrap(TbChevronsDown);
+export const IconChevronsUp = wrap(TbChevronsUp);
+export const IconChevronUp = wrap(TbChevronUp);
 export const IconChevronRight = wrap(TbChevronRight);
 export const IconPlus = wrap(TbPlus);
 export const IconMore = wrap(TbDots);
@@ -178,6 +185,7 @@ export const IconMaximize = wrap(TbSquare);
 export const IconChat = wrap(TbMessage);
 export const IconRobot = wrap(TbRobot);
 export const IconPlug = wrap(TbPlug);
+export const IconPuzzle = wrap(TbPuzzle);
 export const IconThemeSun = wrap(TbSun);
 export const IconThemeMoon = wrap(TbMoon);
 export const IconRiskAsk = wrap(TbShieldQuestion);

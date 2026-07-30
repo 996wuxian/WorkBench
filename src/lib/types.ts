@@ -133,6 +133,19 @@ export interface NativeSessionSyncResult {
   hasMore: boolean;
 }
 
+export interface SkillInfo {
+  name: string;
+  description: string;
+  source: "project" | "user" | string;
+  path?: string | null;
+}
+
+export interface SkillsListResult {
+  runtimeId: RuntimeId;
+  skills: SkillInfo[];
+  searchedPaths: string[];
+}
+
 export interface SessionDeleteResult {
   deletedSessionId: string;
   deletedPath: string;

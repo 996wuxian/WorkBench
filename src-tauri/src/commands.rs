@@ -1,7 +1,8 @@
 //! Tauri command surface for the Workbench UI.
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
@@ -118,6 +119,156 @@ pub fn open_cc_switch() -> Result<String, String> {
     route_diagnostics::open_cc_switch()
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    pub source: String,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsListResult {
+    pub runtime_id: String,
+    pub skills: Vec<SkillInfo>,
+    pub searched_paths: Vec<String>,
+}
+
+/// Discover skill manifests without invoking or modifying a user's CLI.
+/// Project-local skills win over user-level skills with the same name.
+#[tauri::command]
+pub fn skills_list(
+    runtime_id: String,
+    project_path: Option<String>,
+) -> Result<SkillsListResult, String> {
+    let id = runtime_id.trim().to_ascii_lowercase();
+    if id.is_empty() {
+        return Err("runtime id cannot be empty".into());
+    }
+
+    let mut roots = Vec::<(PathBuf, &'static str)>::new();
+    if let Some(raw) = project_path.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        let project = PathBuf::from(raw);
+        // Generic `.agents/skills` is used by Codex; runtime-specific folders
+        // cover CLIs that keep skills under their own project namespace.
+        roots.push((project.join(".agents").join("skills"), "project"));
+        roots.push((project.join(format!(".{id}")).join("skills"), "project"));
+        roots.push((project.join("skills"), "project"));
+    }
+
+    let runtime = crate::runtime::RuntimeId::parse(&id)
+        .ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
+    let manifest = crate::runtime::manifest::get(runtime)
+        .ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
+    let home = manifest.resolve_home();
+    roots.push((home.join("skills"), "user"));
+
+    // Keep conventional homes as a fallback even when the manifest resolves
+    // to Workbench's isolated home because the CLI is not authenticated yet.
+    let user_home = crate::process_util::user_home();
+    roots.push((user_home.join(format!(".{id}")).join("skills"), "user"));
+
+    let mut searched_paths = Vec::new();
+    let mut skills = Vec::new();
+    let mut seen = std::collections::HashSet::<String>::new();
+    for (root, source) in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        searched_paths.push(root.display().to_string());
+        for manifest_path in find_skill_manifests(&root, 3) {
+            let fallback_name = manifest_path
+                .parent()
+                .and_then(Path::file_name)
+                .map(|name| name.to_string_lossy().trim().to_string())
+                .unwrap_or_default();
+            let (name, description) = parse_skill_header(&manifest_path, &fallback_name);
+            if name.is_empty() {
+                continue;
+            }
+            let key = name.to_ascii_lowercase();
+            if !seen.insert(key) {
+                continue;
+            }
+            skills.push(SkillInfo {
+                name,
+                description,
+                source: source.to_string(),
+                path: Some(manifest_path.display().to_string()),
+            });
+        }
+    }
+
+    Ok(SkillsListResult {
+        runtime_id: id,
+        skills,
+        searched_paths,
+    })
+}
+
+fn find_skill_manifests(root: &Path, max_depth: usize) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > max_depth {
+            return;
+        }
+        let manifest = dir.join("SKILL.md");
+        if manifest.is_file() {
+            out.push(manifest);
+            return;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        let mut dirs = entries
+            .flatten()
+            // Follow bounded skill-directory junctions (common on Windows
+            // when multiple CLIs share the same installed skill).
+            .filter(|entry| entry.path().is_dir())
+            .collect::<Vec<_>>();
+        dirs.sort_by_key(|entry| entry.file_name());
+        for entry in dirs {
+            walk(&entry.path(), depth + 1, max_depth, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(root, 0, max_depth, &mut out);
+    out
+}
+
+fn parse_skill_header(path: &Path, fallback_name: &str) -> (String, String) {
+    let Ok(text) = fs::read_to_string(path) else {
+        return (fallback_name.to_string(), String::new());
+    };
+    let mut name = String::new();
+    let mut description = String::new();
+    let mut in_frontmatter = false;
+    for line in text.lines().take(80) {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            if in_frontmatter {
+                break;
+            }
+            in_frontmatter = true;
+            continue;
+        }
+        if !in_frontmatter {
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("name:") {
+            name = value.trim().trim_matches(['"', '\'']).to_string();
+        } else if let Some(value) = trimmed.strip_prefix("description:") {
+            description = value.trim().trim_matches(['"', '\'']).to_string();
+        }
+    }
+    if name.is_empty() {
+        name = fallback_name.to_string();
+    }
+    (name, description)
+}
+
 #[tauri::command]
 pub fn session_open_location(session_id: String) -> Result<String, String> {
     let path = session_store::session_dir_path(&session_id).map_err(|e| e.to_string())?;
@@ -148,6 +299,100 @@ pub fn session_update_presentation(
     patch: SessionPresentationPatch,
 ) -> Result<SessionMeta, String> {
     mgr.update_presentation(&session_id, patch.title, patch.pinned)
+}
+
+#[tauri::command]
+pub fn session_update_project(
+    mgr: tauri::State<'_, Arc<SessionManager>>,
+    session_id: String,
+    project_path: String,
+) -> Result<SessionMeta, String> {
+    mgr.update_project_path(&session_id, project_path)
+}
+
+#[tauri::command]
+pub async fn project_pick_directory(
+    initial_path: Option<String>,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || pick_project_directory(initial_path.as_deref()))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn pick_project_directory(initial_path: Option<&str>) -> Result<Option<String>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = '选择会话工作目录'
+$dialog.ShowNewFolderButton = $true
+if ($env:WORKBENCH_PICKER_DIR -and (Test-Path -LiteralPath $env:WORKBENCH_PICKER_DIR -PathType Container)) {
+  $dialog.SelectedPath = $env:WORKBENCH_PICKER_DIR
+}
+try {
+  if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::Write($dialog.SelectedPath)
+  }
+} finally {
+  $dialog.Dispose()
+}
+"#;
+        let mut command = Command::new("powershell.exe");
+        command.args(["-NoProfile", "-NonInteractive", "-STA", "-Command", script]);
+        if let Some(path) = initial_path.filter(|path| !path.trim().is_empty()) {
+            command.env("WORKBENCH_PICKER_DIR", path);
+        }
+        crate::process_util::apply_no_window_std(&mut command);
+        let output = command.output().map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if selected.is_empty() {
+            return Ok(None);
+        }
+        let path = PathBuf::from(&selected);
+        if !path.is_dir() {
+            return Err(format!("selected directory does not exist: {selected}"));
+        }
+        return Ok(Some(selected));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("osascript")
+            .args([
+                "-e",
+                "POSIX path of (choose folder with prompt \"选择会话工作目录\")",
+            ])
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!selected.is_empty()).then_some(selected));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("zenity");
+        command.args(["--file-selection", "--directory", "--title=选择会话工作目录"]);
+        if let Some(path) = initial_path.filter(|path| !path.trim().is_empty()) {
+            command.arg(format!("--filename={path}/"));
+        }
+        let output = command.output().map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!selected.is_empty()).then_some(selected));
+    }
+
+    #[allow(unreachable_code)]
+    Err("folder picker is not supported on this platform".into())
 }
 
 #[tauri::command]
@@ -274,9 +519,7 @@ pub async fn session_control_options(
         .project_path
         .clone()
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-        });
+        .unwrap_or_else(paths::data_dir);
 
     // Which models and modes exist is the adapter's knowledge; the default impl
     // answers from the manifest, Codex overrides it with a live config read.

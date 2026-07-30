@@ -82,6 +82,7 @@ import type {
   SessionSnapshot,
   SessionState,
   SessionUnreadKind,
+  SkillInfo,
 } from "./lib/types";
 import {
   allRuntimes,
@@ -159,12 +160,16 @@ export default function App() {
     Record<string, number>
   >({});
   const [draft, setDraft] = useState("");
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillsError, setSkillsError] = useState<string | null>(null);
   const [quoteTarget, setQuoteTarget] = useState<QuoteTarget | null>(null);
   const [runtimePick, setRuntimePick] = useState<RuntimeId>(() =>
     loadRuntimePick(),
   );
   const [busy, setBusy] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
+  const [projectPathBusy, setProjectPathBusy] = useState(false);
   const [controlCatalog, setControlCatalog] =
     useState<SessionSelectionCatalog | null>(null);
   const [sidebarHidden, setSidebarHidden] = useState(false);
@@ -232,6 +237,34 @@ export default function App() {
     [sessions, pendingSession, activeId],
   );
   const activeRuntimeId = active?.runtimeId ?? snapshot.runtimeId ?? runtimePick;
+
+  useEffect(() => {
+    let cancelled = false;
+    setSkills([]);
+    setSkillsError(null);
+    if (!active || !isTauri()) {
+      setSkillsLoading(false);
+      return;
+    }
+    setSkillsLoading(true);
+    void api
+      .skillsList(activeRuntimeId, active.projectPath ?? null)
+      .then((result) => {
+        if (cancelled) return;
+        setSkills(result.skills ?? []);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setSkillsError(String(error));
+      })
+      .finally(() => {
+        if (!cancelled) setSkillsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [active?.id, active?.projectPath, activeRuntimeId]);
+
   const activeSessionModelValue = useMemo(
     () =>
       active?.runtimeId === "codex"
@@ -320,6 +353,9 @@ export default function App() {
   );
   const settingsChangeDisabled =
     !active || active.archived || settingsBusy || !canChangeSessionSettings(snapshot.state);
+  const projectPathEditable = Boolean(
+    active && pendingSession?.id === active.id && messages.length === 0 && !active.archived,
+  );
   const runtimePickOptions = useMemo(
     () =>
       (runtimes.length > 0 ? allRuntimes() : []).map((r) => ({
@@ -374,6 +410,7 @@ export default function App() {
     scrollHeight: number;
     scrollTop: number;
   } | null>(null);
+  const messageNavigationLockUntilRef = useRef(0);
   const assistantTypingTimersRef = useRef<Record<string, number>>({});
   const assistantTypingQueueRef = useRef<Record<string, string>>({});
   const assistantTypingSessionRef = useRef<Record<string, string>>({});
@@ -441,7 +478,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [active?.id, active?.runtimeId, activeModelValue]);
+  }, [active?.id, active?.projectPath, active?.runtimeId, activeModelValue]);
 
   useEffect(() => {
     return () => {
@@ -562,12 +599,34 @@ export default function App() {
     });
   }, [activeId, hiddenMessageCount, messages.length]);
 
+  const revealMessageForNavigation = useCallback(
+    (messageIndex: number) => {
+      if (!activeId || messageIndex < 0 || messageIndex >= messages.length) return;
+      messageNavigationLockUntilRef.current = performance.now() + 1400;
+      pendingHistoryRestoreRef.current = null;
+      stickToBottomRef.current = false;
+      const requiredCount = messages.length - messageIndex;
+      setVisibleMessageCounts((previous) => ({
+        ...previous,
+        [activeId]: Math.max(
+          previous[activeId] ?? INITIAL_VISIBLE_MESSAGES,
+          requiredCount,
+        ),
+      }));
+    },
+    [activeId, messages.length],
+  );
+
   const handleMessageScroll = useCallback(() => {
     const el = messageScrollRef.current;
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom <= CHAT_BOTTOM_THRESHOLD;
-    if (el.scrollTop <= CHAT_TOP_THRESHOLD && hiddenMessageCount > 0) {
+    if (
+      performance.now() >= messageNavigationLockUntilRef.current &&
+      el.scrollTop <= CHAT_TOP_THRESHOLD &&
+      hiddenMessageCount > 0
+    ) {
       revealOlderMessages();
     }
   }, [hiddenMessageCount, revealOlderMessages]);
@@ -1547,11 +1606,12 @@ export default function App() {
     [],
   );
 
-  async function createSession() {
+  async function createSession(projectPathOverride?: string | null) {
     setBusy(true);
     try {
       setShowArchived(false);
       setQuoteTarget(null);
+      const projectPath = projectPathOverride?.trim() || null;
       if (!isTauri()) {
         const meta: SessionMeta = {
           id: uid("sess"),
@@ -1559,7 +1619,7 @@ export default function App() {
           pinned: false,
           archived: false,
           runtimeId: runtimePick,
-          projectPath: "X:\\1_2026_project\\work",
+          projectPath,
           modelId: runtimePick === "grok" ? "grok-4.5" : "default",
           modelReasoningEffort: runtimePick === "codex" ? "high" : null,
           permissionMode: defaultPermissionMode(runtimePick),
@@ -1573,7 +1633,7 @@ export default function App() {
         updateSessionMessages(meta.id, () => []);
         return;
       }
-      const meta = await api.createSession(runtimePick, null);
+      const meta = await api.createSession(runtimePick, projectPath);
       setPendingSession(meta);
       const requestId = beginSessionActivation(meta.id);
       const snap = await api.getSnapshot(meta.id);
@@ -1585,6 +1645,32 @@ export default function App() {
       setStatusLine(String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function pickActiveProjectDirectory() {
+    if (!active || pendingSession?.id !== active.id || messages.length > 0) return;
+    if (!isTauri()) {
+      setStatusLine("目录选择需要在桌面版中使用");
+      return;
+    }
+    setProjectPathBusy(true);
+    try {
+      const selected = await api.pickProjectDirectory(active.projectPath ?? null);
+      if (!selected) return;
+      const meta = await api.updateSessionProject(active.id, selected);
+      setPendingSession((current) => (current?.id === meta.id ? meta : current));
+      setSessions((current) =>
+        current.map((session) => (session.id === meta.id ? meta : session)),
+      );
+      if (activeIdRef.current === meta.id) {
+        setSnapshot((current) => ({ ...current, projectPath: meta.projectPath }));
+      }
+      setStatusLine(`工作目录：${selected}`);
+    } catch (error) {
+      setStatusLine(`选择工作目录失败：${String(error)}`);
+    } finally {
+      setProjectPathBusy(false);
     }
   }
 
@@ -1653,6 +1739,22 @@ export default function App() {
     } finally {
       setSettingsBusy(false);
     }
+  }
+
+  function insertSkill(name: string) {
+    const input = composerInputRef.current;
+    const start = input?.selectionStart ?? draft.length;
+    const end = input?.selectionEnd ?? start;
+    // Codex uses `$skill-name`; Grok/Claude/Kimi accept slash invocation.
+    const prefix = activeRuntimeId === "codex" ? "$" : "/";
+    const token = `${prefix}${name} `;
+    const next = `${draft.slice(0, start)}${token}${draft.slice(end)}`;
+    setDraft(next);
+    requestAnimationFrame(() => {
+      input?.focus();
+      const caret = start + token.length;
+      input?.setSelectionRange(caret, caret);
+    });
   }
 
   async function sendMessage() {
@@ -1980,7 +2082,7 @@ export default function App() {
           onHideSidebar={() => setSidebarHidden(true)}
           onToggleMaximize={() => void toggleMaximizeFromTitlebar()}
           onRuntimePickChange={setRuntimePick}
-          onCreateSession={() => void createSession()}
+          onCreateSession={(projectPath) => void createSession(projectPath)}
           onToggleSearch={() => {
             setShowSearch((v) => !v);
             if (showSearch) setSessionFilter("");
@@ -2084,10 +2186,13 @@ export default function App() {
               <MessageList
                 scrollRef={messageScrollRef}
                 onScroll={handleMessageScroll}
+                sessionKey={active.id}
+                messages={messages}
                 groups={visibleMessageGroups}
                 empty={messages.length === 0}
                 hiddenCount={hiddenMessageCount}
                 onRevealOlder={revealOlderMessages}
+                onRevealMessage={revealMessageForNavigation}
                 fallbackRuntimeId={active.runtimeId ?? snapshot.runtimeId ?? null}
                 assistantTypingUntil={assistantTypingUntil}
                 onTypingProgress={handleTypingProgress}
@@ -2123,6 +2228,12 @@ export default function App() {
                 controlModelOptions={controlModelOptions}
                 controlPermissionOptions={controlPermissionOptions}
                 controlReasoningOptions={controlReasoningOptions}
+                skills={skills}
+                skillsLoading={skillsLoading}
+                skillsError={skillsError}
+                projectPath={active.projectPath ?? null}
+                projectPathEditable={projectPathEditable}
+                projectPathBusy={projectPathBusy}
                 quoteTarget={quoteTarget}
                 composerInputRef={composerInputRef}
                 onDraftChange={setDraft}
@@ -2142,6 +2253,8 @@ export default function App() {
                     permissionMode: value as PermissionMode,
                   })
                 }
+                onSkillSelect={insertSkill}
+                onPickProjectPath={() => void pickActiveProjectDirectory()}
               />
             </>
           )}

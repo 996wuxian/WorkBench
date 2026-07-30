@@ -11,7 +11,9 @@ import type { RefObject, UIEvent } from "react";
 import { MarkdownMessage } from "./Markdown";
 import { AssistantTiming, StreamingText, ThinkingIndicator } from "./ChatStream";
 import { IconChat, IconCopy, IconQuote } from "./icons";
+import { MessageNodeRail } from "./MessageNodeRail";
 import { copyTextToClipboard } from "../lib/format";
+import { useMessageNodeNavigation } from "../hooks/useMessageNodeNavigation";
 import { messageRoleLabel, toolMessageLabel, type QuoteTarget } from "../lib/messages";
 import { emitToast } from "../lib/toast";
 import { runtimeAvatarLabel, runtimeAvatarSrc, runtimeLabel } from "../lib/runtimes";
@@ -26,11 +28,14 @@ export interface MessageGroup {
 export interface MessageListProps {
   scrollRef: RefObject<HTMLDivElement | null>;
   onScroll: (event: UIEvent<HTMLDivElement>) => void;
+  sessionKey: string;
+  messages: ChatMessage[];
   groups: MessageGroup[];
   /** True when the session has no messages at all, not merely none visible. */
   empty: boolean;
   hiddenCount: number;
   onRevealOlder: () => void;
+  onRevealMessage: (messageIndex: number) => void;
   /** Runtime to attribute a message to when it carries no id of its own. */
   fallbackRuntimeId: RuntimeId | null;
   assistantTypingUntil: Record<string, number>;
@@ -41,17 +46,42 @@ export interface MessageListProps {
 export function MessageList({
   scrollRef,
   onScroll,
+  sessionKey,
+  messages,
   groups,
   empty,
   hiddenCount,
   onRevealOlder,
+  onRevealMessage,
   fallbackRuntimeId,
   assistantTypingUntil,
   onTypingProgress,
   onQuote,
 }: MessageListProps) {
+  const {
+    nodes,
+    activeNodeId,
+    focusedMessageId,
+    handleScroll,
+    scrollToNode,
+    selectPreviousNode,
+    selectNextNode,
+  } = useMessageNodeNavigation({
+    sessionKey,
+    messages,
+    renderedMessageCount: groups.length,
+    scrollRef,
+    onViewportScroll: onScroll,
+    onRevealMessage,
+  });
+
+  const assistantLabel = fallbackRuntimeId
+    ? runtimeLabel(fallbackRuntimeId)
+    : "Agent";
+
   return (
-    <div className="message-list" ref={scrollRef} onScroll={onScroll}>
+    <div className="message-list-shell">
+      <div className="message-list" ref={scrollRef} onScroll={handleScroll}>
       {empty ? (
         <div className="empty-state empty-state--chat">
           <div className="empty-state__icon">
@@ -198,7 +228,11 @@ export function MessageList({
               return (
                 <div
                   key={m.id}
-                  className={`message-block message-block--${visualRole}`}
+                  data-message-id={m.id}
+                  className={
+                    `message-block message-block--${visualRole}` +
+                    (focusedMessageId === m.id ? " message-node-focus" : "")
+                  }
                 >
                   <div
                     className={
@@ -219,7 +253,14 @@ export function MessageList({
             }
 
             return (
-              <div key={m.id} className="message-row message-row--assistant">
+              <div
+                key={m.id}
+                data-message-id={m.id}
+                className={
+                  "message-row message-row--assistant" +
+                  (focusedMessageId === m.id ? " message-node-focus" : "")
+                }
+              >
                 <img
                   className={`message-avatar message-avatar--${messageRuntime}`}
                   src={avatarSrc}
@@ -238,6 +279,21 @@ export function MessageList({
           })}
         </>
       )}
+      </div>
+      <MessageNodeRail
+        nodes={nodes}
+        activeId={activeNodeId}
+        onSelect={scrollToNode}
+        onPrevious={selectPreviousNode}
+        onNext={selectNextNode}
+        labels={{
+          aria: "会话目录",
+          previous: "上一条会话消息",
+          next: "下一条会话消息",
+          user: "你",
+          assistant: assistantLabel,
+        }}
+      />
     </div>
   );
 }

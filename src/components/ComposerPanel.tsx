@@ -5,7 +5,9 @@ import { ChoiceSelect, type ChoiceOption } from "./ChoiceSelect";
 import {
   IconClipboard,
   IconClose,
+  IconFolder,
   IconQuote,
+  IconPuzzle,
   IconRiskAsk,
   IconRiskAuto,
   IconRiskFullAccess,
@@ -15,7 +17,7 @@ import {
   IconStop,
 } from "./icons";
 import { compactLabel } from "../lib/format";
-import type { PermissionMode } from "../lib/types";
+import type { PermissionMode, SkillInfo } from "../lib/types";
 import type { QuoteTarget } from "../lib/messages";
 
 type Props = {
@@ -32,6 +34,12 @@ type Props = {
   controlModelOptions: ChoiceOption[];
   controlPermissionOptions: ChoiceOption[];
   controlReasoningOptions: ChoiceOption[];
+  skills: SkillInfo[];
+  skillsLoading: boolean;
+  skillsError: string | null;
+  projectPath: string | null;
+  projectPathEditable: boolean;
+  projectPathBusy: boolean;
   quoteTarget: QuoteTarget | null;
   composerInputRef: RefObject<HTMLTextAreaElement | null>;
   onDraftChange: (value: string) => void;
@@ -41,6 +49,8 @@ type Props = {
   onModelChange: (value: string) => void;
   onReasoningEffortChange: (value: string) => void;
   onPermissionChange: (value: string) => void;
+  onSkillSelect: (name: string) => void;
+  onPickProjectPath: () => void;
 };
 
 type ComposerContextMenu = {
@@ -96,6 +106,12 @@ export function ComposerPanel({
   controlModelOptions,
   controlPermissionOptions,
   controlReasoningOptions,
+  skills,
+  skillsLoading,
+  skillsError,
+  projectPath,
+  projectPathEditable,
+  projectPathBusy,
   quoteTarget,
   composerInputRef,
   onDraftChange,
@@ -105,9 +121,14 @@ export function ComposerPanel({
   onModelChange,
   onReasoningEffortChange,
   onPermissionChange,
+  onSkillSelect,
+  onPickProjectPath,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<ComposerContextMenu>(null);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [skillQuery, setSkillQuery] = useState("");
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const skillsRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -136,6 +157,23 @@ export function ComposerPanel({
       window.removeEventListener("scroll", close, true);
     };
   }, [contextMenu]);
+
+  useEffect(() => {
+    if (!skillsOpen) return;
+    const close = (event: globalThis.MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Node && skillsRef.current?.contains(target)) return;
+      setSkillsOpen(false);
+    };
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [skillsOpen]);
+
+  const filteredSkills = skills.filter((skill) => {
+    const q = skillQuery.trim().toLowerCase();
+    if (!q) return true;
+    return `${skill.name} ${skill.description}`.toLowerCase().includes(q);
+  });
 
   const openContextMenu = (event: MouseEvent<HTMLTextAreaElement>) => {
     event.preventDefault();
@@ -218,6 +256,68 @@ export function ComposerPanel({
             getOptionClassName={permissionRiskClassName}
             onChange={onPermissionChange}
           />
+          <div className="composer-skills" ref={skillsRef}>
+            <button
+              type="button"
+              className={"composer-skill-trigger" + (skillsOpen ? " is-open" : "")}
+              title="选择当前 CLI 的 Skills"
+              aria-label="选择当前 CLI 的 Skills"
+              aria-haspopup="dialog"
+              aria-expanded={skillsOpen}
+              disabled={readOnly}
+              onClick={() => {
+                setSkillQuery("");
+                setSkillsOpen((open) => !open);
+              }}
+            >
+              <IconPuzzle size={15} />
+              <span>Skills</span>
+              {skills.length > 0 ? <span className="composer-skill-count">{skills.length}</span> : null}
+            </button>
+            {skillsOpen ? (
+              <div className="composer-skills__panel" role="dialog" aria-label="Skills">
+                <div className="composer-skills__head">
+                  <span>当前目录 Skills</span>
+                  <span className="composer-skills__meta">{skills.length}</span>
+                </div>
+                <input
+                  className="composer-skills__search"
+                  placeholder="搜索 Skill"
+                  value={skillQuery}
+                  onChange={(event) => setSkillQuery(event.target.value)}
+                  autoFocus
+                />
+                <div className="composer-skills__list">
+                  {skillsLoading ? <div className="composer-skills__empty">正在扫描…</div> : null}
+                  {!skillsLoading && skillsError ? (
+                    <div className="composer-skills__empty" title={skillsError}>{skillsError}</div>
+                  ) : null}
+                  {!skillsLoading && !skillsError && filteredSkills.length === 0 ? (
+                    <div className="composer-skills__empty">未发现可用 Skill</div>
+                  ) : null}
+                  {!skillsLoading && !skillsError
+                    ? filteredSkills.map((skill) => (
+                        <button
+                          key={`${skill.source}:${skill.name}`}
+                          type="button"
+                          className="composer-skills__item"
+                          onClick={() => {
+                            onSkillSelect(skill.name);
+                            setSkillsOpen(false);
+                          }}
+                        >
+                          <span className="composer-skills__item-main">
+                            <strong>{skill.name}</strong>
+                            {skill.description ? <small>{skill.description}</small> : null}
+                          </span>
+                          <span className="composer-skills__source">{skill.source === "project" ? "项目" : "用户"}</span>
+                        </button>
+                      ))
+                    : null}
+                </div>
+              </div>
+            ) : null}
+          </div>
         </div>
         {quoteTarget ? (
           <div className="composer__quote">
@@ -254,9 +354,29 @@ export function ComposerPanel({
           }}
         />
         <div className="composer__footer">
-          <span className="muted" style={{ fontSize: 12 }}>
-            {readOnly ? "归档会话 · 只读" : "Enter 发送 · Shift+Enter 换行"}
-          </span>
+          {projectPathEditable ? (
+            <button
+              type="button"
+              className="composer-project-path__button"
+              title={
+                projectPath ??
+                "未选择工作目录；发送时将优先使用 D:\\workbench，其次 X:\\workbench"
+              }
+              disabled={projectPathBusy || readOnly}
+              onClick={onPickProjectPath}
+            >
+              <IconFolder size={15} />
+              <span>{projectPath ?? "未选择工作目录"}</span>
+            </button>
+          ) : (
+            <div
+              className="composer-project-path__display"
+              title={projectPath ?? "该旧会话没有记录工作目录"}
+            >
+              <IconFolder size={15} />
+              <span>{projectPath ?? "未记录工作目录"}</span>
+            </div>
+          )}
           {streaming ? (
             <button
               type="button"

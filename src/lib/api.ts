@@ -16,6 +16,7 @@ import type {
   RuntimeInfo,
   SessionMeta,
   SessionSnapshot,
+  SkillsListResult,
 } from "./types";
 
 /** True when running inside Tauri webview. */
@@ -38,6 +39,10 @@ export const api = {
   claudeRouteStatus: () => call<ClaudeRouteStatus>("claude_route_status"),
   codexRouteStatus: () => call<CodexRouteStatus>("codex_route_status"),
   openCcSwitch: () => call<string>("open_cc_switch"),
+  pickProjectDirectory: (initialPath?: string | null) =>
+    call<string | null>("project_pick_directory", { initialPath }),
+  skillsList: (runtimeId: string, projectPath?: string | null) =>
+    call<SkillsListResult>("skills_list", { runtimeId, projectPath }),
   openSessionLocation: (sessionId: string) =>
     call<string>("session_open_location", { sessionId }),
 
@@ -52,6 +57,8 @@ export const api = {
       sessionId,
       patch,
     }),
+  updateSessionProject: (sessionId: string, projectPath: string) =>
+    call<SessionMeta>("session_update_project", { sessionId, projectPath }),
   setSessionArchived: (sessionId: string, archived: boolean) =>
     call<SessionMeta>("session_set_archived", { sessionId, archived }),
   getSnapshot: (sessionId?: string | null) =>

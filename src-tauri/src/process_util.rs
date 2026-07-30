@@ -27,6 +27,15 @@ pub fn apply_no_window_tokio(cmd: &mut tokio::process::Command) {
     let _ = cmd;
 }
 
+pub fn apply_no_window_std(cmd: &mut std::process::Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let _ = cmd;
+}
+
 pub fn clear_proxy_env_tokio(cmd: &mut tokio::process::Command) {
     for key in [
         "HTTP_PROXY",

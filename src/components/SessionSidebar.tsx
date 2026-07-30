@@ -1,12 +1,18 @@
-import { useMemo, type RefObject } from "react";
+import { useEffect, useMemo, useState, type RefObject } from "react";
 
 import { RuntimeSelect, type RuntimeOption } from "./RuntimeSelect";
 import {
   IconArchive,
   IconArchiveOff,
+  IconChevronDown,
+  IconChevronRight,
+  IconChevronsDown,
+  IconChevronsUp,
+  IconFolder,
   IconNewChat,
   IconPanel,
   IconPinnedFilled,
+  IconPlus,
   IconRefresh,
   IconSearch,
   IconSettings,
@@ -27,6 +33,24 @@ import type {
   SessionUnreadKind,
 } from "../lib/types";
 
+type SessionProjectGroup = {
+  key: string;
+  label: string;
+  path: string | null;
+  sessions: SessionMeta[];
+};
+
+const OTHER_PROJECT_KEY = "__other_sessions__";
+
+function normalizeProjectKey(projectPath: string): string {
+  return projectPath.trim().replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+}
+
+function projectLabel(projectPath: string): string {
+  const clean = projectPath.trim().replace(/[\\/]+$/, "");
+  return clean.split(/[\\/]/).filter(Boolean).at(-1) ?? clean;
+}
+
 type Props = {
   hidden: boolean;
   runtimePick: RuntimeId;
@@ -46,7 +70,7 @@ type Props = {
   onHideSidebar: () => void;
   onToggleMaximize: () => void;
   onRuntimePickChange: (id: RuntimeId) => void;
-  onCreateSession: () => void;
+  onCreateSession: (projectPath?: string | null) => void;
   onToggleSearch: () => void;
   onShowArchivedChange: (showArchived: boolean) => void;
   onSessionFilterChange: (value: string) => void;
@@ -89,6 +113,9 @@ export function SessionSidebar({
   onSyncNativeSessions,
   onOpenSettings,
 }: Props) {
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(
+    () => new Set(),
+  );
   const runtimeSessions = useMemo(
     () => sessions.filter((session) => session.runtimeId === runtimePick),
     [runtimePick, sessions],
@@ -96,6 +123,10 @@ export function SessionSidebar({
   const scopedSessions = useMemo(
     () => runtimeSessions.filter((session) => session.archived === showArchived),
     [runtimeSessions, showArchived],
+  );
+  const liveSessions = useMemo(
+    () => runtimeSessions.filter((session) => !session.archived),
+    [runtimeSessions],
   );
   const filteredSessions = useMemo(() => {
     const q = sessionFilter.trim().toLowerCase();
@@ -107,9 +138,33 @@ export function SessionSidebar({
         session.runtimeId.includes(q) ||
         (session.modelId ?? "").toLowerCase().includes(q) ||
         (session.nativeSessionId ?? "").toLowerCase().includes(q) ||
-        (session.nativeThreadId ?? "").toLowerCase().includes(q),
+        (session.nativeThreadId ?? "").toLowerCase().includes(q) ||
+        (session.projectPath ?? "").toLowerCase().includes(q),
     );
   }, [scopedSessions, sessionFilter]);
+  const projectGroups = useMemo<SessionProjectGroup[]>(() => {
+    const groups = new Map<string, SessionProjectGroup>();
+    for (const session of filteredSessions) {
+      const path = session.projectPath?.trim() || null;
+      const key = path ? normalizeProjectKey(path) : OTHER_PROJECT_KEY;
+      const existing = groups.get(key);
+      if (existing) {
+        existing.sessions.push(session);
+        continue;
+      }
+      groups.set(key, {
+        key,
+        label: path ? projectLabel(path) : "其他会话",
+        path,
+        sessions: [session],
+      });
+    }
+    return [...groups.values()].sort((a, b) => {
+      if (a.key === OTHER_PROJECT_KEY) return 1;
+      if (b.key === OTHER_PROJECT_KEY) return -1;
+      return a.label.localeCompare(b.label, "zh-CN");
+    });
+  }, [filteredSessions]);
   const filteredSessionIds = useMemo(
     () => filteredSessions.map((session) => session.id),
     [filteredSessions],
@@ -120,12 +175,31 @@ export function SessionSidebar({
   );
   const runtimeSessionCount = scopedSessions.length;
   const processStats = useMemo(
-    () => sessionProcessStats(scopedSessions, sessionSnapshots),
-    [scopedSessions, sessionSnapshots],
+    () => sessionProcessStats(liveSessions, sessionSnapshots),
+    [liveSessions, sessionSnapshots],
   );
   const loadingMore = loadingMoreRuntime === runtimePick;
   const syncing = syncingRuntime === runtimePick;
   const hasMore = nativeHasMore[runtimePick];
+  const allProjectGroupsCollapsed =
+    projectGroups.length > 0 &&
+    projectGroups.every((group) => collapsedProjects.has(group.key));
+  const activeProjectKey = useMemo(() => {
+    const activeSession = sessions.find((session) => session.id === activeId);
+    const path = activeSession?.projectPath?.trim();
+    return path ? normalizeProjectKey(path) : activeSession ? OTHER_PROJECT_KEY : null;
+  }, [activeId, sessions]);
+
+  useEffect(() => {
+    if (!activeProjectKey) return;
+    setCollapsedProjects((current) => {
+      if (!current.has(activeProjectKey)) return current;
+      const next = new Set(current);
+      next.delete(activeProjectKey);
+      return next;
+    });
+  }, [activeProjectKey]);
+
   const handleScroll = () => {
     const el = sessionScrollRef.current;
     if (!el) return;
@@ -134,6 +208,73 @@ export function SessionSidebar({
     if (hasMore === false) return;
     if (loadingMore || syncing) return;
     onSyncNativeSessions("more");
+  };
+
+  const renderSession = (session: SessionMeta) => {
+    const displayTitle = sessionDisplayTitle(session);
+    const displaySummary = sessionDisplaySummary(session);
+    const sessionSnapshot = sessionSnapshots[session.id];
+    const state = sessionSnapshot?.state ?? "idle";
+    const stateLabel = sessionStateLabel(sessionSnapshot);
+    const unread = sessionUnread[session.id];
+    return (
+      <button
+        type="button"
+        key={session.id}
+        className={
+          "session-item" +
+          (activeId === session.id ? " session-item--active" : "") +
+          (selectedSessionIdSet.has(session.id) ? " session-item--selected" : "")
+        }
+        onContextMenu={(ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          onSessionContextMenu(
+            session.id,
+            Math.max(8, Math.min(ev.clientX, window.innerWidth - 252)),
+            Math.max(8, Math.min(ev.clientY, window.innerHeight - 440)),
+          );
+        }}
+        onClick={(ev) =>
+          onSelectSession(session.id, {
+            shiftKey: ev.shiftKey,
+            visibleSessionIds: filteredSessionIds,
+          })
+        }
+      >
+        <span className={`runtime-dot runtime-dot--${session.runtimeId}`} />
+        <span className="session-item__body">
+          <span className="session-item__topline">
+            <span className="session-item__title">{displayTitle}</span>
+            {session.pinned ? (
+              <span className="session-item__pin">
+                <IconPinnedFilled size={14} title="已置顶" />
+              </span>
+            ) : null}
+            <span className="session-item__time">
+              {formatSessionTime(session.nativeUpdatedAt ?? session.updatedAt)}
+            </span>
+          </span>
+          {displaySummary ? (
+            <span className="session-item__summary">{displaySummary}</span>
+          ) : null}
+          <span className="session-item__status-row">
+            <span className="session-item__state" title={`Host 状态：${stateLabel}`}>
+              <span className={`status-dot ${stateDotClass(state)}`} aria-hidden="true" />
+              {stateLabel}
+            </span>
+            {unread ? (
+              <span
+                className={`session-item__unread session-item__unread--${unread}`}
+                aria-label={unread === "completed" ? "后台会话已完成" : "后台会话发生错误"}
+              >
+                {unread === "completed" ? "完成" : "异常"}
+              </span>
+            ) : null}
+          </span>
+        </span>
+      </button>
+    );
   };
 
   return (
@@ -183,7 +324,7 @@ export function SessionSidebar({
             type="button"
             className="nav-new"
             disabled={busy}
-            onClick={onCreateSession}
+            onClick={() => onCreateSession()}
           >
             <span className="nav-item__icon">
               <IconNewChat size={16} />
@@ -222,15 +363,7 @@ export function SessionSidebar({
             </div>
             {showArchived ? (
               <div className="sidebar__section-stats">{runtimeSessionCount}个</div>
-            ) : (
-              <div
-                className="sidebar__section-stats"
-                aria-label={`${processStats.total} 个会话，${processStats.running} 个运行中，${processStats.processes} 个活跃进程`}
-                title="会话总数 · 运行中 · 活跃进程"
-              >
-                {processStats.total} · {processStats.running}运行 · {processStats.processes}进程
-              </div>
-            )}
+            ) : null}
           </div>
           <div className="sidebar__section-actions">
             <button
@@ -243,15 +376,48 @@ export function SessionSidebar({
               {showArchived ? <IconArchiveOff size={14} /> : <IconArchive size={14} />}
             </button>
             {!showArchived ? (
-              <button
-                type="button"
-                className="section-icon-btn"
-                title={`同步 ${runtimeLabel(runtimePick)} 原生会话`}
-                disabled={syncing}
-                onClick={() => onSyncNativeSessions("reset")}
-              >
-                <IconRefresh size={14} />
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="section-icon-btn"
+                  title={`同步 ${runtimeLabel(runtimePick)} 原生会话`}
+                  disabled={syncing}
+                  onClick={() => onSyncNativeSessions("reset")}
+                >
+                  <IconRefresh size={14} />
+                </button>
+                <button
+                  type="button"
+                  className="section-icon-btn"
+                  title={
+                    sessionFilter.trim()
+                      ? "搜索时项目组保持展开"
+                      : allProjectGroupsCollapsed
+                        ? "展开全部项目"
+                        : "折叠全部项目"
+                  }
+                  aria-label={
+                    allProjectGroupsCollapsed ? "展开全部项目" : "折叠全部项目"
+                  }
+                  disabled={projectGroups.length === 0 || Boolean(sessionFilter.trim())}
+                  onClick={() =>
+                    setCollapsedProjects((current) => {
+                      const next = new Set(current);
+                      for (const group of projectGroups) {
+                        if (allProjectGroupsCollapsed) next.delete(group.key);
+                        else next.add(group.key);
+                      }
+                      return next;
+                    })
+                  }
+                >
+                  {allProjectGroupsCollapsed ? (
+                    <IconChevronsDown size={14} />
+                  ) : (
+                    <IconChevronsUp size={14} />
+                  )}
+                </button>
+              </>
             ) : null}
           </div>
         </div>
@@ -264,73 +430,51 @@ export function SessionSidebar({
               : "没有匹配的会话。"}
           </div>
         ) : null}
-        {filteredSessions.map((session) => {
-          const displayTitle = sessionDisplayTitle(session);
-          const displaySummary = sessionDisplaySummary(session);
-          const sessionSnapshot = sessionSnapshots[session.id];
-          const state = sessionSnapshot?.state ?? "idle";
-          const stateLabel = sessionStateLabel(sessionSnapshot);
-          const unread = sessionUnread[session.id];
+        {projectGroups.map((group) => {
+          const collapsed = !sessionFilter.trim() && collapsedProjects.has(group.key);
           return (
-            <button
-              type="button"
-              key={session.id}
-              className={
-                "session-item" +
-                (activeId === session.id ? " session-item--active" : "") +
-                (selectedSessionIdSet.has(session.id) ? " session-item--selected" : "")
-              }
-              onContextMenu={(ev) => {
-                ev.preventDefault();
-                ev.stopPropagation();
-                onSessionContextMenu(
-                  session.id,
-                  Math.max(8, Math.min(ev.clientX, window.innerWidth - 252)),
-                  Math.max(8, Math.min(ev.clientY, window.innerHeight - 440)),
-                );
-              }}
-              onClick={(ev) =>
-                onSelectSession(session.id, {
-                  shiftKey: ev.shiftKey,
-                  visibleSessionIds: filteredSessionIds,
-                })
-              }
-            >
-              <span className={`runtime-dot runtime-dot--${session.runtimeId}`} />
-              <span className="session-item__body">
-                <span className="session-item__topline">
-                  <span className="session-item__title">{displayTitle}</span>
-                  {session.pinned ? (
-                    <span className="session-item__pin">
-                      <IconPinnedFilled size={14} title="已置顶" />
-                    </span>
-                  ) : null}
-                  <span className="session-item__time">
-                    {formatSessionTime(session.nativeUpdatedAt ?? session.updatedAt)}
-                  </span>
-                </span>
-                {displaySummary ? (
-                  <span className="session-item__summary">{displaySummary}</span>
+            <section className="session-project" key={group.key}>
+              <div
+                className="session-project__header"
+                title={group.path ?? "没有绑定工作目录的会话"}
+              >
+                <button
+                  type="button"
+                  className="session-project__toggle"
+                  aria-expanded={!collapsed}
+                  onClick={() =>
+                    setCollapsedProjects((current) => {
+                      const next = new Set(current);
+                      if (next.has(group.key)) next.delete(group.key);
+                      else next.add(group.key);
+                      return next;
+                    })
+                  }
+                >
+                  {collapsed ? <IconChevronRight size={14} /> : <IconChevronDown size={14} />}
+                  <IconFolder size={14} />
+                  <span className="session-project__name">{group.label}</span>
+                  <span className="session-project__count">{group.sessions.length}</span>
+                </button>
+                {group.path ? (
+                  <button
+                    type="button"
+                    className="session-project__add"
+                    title={`在 ${group.path} 新建会话`}
+                    aria-label={`在 ${group.label} 新建会话`}
+                    disabled={busy}
+                    onClick={() => onCreateSession(group.path)}
+                  >
+                    <IconPlus size={14} />
+                  </button>
                 ) : null}
-                <span className="session-item__status-row">
-                  <span className="session-item__state" title={`Host 状态：${stateLabel}`}>
-                    <span
-                      className={`status-dot ${stateDotClass(state)}`}
-                      aria-hidden="true"
-                    />
-                    {stateLabel}
-                  </span>
-                  {unread ? (
-                    <span
-                      className={`session-item__unread session-item__unread--${unread}`}
-                      aria-label={unread === "completed" ? "后台会话已完成" : "后台会话发生错误"}
-                    >
-                      {unread === "completed" ? "完成" : "异常"}
-                    </span>
-                  ) : null}
-                </span>
-              </span>
-            </button>
+              </div>
+              {!collapsed ? (
+                <div className="session-project__sessions">
+                  {group.sessions.map(renderSession)}
+                </div>
+              ) : null}
+            </section>
           );
         })}
         {!showArchived && loadingMore ? (
@@ -344,6 +488,15 @@ export function SessionSidebar({
         ) : null}
       </div>
 
+      <div
+        className="sidebar__footer-stats"
+        aria-label={`${processStats.total} 个会话，${processStats.running} 个运行中，${processStats.processes} 个活跃进程`}
+        title="当前引擎的非归档会话 · 运行中 · 活跃进程"
+      >
+        <span>会话 {processStats.total}</span>
+        <span>运行 {processStats.running}</span>
+        <span>进程 {processStats.processes}</span>
+      </div>
       <button
         type="button"
         className="sidebar__footer"
@@ -351,10 +504,7 @@ export function SessionSidebar({
         onClick={onOpenSettings}
       >
         <IconSettings size={16} />
-        <span className="sidebar__footer-meta">
-          <span className="sidebar__footer-name">设置</span>
-          <span className="sidebar__footer-sub">主题 · 引擎 · 权限</span>
-        </span>
+        <span className="sidebar__footer-name">设置</span>
       </button>
     </aside>
   );

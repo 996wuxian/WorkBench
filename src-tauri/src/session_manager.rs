@@ -1,7 +1,8 @@
 //! Host session manager: owns FSM + live runtime sessions + event fan-out.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -543,8 +544,10 @@ impl SessionManager {
         let now = Utc::now().to_rfc3339();
         let title = format!("{} · 新会话", runtime.display_name());
 
-        let project_path =
-            project_path.or_else(|| default_project_dir().ok().map(|p| p.display().to_string()));
+        let project_path = match project_path {
+            Some(path) => Some(validate_project_dir(&path)?),
+            None => None,
+        };
 
         let meta = SessionMeta {
             id: id.clone(),
@@ -622,6 +625,29 @@ impl SessionManager {
         }
         slot.meta = next.clone();
         Ok(next)
+    }
+
+    pub fn update_project_path(
+        &self,
+        session_id: &str,
+        project_path: String,
+    ) -> Result<SessionMeta, String> {
+        let project_path = validate_project_dir(&project_path)?;
+
+        let mut guard = self.inner.lock();
+        let slot = guard
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session not found".to_string())?;
+        if slot.persisted || slot.live.is_some() {
+            return Err("工作目录只能在首次发送前修改".into());
+        }
+        if !matches!(slot.fsm.state(), SessionState::Idle | SessionState::Disconnected) {
+            return Err("当前会话状态不能修改工作目录".into());
+        }
+
+        slot.meta.project_path = Some(project_path);
+        Ok(slot.meta.clone())
     }
 
     pub fn session_meta(&self, session_id: &str) -> Result<SessionMeta, String> {
@@ -971,13 +997,15 @@ impl SessionManager {
                 }
             }
 
+            let cwd = match slot.meta.project_path.clone() {
+                Some(path) => PathBuf::from(path),
+                None => {
+                    let path = default_project_dir().map_err(|error| error.to_string())?;
+                    slot.meta.project_path = Some(path.display().to_string());
+                    path
+                }
+            };
             slot.fsm.start_connect().map_err(|e| e.to_string())?;
-            let cwd = slot
-                .meta
-                .project_path
-                .clone()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| default_project_dir().unwrap_or_else(|_| PathBuf::from(".")));
             (
                 cwd,
                 slot.meta.model_id.clone(),
@@ -1894,8 +1922,39 @@ fn process_exit_error(code: Option<i32>) -> AgentError {
 }
 
 fn default_project_dir() -> std::io::Result<PathBuf> {
-    let cwd = std::env::current_dir()?;
-    Ok(workspace_root_from_dir(&cwd).unwrap_or(cwd))
+    #[cfg(target_os = "windows")]
+    {
+        let mut last_error = None;
+        for root in [PathBuf::from(r"D:\"), PathBuf::from(r"X:\")] {
+            if !root.is_dir() {
+                continue;
+            }
+            let path = root.join("workbench");
+            match fs::create_dir_all(&path) {
+                Ok(()) => return Ok(path),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if let Some(error) = last_error {
+            tracing::warn!("failed to create preferred Workbench directory: {error}");
+        }
+    }
+
+    let path = crate::process_util::user_home().join("workbench");
+    fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
+fn validate_project_dir(project_path: &str) -> Result<String, String> {
+    let project_path = project_path.trim();
+    if project_path.is_empty() {
+        return Err("project path cannot be empty".into());
+    }
+    let path = PathBuf::from(project_path);
+    if !path.is_absolute() || !path.is_dir() {
+        return Err(format!("project directory does not exist: {}", path.display()));
+    }
+    Ok(path.display().to_string())
 }
 
 fn resolve_claude_permission_bridge_script_path(app: &AppHandle) -> Option<PathBuf> {
@@ -1913,21 +1972,6 @@ fn resolve_claude_permission_bridge_script_path(app: &AppHandle) -> Option<PathB
                 .join("claude_permission_bridge.mjs");
             path.is_file().then_some(path)
         })
-}
-
-fn workspace_root_from_dir(dir: &Path) -> Option<PathBuf> {
-    if dir.file_name().and_then(|name| name.to_str()) == Some("src-tauri") {
-        let parent = dir.parent()?;
-        if parent.join("package.json").is_file() && parent.join("src-tauri").is_dir() {
-            return Some(parent.to_path_buf());
-        }
-    }
-
-    if dir.join("package.json").is_file() && dir.join("src-tauri").is_dir() {
-        return Some(dir.to_path_buf());
-    }
-
-    None
 }
 
 #[cfg(test)]
