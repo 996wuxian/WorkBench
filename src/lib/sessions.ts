@@ -6,6 +6,7 @@ import { defaultPermissionMode } from "./permissions";
 import { runtimeLabel } from "./runtimes";
 import type {
   RuntimeId,
+  SessionDeleteOptions,
   SessionDeleteResult,
   SessionMeta,
   SessionSnapshot,
@@ -72,8 +73,12 @@ export function canChangeSessionSettings(state: SessionState): boolean {
 
 export async function deleteSessionById(
   sessionId: string,
+  options: SessionDeleteOptions = {},
 ): Promise<SessionDeleteResult> {
-  return invoke<SessionDeleteResult>("session_delete", { sessionId });
+  return invoke<SessionDeleteResult>("session_delete", {
+    sessionId,
+    nativeDeleteMode: options.nativeDeleteMode ?? "official",
+  });
 }
 
 export function sessionDisplayTitle(session: SessionMeta): string {

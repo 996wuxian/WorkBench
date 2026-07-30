@@ -17,6 +17,7 @@ import {
   IconTrash,
 } from "./icons";
 import { SettingsDialog, type SettingsSection } from "./SettingsDialog";
+import type { ProjectContextTarget } from "./SessionSidebar";
 import type {
   KeyboardEvent as ReactKeyboardEvent,
   RefObject,
@@ -36,6 +37,19 @@ type SessionContextMenu = {
   left: number;
   top: number;
 } | null;
+
+type ProjectContextMenu = (ProjectContextTarget & {
+  left: number;
+  top: number;
+  pinned: boolean;
+}) | null;
+
+type DeleteTargetItem = {
+  id: string;
+  title: string;
+  path: string;
+  nativeLabel: string | null;
+};
 
 type Props = {
   settingsOpen: boolean;
@@ -69,6 +83,10 @@ type Props = {
   onExportSessionTrace: (sessionId: string) => void;
   onToggleSessionArchived: (sessionId: string, archived: boolean) => void;
   onRequestDeleteSessions: (sessionIds: string[]) => void;
+  projectContextMenu: ProjectContextMenu;
+  projectContextMenuRef: RefObject<HTMLDivElement | null>;
+  onToggleProjectPinned: (projectKey: string, pinned: boolean, label: string) => void;
+  onRequestDeleteProjectSessions: (project: ProjectContextTarget) => void;
   renameSessionId: string | null;
   renameSessionTitle: string;
   renameSessionBusy: boolean;
@@ -77,12 +95,17 @@ type Props = {
   onCloseRename: () => void;
   onConfirmRename: () => void;
   deleteSessionIds: string[];
+  deleteDialogTitle: string;
+  deleteDialogSub: string;
+  deleteDialogNote: string;
   deleteTargetSessions: SessionMeta[];
-  deleteTargetPath: string;
+  deleteTargetItems: DeleteTargetItem[];
   deleteSessionBusy: boolean;
   deleteSessionError: string | null;
+  canDeleteWorkbenchOnly: boolean;
   onCloseDelete: () => void;
   onConfirmDelete: () => void;
+  onConfirmDeleteWorkbenchOnly: () => void;
 };
 
 export function AppOverlays({
@@ -117,6 +140,10 @@ export function AppOverlays({
   onExportSessionTrace,
   onToggleSessionArchived,
   onRequestDeleteSessions,
+  projectContextMenu,
+  projectContextMenuRef,
+  onToggleProjectPinned,
+  onRequestDeleteProjectSessions,
   renameSessionId,
   renameSessionTitle,
   renameSessionBusy,
@@ -125,12 +152,17 @@ export function AppOverlays({
   onCloseRename,
   onConfirmRename,
   deleteSessionIds,
+  deleteDialogTitle,
+  deleteDialogSub,
+  deleteDialogNote,
   deleteTargetSessions,
-  deleteTargetPath,
+  deleteTargetItems,
   deleteSessionBusy,
   deleteSessionError,
+  canDeleteWorkbenchOnly,
   onCloseDelete,
   onConfirmDelete,
+  onConfirmDeleteWorkbenchOnly,
 }: Props) {
   const [portalHost, setPortalHost] = useState<HTMLElement | null>(null);
 
@@ -156,6 +188,23 @@ export function AppOverlays({
   }, [sessionContextMenu, sessionContextMenuRef]);
 
   useEffect(() => {
+    if (!projectContextMenu) return;
+    const frame = requestAnimationFrame(() => {
+      const menu = projectContextMenuRef.current;
+      if (!menu) return;
+      const rect = menu.getBoundingClientRect();
+      const left = Math.max(8, Math.min(rect.left, window.innerWidth - rect.width - 8));
+      const top = Math.max(8, Math.min(rect.top, window.innerHeight - rect.height - 8));
+      menu.style.left = `${left}px`;
+      menu.style.top = `${top}px`;
+      menu
+        .querySelector<HTMLButtonElement>('button[role="menuitem"]:not(:disabled)')
+        ?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [projectContextMenu, projectContextMenuRef]);
+
+  useEffect(() => {
     if (!renameSessionId || renameSessionBusy) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onCloseRename();
@@ -167,9 +216,9 @@ export function AppOverlays({
   const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
     const items = Array.from(
-      sessionContextMenuRef.current?.querySelectorAll<HTMLButtonElement>(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>(
         'button[role="menuitem"]:not(:disabled)',
-      ) ?? [],
+      ),
     );
     if (items.length === 0) return;
     event.preventDefault();
@@ -426,6 +475,64 @@ export function AppOverlays({
           )
         : null}
 
+      {projectContextMenu
+        ? createPortal(
+            <div
+              ref={projectContextMenuRef}
+              className="session-context-menu"
+              role="menu"
+              style={{
+                left: projectContextMenu.left,
+                top: projectContextMenu.top,
+              }}
+              onMouseDown={(ev) => ev.stopPropagation()}
+              onKeyDown={handleMenuKeyDown}
+              aria-label={`${projectContextMenu.label} 目录菜单`}
+            >
+              <div className="session-context-menu__title">{projectContextMenu.label}</div>
+              <button
+                type="button"
+                role="menuitem"
+                className="session-context-menu__item"
+                onClick={() => {
+                  if (projectContextMenu) {
+                    onToggleProjectPinned(
+                      projectContextMenu.key,
+                      !projectContextMenu.pinned,
+                      projectContextMenu.label,
+                    );
+                  }
+                }}
+              >
+                {projectContextMenu.pinned ? (
+                  <IconPinnedOff size={15} />
+                ) : (
+                  <IconPinned size={15} />
+                )}
+                <span>{projectContextMenu.pinned ? "取消置顶" : "置顶目录"}</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="session-context-menu__item session-context-menu__item--danger"
+                onClick={() => {
+                  if (projectContextMenu) {
+                    onRequestDeleteProjectSessions(projectContextMenu);
+                  }
+                }}
+              >
+                <IconTrash size={15} />
+                <span>
+                  {projectContextMenu.sessions.length > 1
+                    ? `删除该目录下的 ${projectContextMenu.sessions.length} 个会话`
+                    : "删除该目录下的会话"}
+                </span>
+              </button>
+            </div>,
+            overlayHost,
+          )
+        : null}
+
       {renameSessionId
         ? createPortal(
             <div
@@ -520,15 +627,18 @@ export function AppOverlays({
                 if (ev.target === ev.currentTarget) onCloseDelete();
               }}
             >
-              <section className="settings-dialog session-delete-dialog" role="dialog" aria-modal="true" aria-label="删除会话">
+              <section
+                className="settings-dialog session-delete-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-label={deleteDialogTitle}
+              >
                 <div className="settings-dialog__head">
                   <div>
                     <div className="settings-dialog__title">
-                      {deleteSessionIds.length > 1
-                        ? `删除 ${deleteSessionIds.length} 个会话`
-                        : "删除会话"}
+                      {deleteDialogTitle}
                     </div>
-                    <div className="settings-dialog__sub">删除后会移除会话文件夹和记录</div>
+                    <div className="settings-dialog__sub">{deleteDialogSub}</div>
                   </div>
                   <button
                     type="button"
@@ -542,25 +652,43 @@ export function AppOverlays({
                   </button>
                 </div>
                 <div className="settings-dialog__body session-delete-dialog__body">
-                  <div className="session-delete-dialog__title">
-                    {deleteSessionIds.length === 1
-                      ? (deleteTargetSessions[0]?.title ?? deleteSessionIds[0])
-                      : deleteSessionIds
-                          .map(
-                            (sessionId) =>
-                              deleteTargetSessions.find(
-                                (session) => session.id === sessionId,
-                              )?.title ?? sessionId,
-                          )
-                          .join("、")}
+                  <div className="session-delete-dialog__content">
+                    <div className="session-delete-dialog__title">
+                      {deleteSessionIds.length === 1
+                        ? (deleteTargetSessions[0]?.title ?? deleteSessionIds[0])
+                        : `将删除 ${deleteSessionIds.length} 个会话`}
+                    </div>
+                    <div className="session-delete-dialog__list" role="list">
+                      {deleteTargetItems.map((item, index) => (
+                        <div
+                          className="session-delete-dialog__item"
+                          role="listitem"
+                          key={item.id}
+                        >
+                          <div className="session-delete-dialog__item-index">
+                            {index + 1}
+                          </div>
+                          <div className="session-delete-dialog__item-main">
+                            <div className="session-delete-dialog__item-title">
+                              {item.title}
+                            </div>
+                            <div className="session-delete-dialog__item-path">
+                              {item.path}
+                            </div>
+                            {item.nativeLabel ? (
+                              <div className="session-delete-dialog__item-native">
+                                {item.nativeLabel}
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="session-delete-dialog__note">{deleteDialogNote}</div>
+                    {deleteSessionError ? (
+                      <div className="session-delete-dialog__error">{deleteSessionError}</div>
+                    ) : null}
                   </div>
-                  <div className="session-delete-dialog__path">{deleteTargetPath}</div>
-                  <div className="session-delete-dialog__note">
-                    此操作会删除会话及其文件夹内容，无法恢复。
-                  </div>
-                  {deleteSessionError ? (
-                    <div className="session-delete-dialog__error">{deleteSessionError}</div>
-                  ) : null}
                   <div className="session-delete-dialog__actions">
                     <button
                       type="button"
@@ -570,6 +698,16 @@ export function AppOverlays({
                     >
                       取消
                     </button>
+                    {canDeleteWorkbenchOnly ? (
+                      <button
+                        type="button"
+                        className="btn btn--ghost"
+                        disabled={deleteSessionBusy}
+                        onClick={onConfirmDeleteWorkbenchOnly}
+                      >
+                        仅删除 Workbench 记录
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className="btn btn--danger"

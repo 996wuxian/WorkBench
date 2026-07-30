@@ -1,8 +1,8 @@
 //! Read-only import of runtime-native session indexes.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader as StdBufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use crate::process_util;
@@ -10,6 +10,7 @@ use crate::runtime::manifest::{self, RuntimeManifest};
 use crate::runtime::{NativeSessionSource, RuntimeId};
 use crate::session_store::StoredChatMessage;
 use chrono::{TimeZone, Utc};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -516,6 +517,244 @@ pub async fn load_codex_thread_messages(thread_id: &str) -> Result<Vec<StoredCha
         .await?;
 
     Ok(parse_codex_thread_messages(&result))
+}
+
+pub async fn delete_codex_thread(thread_id: &str) -> Result<(), String> {
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return Err("Codex native thread id is empty".into());
+    }
+
+    let manifest = manifest::get(RuntimeId::CODEX)
+        .ok_or_else(|| "Codex runtime is not registered".to_string())?;
+    let cli = manifest
+        .resolve_cli_path()
+        .ok_or_else(|| format!("{} CLI not found", manifest.display_name))?;
+    let mut client = JsonRpcClient::spawn(&cli)?;
+    client.initialize().await?;
+    client
+        .request(
+            "thread/delete",
+            json!({
+                "threadId": thread_id
+            }),
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn delete_codex_thread_direct(thread_id: &str) -> Result<(), String> {
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return Err("Codex native thread id is empty".into());
+    }
+
+    let manifest = manifest::get(RuntimeId::CODEX)
+        .ok_or_else(|| "Codex runtime is not registered".to_string())?;
+    let home = manifest.resolve_home();
+    let thread_id = thread_id.to_string();
+
+    tokio::task::spawn_blocking(move || delete_codex_thread_direct_blocking(&home, &thread_id))
+        .await
+        .map_err(|err| format!("Codex direct delete task failed: {err}"))?
+}
+
+fn delete_codex_thread_direct_blocking(home: &Path, thread_id: &str) -> Result<(), String> {
+    let state = find_codex_state_thread(home, thread_id)?;
+    let rollout_path = PathBuf::from(&state.rollout_path);
+    ensure_codex_rollout_path(home, &rollout_path)?;
+
+    let mut conn = Connection::open(&state.db_path)
+        .map_err(|err| format!("open Codex state database failed: {err}"))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|err| format!("configure Codex state database failed: {err}"))?;
+    let tx = conn
+        .transaction()
+        .map_err(|err| format!("begin Codex state delete transaction failed: {err}"))?;
+
+    delete_codex_thread_refs(&tx, thread_id)?;
+
+    if rollout_path.is_file() {
+        fs::remove_file(&rollout_path).map_err(|err| {
+            format!(
+                "delete Codex rollout file {} failed: {err}",
+                rollout_path.display()
+            )
+        })?;
+    }
+
+    tx.commit()
+        .map_err(|err| format!("commit Codex state delete transaction failed: {err}"))?;
+    Ok(())
+}
+
+struct CodexStateThread {
+    db_path: PathBuf,
+    rollout_path: String,
+}
+
+fn find_codex_state_thread(home: &Path, thread_id: &str) -> Result<CodexStateThread, String> {
+    let mut candidates = codex_state_db_candidates(home)?;
+    candidates.sort();
+    candidates.reverse();
+
+    for db_path in candidates {
+        let Ok(conn) =
+            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        else {
+            continue;
+        };
+        if !table_has_columns(&conn, "threads", &["id", "rollout_path"])? {
+            continue;
+        }
+        let rollout_path = conn
+            .query_row(
+                "SELECT rollout_path FROM threads WHERE id = ?1",
+                params![thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|err| format!("query Codex thread index failed: {err}"))?;
+        if let Some(rollout_path) = rollout_path {
+            return Ok(CodexStateThread {
+                db_path,
+                rollout_path,
+            });
+        }
+    }
+
+    Err(format!(
+        "Codex direct delete unavailable: thread {thread_id} was not found in state_*.sqlite"
+    ))
+}
+
+fn codex_state_db_candidates(home: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries = fs::read_dir(home)
+        .map_err(|err| format!("read Codex home {} failed: {err}", home.display()))?;
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let is_state_db =
+            name == "state.sqlite" || (name.starts_with("state_") && name.ends_with(".sqlite"));
+        if is_state_db {
+            candidates.push(path);
+        }
+    }
+    Ok(candidates)
+}
+
+fn ensure_codex_rollout_path(home: &Path, rollout_path: &Path) -> Result<(), String> {
+    let sessions_root = home
+        .join("sessions")
+        .canonicalize()
+        .map_err(|err| format!("resolve Codex sessions root failed: {err}"))?;
+
+    if rollout_path.is_file() {
+        let canonical = rollout_path
+            .canonicalize()
+            .map_err(|err| format!("resolve Codex rollout file failed: {err}"))?;
+        if canonical.starts_with(&sessions_root) {
+            return Ok(());
+        }
+    } else if let Some(parent) = rollout_path.parent().filter(|parent| parent.is_dir()) {
+        let canonical_parent = parent
+            .canonicalize()
+            .map_err(|err| format!("resolve Codex rollout parent failed: {err}"))?;
+        if canonical_parent.starts_with(&sessions_root) {
+            return Ok(());
+        }
+    }
+
+    Err(format!(
+        "Codex direct delete refused: rollout path is outside {}: {}",
+        sessions_root.display(),
+        rollout_path.display()
+    ))
+}
+
+fn delete_codex_thread_refs(tx: &Transaction<'_>, thread_id: &str) -> Result<(), String> {
+    if !table_has_columns(tx, "threads", &["id"])? {
+        return Err("Codex direct delete unavailable: threads table is missing id".into());
+    }
+
+    delete_if_table_has_columns(tx, "thread_dynamic_tools", &["thread_id"], thread_id)?;
+    delete_if_table_has_columns(
+        tx,
+        "thread_spawn_edges",
+        &["parent_thread_id", "child_thread_id"],
+        thread_id,
+    )?;
+    delete_if_table_has_columns(tx, "agent_jobs", &["thread_id"], thread_id)?;
+
+    let deleted = tx
+        .execute("DELETE FROM threads WHERE id = ?1", params![thread_id])
+        .map_err(|err| format!("delete Codex thread index failed: {err}"))?;
+    if deleted != 1 {
+        return Err(format!(
+            "Codex direct delete refused: expected 1 thread row for {thread_id}, deleted {deleted}"
+        ));
+    }
+    Ok(())
+}
+
+fn delete_if_table_has_columns(
+    tx: &Transaction<'_>,
+    table: &str,
+    columns: &[&str],
+    thread_id: &str,
+) -> Result<(), String> {
+    if !table_has_columns(tx, table, columns)? {
+        return Ok(());
+    }
+
+    let where_clause = columns
+        .iter()
+        .map(|column| format!("{column} = ?1"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let sql = format!("DELETE FROM {table} WHERE {where_clause}");
+    tx.execute(&sql, params![thread_id])
+        .map_err(|err| format!("delete Codex {table} refs failed: {err}"))?;
+    Ok(())
+}
+
+trait SqliteSchema {
+    fn table_columns(&self, table: &str) -> rusqlite::Result<Vec<String>>;
+}
+
+impl SqliteSchema for Connection {
+    fn table_columns(&self, table: &str) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.prepare(&format!("PRAGMA table_info({table})"))?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        rows.collect()
+    }
+}
+
+impl SqliteSchema for Transaction<'_> {
+    fn table_columns(&self, table: &str) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.prepare(&format!("PRAGMA table_info({table})"))?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        rows.collect()
+    }
+}
+
+fn table_has_columns(
+    db: &impl SqliteSchema,
+    table: &str,
+    required: &[&str],
+) -> Result<bool, String> {
+    let columns = db
+        .table_columns(table)
+        .map_err(|err| format!("read Codex {table} schema failed: {err}"))?;
+    Ok(required
+        .iter()
+        .all(|required| columns.iter().any(|column| column == required)))
 }
 
 fn parse_codex_thread_messages(result: &Value) -> Vec<StoredChatMessage> {

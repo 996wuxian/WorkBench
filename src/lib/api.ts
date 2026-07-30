@@ -9,6 +9,7 @@ import type {
   RuntimeOverride,
   NativeSessionSyncResult,
   SessionDeleteResult,
+  SessionDeleteOptions,
   SessionExportResult,
   SessionTraceExportResult,
   SessionSelectionCatalog,
@@ -84,8 +85,11 @@ export const api = {
     call<SessionExportResult>("session_export_markdown", { sessionId }),
   exportSessionTrace: (sessionId: string) =>
     call<SessionTraceExportResult>("session_export_trace", { sessionId }),
-  deleteSession: (sessionId: string) =>
-    call<SessionDeleteResult>("session_delete", { sessionId }),
+  deleteSession: (sessionId: string, options: SessionDeleteOptions = {}) =>
+    call<SessionDeleteResult>("session_delete", {
+      sessionId,
+      nativeDeleteMode: options.nativeDeleteMode ?? "official",
+    }),
   syncNativeSessions: (
     runtimeId: string,
     limit?: number,

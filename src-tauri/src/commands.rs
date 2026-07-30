@@ -149,7 +149,11 @@ pub fn skills_list(
     }
 
     let mut roots = Vec::<(PathBuf, &'static str)>::new();
-    if let Some(raw) = project_path.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(raw) = project_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         let project = PathBuf::from(raw);
         // Generic `.agents/skills` is used by Codex; runtime-specific folders
         // cover CLIs that keep skills under their own project namespace.
@@ -379,7 +383,11 @@ try {
     #[cfg(target_os = "linux")]
     {
         let mut command = Command::new("zenity");
-        command.args(["--file-selection", "--directory", "--title=选择会话工作目录"]);
+        command.args([
+            "--file-selection",
+            "--directory",
+            "--title=选择会话工作目录",
+        ]);
         if let Some(path) = initial_path.filter(|path| !path.trim().is_empty()) {
             command.arg(format!("--filename={path}/"));
         }
@@ -495,7 +503,31 @@ pub fn session_export_trace(
 pub async fn session_delete(
     mgr: tauri::State<'_, Arc<SessionManager>>,
     session_id: String,
+    delete_native: Option<bool>,
+    native_delete_mode: Option<String>,
 ) -> Result<SessionDeleteResult, String> {
+    let meta = mgr.session_meta(&session_id)?;
+    let native_delete_mode = native_delete_mode.unwrap_or_else(|| {
+        if delete_native.unwrap_or(true) {
+            "official".to_string()
+        } else {
+            "skip".to_string()
+        }
+    });
+    if meta.runtime_id == RuntimeId::CODEX {
+        if let Some(thread_id) = meta
+            .native_thread_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+        {
+            match native_delete_mode.as_str() {
+                "official" => crate::native_sessions::delete_codex_thread(thread_id).await?,
+                "direct" => crate::native_sessions::delete_codex_thread_direct(thread_id).await?,
+                "skip" => {}
+                other => return Err(format!("unsupported native delete mode: {other}")),
+            }
+        }
+    }
     let path = session_store::session_dir_path(&session_id).map_err(|e| e.to_string())?;
     let active_session_id = mgr.delete_session(&session_id).await?;
     Ok(SessionDeleteResult {

@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, type RefObject } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type RefObject,
+} from "react";
 
 import { RuntimeSelect, type RuntimeOption } from "./RuntimeSelect";
 import {
@@ -40,6 +47,10 @@ type SessionProjectGroup = {
   sessions: SessionMeta[];
 };
 
+export type ProjectContextTarget = SessionProjectGroup & {
+  pinned: boolean;
+};
+
 const OTHER_PROJECT_KEY = "__other_sessions__";
 
 function normalizeProjectKey(projectPath: string): string {
@@ -75,11 +86,19 @@ type Props = {
   onShowArchivedChange: (showArchived: boolean) => void;
   onSessionFilterChange: (value: string) => void;
   selectedSessionIds: string[];
+  projectOrder: string[];
+  pinnedProjectKeys: string[];
   onSelectSession: (
     sessionId: string,
     options: { shiftKey: boolean; visibleSessionIds: string[] },
   ) => void;
   onSessionContextMenu: (sessionId: string, left: number, top: number) => void;
+  onProjectContextMenu: (project: ProjectContextTarget, left: number, top: number) => void;
+  onProjectReorder: (
+    sourceKey: string,
+    targetKey: string,
+    visibleProjectKeys: string[],
+  ) => void;
   onSyncNativeSessions: (mode: "reset" | "more") => void;
   onOpenSettings: () => void;
 };
@@ -108,14 +127,24 @@ export function SessionSidebar({
   onShowArchivedChange,
   onSessionFilterChange,
   selectedSessionIds,
+  projectOrder,
+  pinnedProjectKeys,
   onSelectSession,
   onSessionContextMenu,
+  onProjectContextMenu,
+  onProjectReorder,
   onSyncNativeSessions,
   onOpenSettings,
 }: Props) {
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(
     () => new Set(),
   );
+  const [draggingProjectKey, setDraggingProjectKey] = useState<string | null>(null);
+  const [dragOverProjectKey, setDragOverProjectKey] = useState<string | null>(null);
+  const longPressTimerRef = useRef<number | null>(null);
+  const longPressPointerIdRef = useRef<number | null>(null);
+  const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
+  const suppressProjectToggleRef = useRef<string | null>(null);
   const runtimeSessions = useMemo(
     () => sessions.filter((session) => session.runtimeId === runtimePick),
     [runtimePick, sessions],
@@ -159,12 +188,26 @@ export function SessionSidebar({
         sessions: [session],
       });
     }
+    const pinnedSet = new Set(pinnedProjectKeys);
+    const orderIndex = new Map(projectOrder.map((key, index) => [key, index]));
     return [...groups.values()].sort((a, b) => {
+      const aPinned = pinnedSet.has(a.key);
+      const bPinned = pinnedSet.has(b.key);
+      if (aPinned !== bPinned) return aPinned ? -1 : 1;
+      const aIndex = orderIndex.get(a.key);
+      const bIndex = orderIndex.get(b.key);
+      if (aIndex !== undefined && bIndex !== undefined) return aIndex - bIndex;
+      if (aIndex !== undefined) return -1;
+      if (bIndex !== undefined) return 1;
       if (a.key === OTHER_PROJECT_KEY) return 1;
       if (b.key === OTHER_PROJECT_KEY) return -1;
       return a.label.localeCompare(b.label, "zh-CN");
     });
-  }, [filteredSessions]);
+  }, [filteredSessions, pinnedProjectKeys, projectOrder]);
+  const projectKeys = useMemo(
+    () => projectGroups.map((group) => group.key),
+    [projectGroups],
+  );
   const filteredSessionIds = useMemo(
     () => filteredSessions.map((session) => session.id),
     [filteredSessions],
@@ -190,6 +233,15 @@ export function SessionSidebar({
     return path ? normalizeProjectKey(path) : activeSession ? OTHER_PROJECT_KEY : null;
   }, [activeId, sessions]);
 
+  useEffect(
+    () => () => {
+      if (longPressTimerRef.current !== null) {
+        window.clearTimeout(longPressTimerRef.current);
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!activeProjectKey) return;
     setCollapsedProjects((current) => {
@@ -208,6 +260,89 @@ export function SessionSidebar({
     if (hasMore === false) return;
     if (loadingMore || syncing) return;
     onSyncNativeSessions("more");
+  };
+
+  const clearProjectLongPress = () => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    longPressPointerIdRef.current = null;
+    longPressStartRef.current = null;
+  };
+
+  const findProjectKeyAtPoint = (clientX: number, clientY: number) => {
+    const element = document.elementFromPoint(clientX, clientY);
+    return element?.closest<HTMLElement>("[data-project-key]")?.dataset.projectKey ?? null;
+  };
+
+  const beginProjectLongPress = (
+    event: ReactPointerEvent<HTMLElement>,
+    group: SessionProjectGroup,
+  ) => {
+    if (event.button !== 0 || projectGroups.length < 2) return;
+    clearProjectLongPress();
+    const target = event.currentTarget;
+    longPressPointerIdRef.current = event.pointerId;
+    longPressStartRef.current = { x: event.clientX, y: event.clientY };
+    longPressTimerRef.current = window.setTimeout(() => {
+      longPressTimerRef.current = null;
+      suppressProjectToggleRef.current = group.key;
+      setDraggingProjectKey(group.key);
+      setDragOverProjectKey(group.key);
+      target.setPointerCapture?.(event.pointerId);
+    }, 360);
+  };
+
+  const moveProjectDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    const start = longPressStartRef.current;
+    if (
+      start &&
+      longPressTimerRef.current !== null &&
+      Math.abs(event.clientX - start.x) + Math.abs(event.clientY - start.y) > 10
+    ) {
+      clearProjectLongPress();
+      return;
+    }
+    if (!draggingProjectKey) return;
+    event.preventDefault();
+    const overKey = findProjectKeyAtPoint(event.clientX, event.clientY);
+    if (overKey && projectKeys.includes(overKey)) {
+      setDragOverProjectKey(overKey);
+    }
+  };
+
+  const finishProjectDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    const sourceKey = draggingProjectKey;
+    const targetKey = dragOverProjectKey;
+    if (longPressPointerIdRef.current === event.pointerId) {
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+    }
+    clearProjectLongPress();
+    setDraggingProjectKey(null);
+    setDragOverProjectKey(null);
+    if (sourceKey && targetKey && sourceKey !== targetKey) {
+      onProjectReorder(sourceKey, targetKey, projectKeys);
+    }
+  };
+
+  const cancelProjectDrag = () => {
+    clearProjectLongPress();
+    setDraggingProjectKey(null);
+    setDragOverProjectKey(null);
+  };
+
+  const toggleProjectCollapsed = (groupKey: string) => {
+    if (suppressProjectToggleRef.current === groupKey) {
+      suppressProjectToggleRef.current = null;
+      return;
+    }
+    setCollapsedProjects((current) => {
+      const next = new Set(current);
+      if (next.has(groupKey)) next.delete(groupKey);
+      else next.add(groupKey);
+      return next;
+    });
   };
 
   const renderSession = (session: SessionMeta) => {
@@ -432,28 +567,55 @@ export function SessionSidebar({
         ) : null}
         {projectGroups.map((group) => {
           const collapsed = !sessionFilter.trim() && collapsedProjects.has(group.key);
+          const pinned = pinnedProjectKeys.includes(group.key);
           return (
-            <section className="session-project" key={group.key}>
+            <section
+              className={
+                "session-project" +
+                (pinned ? " is-pinned" : "") +
+                (draggingProjectKey === group.key ? " is-dragging" : "") +
+                (dragOverProjectKey === group.key && draggingProjectKey !== group.key
+                  ? " is-drag-over"
+                  : "")
+              }
+              key={group.key}
+              data-project-key={group.key}
+            >
               <div
                 className="session-project__header"
                 title={group.path ?? "没有绑定工作目录的会话"}
+                onContextMenu={(ev) => {
+                  if (!group.path) return;
+                  ev.preventDefault();
+                  ev.stopPropagation();
+                  onProjectContextMenu(
+                    { ...group, pinned },
+                    Math.max(8, Math.min(ev.clientX, window.innerWidth - 252)),
+                    Math.max(8, Math.min(ev.clientY, window.innerHeight - 220)),
+                  );
+                }}
               >
                 <button
                   type="button"
                   className="session-project__toggle"
                   aria-expanded={!collapsed}
-                  onClick={() =>
-                    setCollapsedProjects((current) => {
-                      const next = new Set(current);
-                      if (next.has(group.key)) next.delete(group.key);
-                      else next.add(group.key);
-                      return next;
-                    })
-                  }
+                  onClick={() => toggleProjectCollapsed(group.key)}
+                  onPointerDown={(event) => beginProjectLongPress(event, group)}
+                  onPointerMove={moveProjectDrag}
+                  onPointerUp={finishProjectDrag}
+                  onPointerCancel={cancelProjectDrag}
+                  onPointerLeave={() => {
+                    if (!draggingProjectKey) clearProjectLongPress();
+                  }}
                 >
                   {collapsed ? <IconChevronRight size={14} /> : <IconChevronDown size={14} />}
                   <IconFolder size={14} />
                   <span className="session-project__name">{group.label}</span>
+                  {pinned ? (
+                    <span className="session-project__pin">
+                      <IconPinnedFilled size={12} title="目录已置顶" />
+                    </span>
+                  ) : null}
                   <span className="session-project__count">{group.sessions.length}</span>
                 </button>
                 {group.path ? (

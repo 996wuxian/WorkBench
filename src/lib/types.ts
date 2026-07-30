@@ -152,6 +152,12 @@ export interface SessionDeleteResult {
   activeSessionId?: string | null;
 }
 
+export type NativeDeleteMode = "official" | "direct" | "skip";
+
+export interface SessionDeleteOptions {
+  nativeDeleteMode?: NativeDeleteMode;
+}
+
 export interface SessionExportResult {
   sessionId: string;
   path: string;

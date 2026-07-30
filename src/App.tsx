@@ -11,7 +11,10 @@ import {
 } from "./components/WindowControls";
 import { MessageList } from "./components/MessageList";
 import { PermissionBar } from "./components/PermissionBar";
-import { SessionSidebar } from "./components/SessionSidebar";
+import {
+  SessionSidebar,
+  type ProjectContextTarget,
+} from "./components/SessionSidebar";
 import { ComposerPanel } from "./components/ComposerPanel";
 import { SessionInspector } from "./components/SessionInspector";
 import { AppOverlays } from "./components/AppOverlays";
@@ -71,6 +74,7 @@ import type {
   ClaudeRouteStatus,
   ChatMessage,
   CodexRouteStatus,
+  NativeDeleteMode,
   PermissionDecision,
   PermissionMode,
   PermissionRequestEvent,
@@ -97,6 +101,31 @@ const INITIAL_VISIBLE_MESSAGES = 60;
 const HISTORY_BATCH_SIZE = 40;
 const CHAT_BOTTOM_THRESHOLD = 80;
 const CHAT_TOP_THRESHOLD = 48;
+const PROJECT_ORDER_STORAGE_KEY = "workbench.projectOrder";
+const PINNED_PROJECTS_STORAGE_KEY = "workbench.pinnedProjects";
+
+type DeleteSessionScope =
+  | { kind: "sessions" }
+  | { kind: "project"; label: string; path: string | null };
+
+function loadStringList(key: string): string[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) ?? "[]");
+    return Array.isArray(parsed)
+      ? parsed.filter((value): value is string => typeof value === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveStringList(key: string, values: string[]): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(values));
+  } catch {
+    // Local ordering is a UI preference; failing to persist must not block the app.
+  }
+}
 
 function runtimeRouteMode(runtime: RuntimeInfo): string {
   if (!runtime.enabled) return "disabled";
@@ -112,6 +141,33 @@ function runtimeConnectHint(runtimeId: RuntimeId): string {
   if (runtimeId === "grok") return "grok agent stdio";
   if (runtimeId === "kimi") return "kimi acp";
   return "runtime manifest";
+}
+
+function isCodexNativeDeleteError(message: string | null): boolean {
+  return Boolean(
+    message &&
+      message.includes("codex thread/delete failed") &&
+      message.includes("no such table: agent_jobs"),
+  );
+}
+
+function isCodexDeleteFallbackError(message: string | null): boolean {
+  return Boolean(
+    message &&
+      (isCodexNativeDeleteError(message) ||
+        message.includes("Codex direct delete")),
+  );
+}
+
+function formatDeleteSessionError(error: unknown): string {
+  const raw = String(error);
+  if (
+    raw.includes("codex thread/delete failed") &&
+    raw.includes("no such table: agent_jobs")
+  ) {
+    return `Codex 官方删除失败：当前 Codex app-server 状态库缺少 agent_jobs 表。Workbench 会话尚未删除；你可以直接删除 Codex 原生文件和索引，或仅删除 Workbench 记录。技术细节：${raw}`;
+  }
+  return `delete failed: ${raw}`;
 }
 
 function runtimeRouteDescription(runtime: RuntimeInfo): string {
@@ -189,8 +245,20 @@ export default function App() {
     left: number;
     top: number;
   } | null>(null);
+  const [projectContextMenu, setProjectContextMenu] = useState<
+    (ProjectContextTarget & { left: number; top: number }) | null
+  >(null);
   const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([]);
+  const [projectOrder, setProjectOrder] = useState<string[]>(() =>
+    loadStringList(PROJECT_ORDER_STORAGE_KEY),
+  );
+  const [pinnedProjectKeys, setPinnedProjectKeys] = useState<string[]>(() =>
+    loadStringList(PINNED_PROJECTS_STORAGE_KEY),
+  );
   const [deleteSessionIds, setDeleteSessionIds] = useState<string[]>([]);
+  const [deleteSessionScope, setDeleteSessionScope] = useState<DeleteSessionScope>({
+    kind: "sessions",
+  });
   const [deleteSessionBusy, setDeleteSessionBusy] = useState(false);
   const [deleteSessionError, setDeleteSessionError] = useState<string | null>(null);
   const [renameSessionId, setRenameSessionId] = useState<string | null>(null);
@@ -229,6 +297,14 @@ export default function App() {
   useEffect(() => {
     saveRuntimePick(runtimePick);
   }, [runtimePick]);
+
+  useEffect(() => {
+    saveStringList(PROJECT_ORDER_STORAGE_KEY, projectOrder);
+  }, [projectOrder]);
+
+  useEffect(() => {
+    saveStringList(PINNED_PROJECTS_STORAGE_KEY, pinnedProjectKeys);
+  }, [pinnedProjectKeys]);
 
   const active = useMemo(
     () =>
@@ -404,6 +480,7 @@ export default function App() {
   const messageScrollRef = useRef<HTMLDivElement | null>(null);
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const projectContextMenuRef = useRef<HTMLDivElement | null>(null);
   const sessionSelectionAnchorRef = useRef<string | null>(null);
   const stickToBottomRef = useRef(true);
   const pendingHistoryRestoreRef = useRef<{
@@ -1360,21 +1437,60 @@ export default function App() {
     [activateSession, beginSessionActivation, runtimePick, sessions],
   );
 
-  const requestDeleteSessions = useCallback((sessionIds: string[]) => {
+  const reorderProject = useCallback(
+    (sourceKey: string, targetKey: string, visibleProjectKeys: string[]) => {
+      if (sourceKey === targetKey) return;
+      setProjectOrder((prev) => {
+        const visible = visibleProjectKeys.filter(Boolean);
+        const nextVisible = visible.filter((key) => key !== sourceKey);
+        const targetIndex = nextVisible.indexOf(targetKey);
+        if (targetIndex < 0) return prev;
+        nextVisible.splice(targetIndex, 0, sourceKey);
+        const hidden = prev.filter(
+          (key) => !visible.includes(key) && !nextVisible.includes(key),
+        );
+        return [...nextVisible, ...hidden];
+      });
+      setStatusLine("已调整目录排序");
+    },
+    [],
+  );
+
+  const toggleProjectPinned = useCallback(
+    (projectKey: string, pinned: boolean, label: string) => {
+      setProjectContextMenu(null);
+      setPinnedProjectKeys((prev) => {
+        const next = prev.filter((key) => key !== projectKey);
+        return pinned ? [projectKey, ...next] : next;
+      });
+      setStatusLine(`${pinned ? "已置顶目录" : "已取消目录置顶"} · ${label}`);
+    },
+    [],
+  );
+
+  const requestDeleteSessions = useCallback((
+    sessionIds: string[],
+    scope: DeleteSessionScope = { kind: "sessions" },
+  ) => {
     const uniqueIds = Array.from(new Set(sessionIds.filter(Boolean)));
     if (uniqueIds.length === 0) return;
     setSessionContextMenu(null);
+    setProjectContextMenu(null);
     setDeleteSessionError(null);
+    setDeleteSessionScope(scope);
     setDeleteSessionIds(uniqueIds);
   }, []);
 
-  const confirmDeleteSession = useCallback(async () => {
+  const confirmDeleteSession = useCallback(
+    async (nativeDeleteMode?: NativeDeleteMode) => {
     if (deleteSessionIds.length === 0 || deleteSessionBusy) return;
     if (!isTauri()) {
       setStatusLine("UI preview · delete unavailable");
       setDeleteSessionIds([]);
+      setDeleteSessionScope({ kind: "sessions" });
       return;
     }
+    const scope = deleteSessionScope;
     const sessionIds = deleteSessionIds;
     const targets = sessionIds
       .map(
@@ -1383,6 +1499,13 @@ export default function App() {
           (pendingSession?.id === sessionId ? pendingSession : null),
       )
       .filter((session): session is SessionMeta => Boolean(session));
+    const effectiveNativeDeleteMode =
+      nativeDeleteMode ??
+      (targets.some(
+        (session) => session.runtimeId === "codex" && Boolean(session.nativeThreadId),
+      )
+        ? "direct"
+        : "official");
     const applyDeletedSessions = async (removedSessionIds: string[]) => {
       const removedSessionIdSet = new Set(removedSessionIds);
 
@@ -1442,14 +1565,21 @@ export default function App() {
     try {
       const results = [];
       for (const sessionId of sessionIds) {
-        results.push(await deleteSessionById(sessionId));
+        results.push(
+          await deleteSessionById(sessionId, {
+            nativeDeleteMode: effectiveNativeDeleteMode,
+          }),
+        );
         successfulSessionIds.push(sessionId);
       }
       setDeleteSessionIds([]);
+      setDeleteSessionScope({ kind: "sessions" });
       await applyDeletedSessions(sessionIds);
 
       setStatusLine(
-        sessionIds.length === 1
+        scope.kind === "project"
+          ? `deleted ${sessionIds.length} sessions under ${scope.label}`
+          : sessionIds.length === 1
           ? `deleted session${targets[0] ? ` · ${targets[0].title}` : ""} · ${results[0]?.deletedPath ?? sessionIds[0]}`
           : `deleted ${sessionIds.length} sessions`,
       );
@@ -1461,7 +1591,7 @@ export default function App() {
           prev.filter((sessionId) => !successfulSessionIdSet.has(sessionId)),
         );
       }
-      const message = `delete failed: ${String(e)}`;
+      const message = formatDeleteSessionError(e);
       setDeleteSessionError(message);
       setStatusLine(
         successfulSessionIds.length > 0
@@ -1478,6 +1608,7 @@ export default function App() {
     clearAssistantTypingForSession,
     deleteSessionBusy,
     deleteSessionIds,
+    deleteSessionScope,
     pendingSession,
     runtimePick,
     sessions,
@@ -1532,9 +1663,46 @@ export default function App() {
         .filter((session): session is SessionMeta => Boolean(session)),
     [deleteSessionIds, pendingSession, sessions],
   );
-  const deleteTargetPath = deleteSessionIds
-    .map((sessionId) => sessionPathFor(sessionId))
-    .join("\n");
+  const deleteTargetNativeCodexCount = deleteTargetSessions.filter(
+    (session) => session.runtimeId === "codex" && Boolean(session.nativeThreadId),
+  ).length;
+  const canDeleteWorkbenchOnly =
+    deleteTargetNativeCodexCount > 0 &&
+    isCodexDeleteFallbackError(deleteSessionError);
+  const deleteTargetItems = deleteSessionIds.map((sessionId) => {
+    const session = deleteTargetSessions.find((session) => session.id === sessionId);
+    return {
+      id: sessionId,
+      title: session?.title ?? sessionId,
+      path: sessionPathFor(sessionId),
+      nativeLabel:
+        session?.runtimeId === "codex" && session.nativeThreadId
+          ? `Codex 原生 thread：${session.nativeThreadId}`
+          : null,
+    };
+  });
+  const deleteDialogTitle =
+    deleteSessionScope.kind === "project"
+      ? `删除 ${deleteSessionScope.label} 下的 ${deleteSessionIds.length} 个会话`
+      : deleteSessionIds.length > 1
+        ? `删除 ${deleteSessionIds.length} 个会话`
+        : "删除会话";
+  const deleteDialogSub =
+    deleteSessionScope.kind === "project"
+      ? deleteTargetNativeCodexCount > 0
+        ? "删除 Workbench 会话，并直接删除绑定的 Codex 原生文件和索引；不删除项目源码目录"
+        : "只删除 Workbench 会话文件夹和记录，不删除项目源码目录"
+      : deleteTargetNativeCodexCount > 0
+        ? "删除后会移除 Workbench 会话，并直接删除绑定的 Codex 原生文件和索引"
+        : "删除后会移除会话文件夹和记录";
+  const deleteDialogNote =
+    deleteSessionScope.kind === "project"
+      ? deleteTargetNativeCodexCount > 0
+        ? `此操作会删除该目录分组下的所有会话，其中 ${deleteTargetNativeCodexCount} 个 Codex 原生会话会删除对应 rollout jsonl 文件并清理 state_*.sqlite 索引，无法恢复。`
+        : "此操作会删除该目录分组下的所有会话，无法恢复。"
+      : deleteTargetNativeCodexCount > 0
+        ? `此操作会删除会话及其文件夹内容，并永久删除 ${deleteTargetNativeCodexCount} 个绑定的 Codex 原生会话文件和索引，无法恢复。`
+        : "此操作会删除会话及其文件夹内容，无法恢复。";
 
   useEffect(() => {
     if (!sessionContextMenu) return;
@@ -1560,13 +1728,40 @@ export default function App() {
   }, [sessionContextMenu]);
 
   useEffect(() => {
+    if (!projectContextMenu) return;
+    const close = () => setProjectContextMenu(null);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (projectContextMenuRef.current?.contains(target)) return;
+      close();
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [projectContextMenu]);
+
+  useEffect(() => {
     const suppressGlobalContextMenu = (event: MouseEvent) => {
       const target = event.target;
-      if (target instanceof Element && target.closest(".session-item")) {
+      if (
+        target instanceof Element &&
+        (target.closest(".session-item") || target.closest(".session-project__header"))
+      ) {
         return;
       }
       event.preventDefault();
       setSessionContextMenu(null);
+      setProjectContextMenu(null);
     };
     window.addEventListener("contextmenu", suppressGlobalContextMenu);
     return () => {
@@ -2090,9 +2285,21 @@ export default function App() {
           onShowArchivedChange={changeArchivedView}
           onSessionFilterChange={setSessionFilter}
           selectedSessionIds={selectedSessionIds}
+          projectOrder={projectOrder}
+          pinnedProjectKeys={pinnedProjectKeys}
           onSelectSession={(id, options) => selectSession(id, options)}
           onSessionContextMenu={(sessionId, left, top) =>
-            setSessionContextMenu({ sessionId, left, top })
+            {
+              setProjectContextMenu(null);
+              setSessionContextMenu({ sessionId, left, top });
+            }
+          }
+          onProjectContextMenu={(project, left, top) => {
+            setSessionContextMenu(null);
+            setProjectContextMenu({ ...project, left, top });
+          }}
+          onProjectReorder={(sourceKey, targetKey, visibleProjectKeys) =>
+            reorderProject(sourceKey, targetKey, visibleProjectKeys)
           }
           onSyncNativeSessions={(mode) => void syncNativeSessions(mode)}
           onOpenSettings={() => {
@@ -2300,6 +2507,21 @@ export default function App() {
         sessionContextTargetCount={sessionContextTargetIds.length}
         sessionContextTargetIds={sessionContextTargetIds}
         sessionContextMenuRef={sessionContextMenuRef}
+        projectContextMenu={projectContextMenu}
+        projectContextMenuRef={projectContextMenuRef}
+        onToggleProjectPinned={(projectKey, pinned, label) =>
+          toggleProjectPinned(projectKey, pinned, label)
+        }
+        onRequestDeleteProjectSessions={(project) =>
+          requestDeleteSessions(
+            project.sessions.map((session) => session.id),
+            {
+              kind: "project",
+              label: project.label,
+              path: project.path,
+            },
+          )
+        }
         onOpenSelectedSessionLocation={(sessionId) =>
           void openSelectedSessionLocation(sessionId)
         }
@@ -2325,15 +2547,21 @@ export default function App() {
         onCloseRename={closeRenameSession}
         onConfirmRename={() => void confirmRenameSession()}
         deleteSessionIds={deleteSessionIds}
+        deleteDialogTitle={deleteDialogTitle}
+        deleteDialogSub={deleteDialogSub}
+        deleteDialogNote={deleteDialogNote}
         deleteTargetSessions={deleteTargetSessions}
-        deleteTargetPath={deleteTargetPath}
+        deleteTargetItems={deleteTargetItems}
         deleteSessionBusy={deleteSessionBusy}
         deleteSessionError={deleteSessionError}
+        canDeleteWorkbenchOnly={canDeleteWorkbenchOnly}
         onCloseDelete={() => {
           setDeleteSessionError(null);
           setDeleteSessionIds([]);
+          setDeleteSessionScope({ kind: "sessions" });
         }}
         onConfirmDelete={() => void confirmDeleteSession()}
+        onConfirmDeleteWorkbenchOnly={() => void confirmDeleteSession("skip")}
       />
       <ToastViewport />
     </div>
