@@ -152,11 +152,6 @@ fn resolve_grok_home() -> PathBuf {
     if user.join("auth.json").is_file() || user.join("config.toml").is_file() {
         return user;
     }
-    // Windows install path sibling
-    let win = PathBuf::from(r"D:\tools\grok");
-    if win.join("auth.json").is_file() || win.join("config.toml").is_file() {
-        return win;
-    }
     paths::agent_homes_dir().join("grok")
 }
 
@@ -165,7 +160,6 @@ fn resolve_grok_path() -> Option<PathBuf> {
         return Some(p);
     }
     let candidates = [
-        r"D:\tools\grok\bin\grok.exe",
         r"%USERPROFILE%\.grok\bin\grok.exe",
     ];
     for c in candidates {

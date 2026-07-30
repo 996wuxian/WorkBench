@@ -11,8 +11,6 @@
       "--version"
     ],
     "probePaths": [
-      "D:\\Nvm\\node\\node_global\\claude.cmd",
-      "D:\\Nvm\\node\\node_global\\claude.ps1",
       "%APPDATA%\\npm\\claude.cmd",
       "%APPDATA%\\npm\\claude.ps1",
       "~/.local/bin/claude"
@@ -53,6 +51,7 @@
         "hint": "Claude Code alias"
       }
     ],
+    "nativeSessions": "claude_project_jsonl",
     "capabilities": {
       "streaming": true,
       "thoughts": true,
@@ -85,7 +84,6 @@
       "--version"
     ],
     "probePaths": [
-      "D:\\codex\\codex.exe",
       "%USERPROFILE%\\.codex\\bin\\codex.exe",
       "%LOCALAPPDATA%\\Programs\\codex\\codex.exe",
       "~/.codex/bin/codex"
@@ -151,12 +149,13 @@
       "auto"
     ],
     "models": [],
+    "nativeSessions": "kimi_wire_jsonl",
     "capabilities": {
       "streaming": true,
       "thoughts": true,
       "tools": true,
       "permissionGate": true,
-      "sessionResume": false,
+      "sessionResume": true,
       "multiTurn": true,
       "modelsList": false,
       "planMode": false,
@@ -185,14 +184,12 @@
       "--version"
     ],
     "probePaths": [
-      "D:\\tools\\grok\\bin\\grok.exe",
       "%USERPROFILE%\\.grok\\bin\\grok.exe",
       "~/.grok/bin/grok"
     ],
     "homeEnv": "GROK_HOME",
     "homeCandidates": [
-      "~/.grok",
-      "D:\\tools\\grok"
+      "~/.grok"
     ],
     "homeMarkers": [
       "auth.json",

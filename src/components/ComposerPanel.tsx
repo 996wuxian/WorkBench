@@ -17,6 +17,7 @@ import {
   IconStop,
 } from "./icons";
 import { compactLabel } from "../lib/format";
+import { findSkillByName } from "../lib/skills";
 import type { PermissionMode, SkillInfo } from "../lib/types";
 import type { QuoteTarget } from "../lib/messages";
 
@@ -37,6 +38,7 @@ type Props = {
   skills: SkillInfo[];
   skillsLoading: boolean;
   skillsError: string | null;
+  selectedSkillNames: string[];
   projectPath: string | null;
   projectPathEditable: boolean;
   projectPathBusy: boolean;
@@ -50,6 +52,7 @@ type Props = {
   onReasoningEffortChange: (value: string) => void;
   onPermissionChange: (value: string) => void;
   onSkillSelect: (name: string) => void;
+  onSkillRemove: (name: string) => void;
   onPickProjectPath: () => void;
 };
 
@@ -109,6 +112,7 @@ export function ComposerPanel({
   skills,
   skillsLoading,
   skillsError,
+  selectedSkillNames,
   projectPath,
   projectPathEditable,
   projectPathBusy,
@@ -122,6 +126,7 @@ export function ComposerPanel({
   onReasoningEffortChange,
   onPermissionChange,
   onSkillSelect,
+  onSkillRemove,
   onPickProjectPath,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<ComposerContextMenu>(null);
@@ -174,6 +179,10 @@ export function ComposerPanel({
     if (!q) return true;
     return `${skill.name} ${skill.description}`.toLowerCase().includes(q);
   });
+  const selectedSkills = selectedSkillNames
+    .map((name) => findSkillByName(skills, name))
+    .filter((skill): skill is SkillInfo => Boolean(skill));
+  const canSend = draft.trim().length > 0 || selectedSkills.length > 0;
 
   const openContextMenu = (event: MouseEvent<HTMLTextAreaElement>) => {
     event.preventDefault();
@@ -338,6 +347,37 @@ export function ComposerPanel({
             </button>
           </div>
         ) : null}
+        {selectedSkills.length > 0 ? (
+          <div className="composer-skill-chips" aria-label="已引用的 Skills">
+            <span className="composer-skill-chips__label">Skills</span>
+            {selectedSkills.map((skill) => (
+              <button
+                type="button"
+                key={`${skill.source}:${skill.name}`}
+                className="skill-chip skill-chip--composer"
+                title={`${skill.description ?? skill.name} · 左键或中键移除`}
+                disabled={readOnly}
+                onMouseDown={(event) => {
+                  if (event.button !== 1) return;
+                  event.preventDefault();
+                  onSkillRemove(skill.name);
+                  requestAnimationFrame(() => composerInputRef.current?.focus());
+                }}
+                onClick={() => {
+                  onSkillRemove(skill.name);
+                  requestAnimationFrame(() => composerInputRef.current?.focus());
+                }}
+              >
+                <IconPuzzle size={12} />
+                <span>{skill.name}</span>
+                <span className="skill-chip__source">
+                  {skill.source === "project" ? "项目" : "用户"}
+                </span>
+                <IconClose size={12} />
+              </button>
+            ))}
+          </div>
+        ) : null}
         <textarea
           ref={composerInputRef}
           className="composer__input"
@@ -391,7 +431,7 @@ export function ComposerPanel({
               type="button"
               className="composer__send"
               title="发送"
-              disabled={readOnly || !draft.trim() || busy}
+              disabled={readOnly || !canSend || busy}
               onClick={onSend}
             >
               <IconSend size={16} />

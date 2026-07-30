@@ -475,14 +475,13 @@ fn write_claude_mcp_config(
             ]
         }),
     );
-    let text = serde_json::to_string(&json!({ "mcpServers": Value::Object(servers) })).map_err(
-        |err| {
+    let text =
+        serde_json::to_string(&json!({ "mcpServers": Value::Object(servers) })).map_err(|err| {
             AgentError::new(
                 AgentErrorCode::ConnectFailed,
                 format!("failed to encode Claude MCP config: {err}"),
             )
-        },
-    )?;
+        })?;
 
     std::fs::write(&path, text).map_err(|err| {
         AgentError::new(
@@ -675,11 +674,7 @@ fn parse_content_length(headers: &str) -> Option<usize> {
     })
 }
 
-async fn write_http_json(
-    stream: &mut TcpStream,
-    status: u16,
-    body: Value,
-) -> std::io::Result<()> {
+async fn write_http_json(stream: &mut TcpStream, status: u16, body: Value) -> std::io::Result<()> {
     let status_text = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -748,7 +743,10 @@ fn claude_model_options(
     let env = read_claude_model_env(&manifest.resolve_home());
     let mut options = Vec::new();
 
-    if let Some(model) = env.get("ANTHROPIC_MODEL").and_then(|v| clean_model_value(v)) {
+    if let Some(model) = env
+        .get("ANTHROPIC_MODEL")
+        .and_then(|v| clean_model_value(v))
+    {
         options.push(ChoiceOption {
             value: "default".into(),
             label: model.clone(),
@@ -777,7 +775,10 @@ fn claude_model_options(
         "haiku alias",
     );
     for option in &manifest.models {
-        if options.iter().any(|existing| existing.value == option.value) {
+        if options
+            .iter()
+            .any(|existing| existing.value == option.value)
+        {
             continue;
         }
         options.push(option.clone());
@@ -1175,8 +1176,16 @@ fn tool_result_text(value: &Value) -> String {
             .filter_map(|item| {
                 item.as_str()
                     .map(str::to_string)
-                    .or_else(|| item.get("text").and_then(|v| v.as_str()).map(str::to_string))
-                    .or_else(|| item.get("content").and_then(|v| v.as_str()).map(str::to_string))
+                    .or_else(|| {
+                        item.get("text")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
+                    .or_else(|| {
+                        item.get("content")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -1344,10 +1353,7 @@ mod tests {
         assert_eq!(options.len(), 1);
         assert_eq!(options[0].value, "opus");
         assert_eq!(options[0].label, "deepseek-v4-pro[1m]");
-        assert_eq!(
-            options[0].hint.as_deref(),
-            Some("Claude Code opus alias")
-        );
+        assert_eq!(options[0].hint.as_deref(), Some("Claude Code opus alias"));
     }
 
     #[test]

@@ -4,7 +4,9 @@ import { useMemo, useState, type ReactNode } from "react";
 import { IconCheck, IconCopy } from "./icons";
 import { copyTextToClipboard } from "../lib/format";
 import { parseMarkdownBlocks, safeHref } from "../lib/markdown";
+import { findSkillMentions } from "../lib/skills";
 import { emitToast } from "../lib/toast";
+import type { SkillInfo } from "../lib/types";
 
 type CodeTokenKind =
   | "comment"
@@ -65,7 +67,34 @@ const CODE_KEYWORDS = new Set([
 const CODE_TOKEN =
   /\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b(?:as|async|await|break|case|catch|class|const|continue|default|delete|do|else|enum|export|extends|false|finally|for|from|function|if|import|in|instanceof|interface|let|new|null|of|private|protected|public|readonly|return|switch|throw|true|try|type|undefined|var|while)\b|\b\d+(?:\.\d+)?\b|\.[A-Za-z_$][\w$]*|\b[A-Za-z_$][\w$]*(?=\s*[(])|\b[A-Za-z_$][\w$]*(?=\s*:)|[{}()[\].,;:?]|=>|===|!==|==|!=|<=|>=|&&|\|\||[+\-*/%=<>!&|^~]/g;
 
-export function renderInlineMarkdown(text: string): ReactNode[] {
+function renderSkillTokens(text: string, skills: SkillInfo[], keyPrefix: string): ReactNode[] {
+  if (skills.length === 0) return [text];
+  const mentions = findSkillMentions(text, skills);
+  if (mentions.length === 0) return [text];
+
+  const nodes: ReactNode[] = [];
+  let lastIndex = 0;
+  mentions.forEach((mention, index) => {
+    if (mention.start > lastIndex) {
+      nodes.push(text.slice(lastIndex, mention.start));
+    }
+    nodes.push(
+      <span
+        key={`${keyPrefix}-skill-${mention.start}-${index}`}
+        className="skill-chip skill-chip--message"
+        title={mention.description ?? mention.name}
+      >
+        <span className="skill-chip__prefix">{mention.prefix}</span>
+        <span>{mention.name}</span>
+      </span>,
+    );
+    lastIndex = mention.end;
+  });
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  return nodes;
+}
+
+export function renderInlineMarkdown(text: string, skills: SkillInfo[] = []): ReactNode[] {
   const nodes: ReactNode[] = [];
   const token = /(`([^`]+)`|\[([^\]]+)\]\(([^)]+)\))/g;
   let lastIndex = 0;
@@ -73,7 +102,13 @@ export function renderInlineMarkdown(text: string): ReactNode[] {
 
   while ((match = token.exec(text))) {
     if (match.index > lastIndex) {
-      nodes.push(text.slice(lastIndex, match.index));
+      nodes.push(
+        ...renderSkillTokens(
+          text.slice(lastIndex, match.index),
+          skills,
+          `plain-${lastIndex}`,
+        ),
+      );
     }
     if (match[2] !== undefined) {
       nodes.push(<code key={`code-${match.index}`}>{match[2]}</code>);
@@ -101,7 +136,7 @@ export function renderInlineMarkdown(text: string): ReactNode[] {
   }
 
   if (lastIndex < text.length) {
-    nodes.push(text.slice(lastIndex));
+    nodes.push(...renderSkillTokens(text.slice(lastIndex), skills, `plain-${lastIndex}`));
   }
   return nodes;
 }
@@ -202,7 +237,13 @@ function CodeBlock({ language, text }: { language: string; text: string }) {
   );
 }
 
-export function MarkdownMessage({ content }: { content: string }) {
+export function MarkdownMessage({
+  content,
+  skills = [],
+}: {
+  content: string;
+  skills?: SkillInfo[];
+}) {
   const blocks = parseMarkdownBlocks(content);
   return (
     <div className="markdown-message">
@@ -211,7 +252,7 @@ export function MarkdownMessage({ content }: { content: string }) {
           case "code":
             return <CodeBlock key={index} language={block.language} text={block.text} />;
           case "heading": {
-            const content = renderInlineMarkdown(block.text);
+            const content = renderInlineMarkdown(block.text, skills);
             if (block.depth === 1) return <h3 key={index}>{content}</h3>;
             if (block.depth === 2) return <h4 key={index}>{content}</h4>;
             return <h5 key={index}>{content}</h5>;
@@ -219,7 +260,7 @@ export function MarkdownMessage({ content }: { content: string }) {
           case "quote":
             return (
               <blockquote key={index}>
-                {renderInlineMarkdown(block.text)}
+                {renderInlineMarkdown(block.text, skills)}
               </blockquote>
             );
           case "list": {
@@ -227,7 +268,7 @@ export function MarkdownMessage({ content }: { content: string }) {
             return (
               <ListTag key={index}>
                 {block.items.map((item, itemIndex) => (
-                  <li key={itemIndex}>{renderInlineMarkdown(item)}</li>
+                  <li key={itemIndex}>{renderInlineMarkdown(item, skills)}</li>
                 ))}
               </ListTag>
             );
@@ -246,7 +287,7 @@ export function MarkdownMessage({ content }: { content: string }) {
                               block.alignments[headerIndex] ?? undefined,
                           }}
                         >
-                          {renderInlineMarkdown(header)}
+                            {renderInlineMarkdown(header, skills)}
                         </th>
                       ))}
                     </tr>
@@ -262,7 +303,7 @@ export function MarkdownMessage({ content }: { content: string }) {
                                 block.alignments[cellIndex] ?? undefined,
                             }}
                           >
-                            {renderInlineMarkdown(row[cellIndex] ?? "")}
+                            {renderInlineMarkdown(row[cellIndex] ?? "", skills)}
                           </td>
                         ))}
                       </tr>
@@ -272,7 +313,7 @@ export function MarkdownMessage({ content }: { content: string }) {
               </div>
             );
           case "paragraph":
-            return <p key={index}>{renderInlineMarkdown(block.text)}</p>;
+            return <p key={index}>{renderInlineMarkdown(block.text, skills)}</p>;
         }
       })}
     </div>

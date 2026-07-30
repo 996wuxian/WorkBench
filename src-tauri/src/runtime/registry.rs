@@ -57,7 +57,10 @@ pub fn get(id: RuntimeId) -> Option<Arc<dyn AgentRuntime>> {
 pub fn get_enabled(id: RuntimeId) -> Result<Arc<dyn AgentRuntime>, String> {
     let runtime = get(id).ok_or_else(|| format!("unknown runtime: {id}"))?;
     if !runtime.enabled() {
-        return Err(format!("{} 已禁用（可在设置中启用）", runtime.display_name()));
+        return Err(format!(
+            "{} 已禁用（可在设置中启用）",
+            runtime.display_name()
+        ));
     }
     Ok(runtime)
 }

@@ -154,10 +154,7 @@ impl PermissionBroker {
         }
 
         let (tx, rx) = oneshot::channel();
-        self.inner
-            .pending
-            .lock()
-            .insert(request_id.clone(), tx);
+        self.inner.pending.lock().insert(request_id.clone(), tx);
         self.emit_request(&request_id, &req, false);
 
         let decision = match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
@@ -170,13 +167,20 @@ impl PermissionBroker {
                     "permission request {request_id} timed out after {}s; denying",
                     REQUEST_TIMEOUT.as_secs()
                 );
-                self.emit_resolved(&request_id, PermissionDecision::Deny, DecisionSource::Timeout);
+                self.emit_resolved(
+                    &request_id,
+                    PermissionDecision::Deny,
+                    DecisionSource::Timeout,
+                );
                 return PermissionDecision::Deny;
             }
         };
 
         if decision == PermissionDecision::AllowAlways {
-            self.inner.always_allowed.lock().insert(req.tool_name.clone());
+            self.inner
+                .always_allowed
+                .lock()
+                .insert(req.tool_name.clone());
         }
         self.emit_resolved(&request_id, decision, DecisionSource::User);
         decision
@@ -360,7 +364,8 @@ mod tests {
             request_id: resolved_request_id,
             decision,
             source,
-        } = rx.recv().await.unwrap() else {
+        } = rx.recv().await.unwrap()
+        else {
             panic!("expected a resolution event");
         };
         assert_eq!(resolved_request_id, request_id);

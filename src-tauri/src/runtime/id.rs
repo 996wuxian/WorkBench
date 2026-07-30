@@ -81,7 +81,8 @@ impl Serialize for RuntimeId {
 impl<'de> Deserialize<'de> for RuntimeId {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(d)?;
-        Self::parse(&raw).ok_or_else(|| serde::de::Error::custom(format!("invalid runtime id: {raw}")))
+        Self::parse(&raw)
+            .ok_or_else(|| serde::de::Error::custom(format!("invalid runtime id: {raw}")))
     }
 }
 

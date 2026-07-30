@@ -13,7 +13,7 @@ use crate::host::permissions::PermissionDecision;
 use crate::native_sessions;
 use crate::paths;
 use crate::route_diagnostics::{self, CodexRouteStatus};
-use crate::runtime::{self, RuntimeId, SessionSelectionCatalog};
+use crate::runtime::{self, NativeSessionSource, RuntimeId, SessionSelectionCatalog};
 use crate::session_manager::{SessionManager, SessionMeta, SessionSettingsPatch, SessionSnapshot};
 use crate::session_store::{self, StoredChatMessage};
 use crate::settings::{self, AppSettings, RuntimeOverride};
@@ -514,18 +514,86 @@ pub async fn session_delete(
             "skip".to_string()
         }
     });
-    if meta.runtime_id == RuntimeId::CODEX {
-        if let Some(thread_id) = meta
-            .native_thread_id
-            .as_deref()
-            .filter(|id| !id.trim().is_empty())
+    if !matches!(native_delete_mode.as_str(), "official" | "direct" | "skip") {
+        return Err(format!(
+            "unsupported native delete mode: {native_delete_mode}"
+        ));
+    }
+    if native_delete_mode.as_str() != "skip" {
+        match runtime::manifest::get(meta.runtime_id).and_then(|manifest| manifest.native_sessions)
         {
-            match native_delete_mode.as_str() {
-                "official" => crate::native_sessions::delete_codex_thread(thread_id).await?,
-                "direct" => crate::native_sessions::delete_codex_thread_direct(thread_id).await?,
-                "skip" => {}
-                other => return Err(format!("unsupported native delete mode: {other}")),
+            Some(NativeSessionSource::CodexAppServer) => {
+                if let Some(thread_id) = meta
+                    .native_thread_id
+                    .as_deref()
+                    .filter(|id| !id.trim().is_empty())
+                {
+                    match native_delete_mode.as_str() {
+                        "official" => {
+                            crate::native_sessions::delete_codex_thread(thread_id).await?
+                        }
+                        "direct" => {
+                            crate::native_sessions::delete_codex_thread_direct(thread_id).await?
+                        }
+                        other => return Err(format!("unsupported native delete mode: {other}")),
+                    }
+                }
             }
+            Some(NativeSessionSource::AcpSummaryFiles) => {
+                if let Some(native_session_id) = meta
+                    .native_session_id
+                    .as_deref()
+                    .filter(|id| !id.trim().is_empty())
+                {
+                    match native_delete_mode.as_str() {
+                        "official" | "direct" => {
+                            crate::native_sessions::delete_acp_summary_session(
+                                meta.runtime_id,
+                                native_session_id,
+                            )
+                            .await?
+                        }
+                        other => return Err(format!("unsupported native delete mode: {other}")),
+                    }
+                }
+            }
+            Some(NativeSessionSource::ClaudeProjectJsonl) => {
+                if let Some(native_session_id) = meta
+                    .native_session_id
+                    .as_deref()
+                    .filter(|id| !id.trim().is_empty())
+                {
+                    match native_delete_mode.as_str() {
+                        "official" | "direct" => {
+                            crate::native_sessions::delete_claude_project_jsonl_session(
+                                meta.runtime_id,
+                                native_session_id,
+                            )
+                            .await?
+                        }
+                        other => return Err(format!("unsupported native delete mode: {other}")),
+                    }
+                }
+            }
+            Some(NativeSessionSource::KimiWireJsonl) => {
+                if let Some(native_session_id) = meta
+                    .native_session_id
+                    .as_deref()
+                    .filter(|id| !id.trim().is_empty())
+                {
+                    match native_delete_mode.as_str() {
+                        "official" | "direct" => {
+                            crate::native_sessions::delete_kimi_wire_jsonl_session(
+                                meta.runtime_id,
+                                native_session_id,
+                            )
+                            .await?
+                        }
+                        other => return Err(format!("unsupported native delete mode: {other}")),
+                    }
+                }
+            }
+            None => {}
         }
     }
     let path = session_store::session_dir_path(&session_id).map_err(|e| e.to_string())?;

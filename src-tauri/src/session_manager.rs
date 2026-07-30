@@ -304,6 +304,14 @@ enum NativeHistoryImport {
         runtime_id: RuntimeId,
         native_session_id: String,
     },
+    ClaudeProjectJsonl {
+        runtime_id: RuntimeId,
+        native_session_id: String,
+    },
+    KimiWireJsonl {
+        runtime_id: RuntimeId,
+        native_session_id: String,
+    },
     CodexThread(String),
 }
 
@@ -642,7 +650,10 @@ impl SessionManager {
         if slot.persisted || slot.live.is_some() {
             return Err("工作目录只能在首次发送前修改".into());
         }
-        if !matches!(slot.fsm.state(), SessionState::Idle | SessionState::Disconnected) {
+        if !matches!(
+            slot.fsm.state(),
+            SessionState::Idle | SessionState::Disconnected
+        ) {
             return Err("当前会话状态不能修改工作目录".into());
         }
 
@@ -1627,6 +1638,24 @@ impl SessionManager {
                         runtime_id: slot.meta.runtime_id,
                         native_session_id,
                     }),
+                Some(NativeSessionSource::ClaudeProjectJsonl) => slot
+                    .meta
+                    .native_session_id
+                    .clone()
+                    .map(
+                        |native_session_id| NativeHistoryImport::ClaudeProjectJsonl {
+                            runtime_id: slot.meta.runtime_id,
+                            native_session_id,
+                        },
+                    ),
+                Some(NativeSessionSource::KimiWireJsonl) => slot
+                    .meta
+                    .native_session_id
+                    .clone()
+                    .map(|native_session_id| NativeHistoryImport::KimiWireJsonl {
+                        runtime_id: slot.meta.runtime_id,
+                        native_session_id,
+                    }),
                 Some(NativeSessionSource::CodexAppServer) => slot
                     .meta
                     .native_thread_id
@@ -1645,6 +1674,20 @@ impl SessionManager {
                 runtime_id,
                 native_session_id,
             } => crate::native_sessions::load_acp_summary_session_messages(
+                runtime_id,
+                &native_session_id,
+            )?,
+            NativeHistoryImport::ClaudeProjectJsonl {
+                runtime_id,
+                native_session_id,
+            } => crate::native_sessions::load_claude_project_jsonl_messages(
+                runtime_id,
+                &native_session_id,
+            )?,
+            NativeHistoryImport::KimiWireJsonl {
+                runtime_id,
+                native_session_id,
+            } => crate::native_sessions::load_kimi_wire_jsonl_messages(
                 runtime_id,
                 &native_session_id,
             )?,
@@ -1952,7 +1995,10 @@ fn validate_project_dir(project_path: &str) -> Result<String, String> {
     }
     let path = PathBuf::from(project_path);
     if !path.is_absolute() || !path.is_dir() {
-        return Err(format!("project directory does not exist: {}", path.display()));
+        return Err(format!(
+            "project directory does not exist: {}",
+            path.display()
+        ));
     }
     Ok(path.display().to_string())
 }

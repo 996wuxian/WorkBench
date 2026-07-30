@@ -168,7 +168,6 @@ pub fn codex_config_context() -> Option<String> {
 
 pub fn open_cc_switch() -> Result<String, String> {
     let candidates = [
-        PathBuf::from(r"D:\ccswitch\cc-switch.exe"),
         user_home()
             .unwrap_or_else(|| PathBuf::from(""))
             .join("AppData")

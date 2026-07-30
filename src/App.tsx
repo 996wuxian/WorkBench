@@ -44,6 +44,7 @@ import {
 import { copyTextToClipboard, nowIso, uid } from "./lib/format";
 import { emitToast } from "./lib/toast";
 import { notifySessionResult } from "./lib/sessionNotifications";
+import { findSkillByName, skillInvocationToken, skillKey } from "./lib/skills";
 import {
   composeMessageText,
   finalizeStreamingMessage,
@@ -159,6 +160,17 @@ function isCodexDeleteFallbackError(message: string | null): boolean {
   );
 }
 
+function isNativeDeleteFallbackError(message: string | null): boolean {
+  return Boolean(
+    message &&
+      (isCodexDeleteFallbackError(message) ||
+        message.includes("原生会话删除失败") ||
+        message.includes("native delete failed") ||
+        message.includes("native delete refused") ||
+        message.includes("ACP summary delete task failed")),
+  );
+}
+
 function formatDeleteSessionError(error: unknown): string {
   const raw = String(error);
   if (
@@ -167,7 +179,20 @@ function formatDeleteSessionError(error: unknown): string {
   ) {
     return `Codex 官方删除失败：当前 Codex app-server 状态库缺少 agent_jobs 表。Workbench 会话尚未删除；你可以直接删除 Codex 原生文件和索引，或仅删除 Workbench 记录。技术细节：${raw}`;
   }
+  if (isNativeDeleteFallbackError(raw)) {
+    return `原生会话删除失败：Workbench 会话尚未删除；你可以重试，或仅删除 Workbench 记录。技术细节：${raw}`;
+  }
   return `delete failed: ${raw}`;
+}
+
+function nativeDeleteKind(
+  session: SessionMeta,
+): "codex" | "grok" | "claude" | "kimi" | null {
+  if (session.runtimeId === "codex" && session.nativeThreadId) return "codex";
+  if (session.runtimeId === "grok" && session.nativeSessionId) return "grok";
+  if (session.runtimeId === "claude" && session.nativeSessionId) return "claude";
+  if (session.runtimeId === "kimi" && session.nativeSessionId) return "kimi";
+  return null;
 }
 
 function runtimeRouteDescription(runtime: RuntimeInfo): string {
@@ -219,6 +244,7 @@ export default function App() {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsError, setSkillsError] = useState<string | null>(null);
+  const [selectedSkillNames, setSelectedSkillNames] = useState<string[]>([]);
   const [quoteTarget, setQuoteTarget] = useState<QuoteTarget | null>(null);
   const [runtimePick, setRuntimePick] = useState<RuntimeId>(() =>
     loadRuntimePick(),
@@ -340,6 +366,12 @@ export default function App() {
       cancelled = true;
     };
   }, [active?.id, active?.projectPath, activeRuntimeId]);
+
+  useEffect(() => {
+    setSelectedSkillNames((prev) =>
+      prev.filter((name) => Boolean(findSkillByName(skills, name))),
+    );
+  }, [skills]);
 
   const activeSessionModelValue = useMemo(
     () =>
@@ -1501,9 +1533,7 @@ export default function App() {
       .filter((session): session is SessionMeta => Boolean(session));
     const effectiveNativeDeleteMode =
       nativeDeleteMode ??
-      (targets.some(
-        (session) => session.runtimeId === "codex" && Boolean(session.nativeThreadId),
-      )
+      (targets.some((session) => nativeDeleteKind(session))
         ? "direct"
         : "official");
     const applyDeletedSessions = async (removedSessionIds: string[]) => {
@@ -1664,11 +1694,41 @@ export default function App() {
     [deleteSessionIds, pendingSession, sessions],
   );
   const deleteTargetNativeCodexCount = deleteTargetSessions.filter(
-    (session) => session.runtimeId === "codex" && Boolean(session.nativeThreadId),
+    (session) => nativeDeleteKind(session) === "codex",
   ).length;
+  const deleteTargetNativeGrokCount = deleteTargetSessions.filter(
+    (session) => nativeDeleteKind(session) === "grok",
+  ).length;
+  const deleteTargetNativeClaudeCount = deleteTargetSessions.filter(
+    (session) => nativeDeleteKind(session) === "claude",
+  ).length;
+  const deleteTargetNativeKimiCount = deleteTargetSessions.filter(
+    (session) => nativeDeleteKind(session) === "kimi",
+  ).length;
+  const deleteTargetNativeCount =
+    deleteTargetNativeCodexCount +
+    deleteTargetNativeGrokCount +
+    deleteTargetNativeClaudeCount +
+    deleteTargetNativeKimiCount;
+  const deleteTargetNativeSummary = [
+    deleteTargetNativeCodexCount > 0
+      ? `${deleteTargetNativeCodexCount} 个 Codex`
+      : null,
+    deleteTargetNativeGrokCount > 0
+      ? `${deleteTargetNativeGrokCount} 个 Grok`
+      : null,
+    deleteTargetNativeClaudeCount > 0
+      ? `${deleteTargetNativeClaudeCount} 个 Claude`
+      : null,
+    deleteTargetNativeKimiCount > 0
+      ? `${deleteTargetNativeKimiCount} 个 Kimi`
+      : null,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join("、");
   const canDeleteWorkbenchOnly =
-    deleteTargetNativeCodexCount > 0 &&
-    isCodexDeleteFallbackError(deleteSessionError);
+    deleteTargetNativeCount > 0 &&
+    isNativeDeleteFallbackError(deleteSessionError);
   const deleteTargetItems = deleteSessionIds.map((sessionId) => {
     const session = deleteTargetSessions.find((session) => session.id === sessionId);
     return {
@@ -1678,6 +1738,12 @@ export default function App() {
       nativeLabel:
         session?.runtimeId === "codex" && session.nativeThreadId
           ? `Codex 原生 thread：${session.nativeThreadId}`
+          : session?.runtimeId === "grok" && session.nativeSessionId
+          ? `Grok 原生 session：${session.nativeSessionId}`
+          : session?.runtimeId === "claude" && session.nativeSessionId
+          ? `Claude 原生 session：${session.nativeSessionId}`
+          : session?.runtimeId === "kimi" && session.nativeSessionId
+          ? `Kimi 原生 session：${session.nativeSessionId}`
           : null,
     };
   });
@@ -1689,19 +1755,19 @@ export default function App() {
         : "删除会话";
   const deleteDialogSub =
     deleteSessionScope.kind === "project"
-      ? deleteTargetNativeCodexCount > 0
-        ? "删除 Workbench 会话，并直接删除绑定的 Codex 原生文件和索引；不删除项目源码目录"
+      ? deleteTargetNativeCount > 0
+        ? "删除 Workbench 会话，并直接删除绑定的原生会话数据；不删除项目源码目录"
         : "只删除 Workbench 会话文件夹和记录，不删除项目源码目录"
-      : deleteTargetNativeCodexCount > 0
-        ? "删除后会移除 Workbench 会话，并直接删除绑定的 Codex 原生文件和索引"
+      : deleteTargetNativeCount > 0
+        ? "删除后会移除 Workbench 会话，并直接删除绑定的原生会话数据"
         : "删除后会移除会话文件夹和记录";
   const deleteDialogNote =
     deleteSessionScope.kind === "project"
-      ? deleteTargetNativeCodexCount > 0
-        ? `此操作会删除该目录分组下的所有会话，其中 ${deleteTargetNativeCodexCount} 个 Codex 原生会话会删除对应 rollout jsonl 文件并清理 state_*.sqlite 索引，无法恢复。`
+      ? deleteTargetNativeCount > 0
+        ? `此操作会删除该目录分组下的所有会话，其中 ${deleteTargetNativeSummary} 原生会话会同步删除。Codex 会删除对应 rollout jsonl 文件并清理 state_*.sqlite 索引；Grok 会删除 ~/.grok/sessions 下对应 session 目录；Claude 会删除 ~/.claude/projects 下对应 session jsonl 文件；Kimi 会删除 ~/.kimi 或 ~/.kimi-code/sessions 下对应 session 目录。不会删除整个 CLI 配置目录，无法恢复。`
         : "此操作会删除该目录分组下的所有会话，无法恢复。"
-      : deleteTargetNativeCodexCount > 0
-        ? `此操作会删除会话及其文件夹内容，并永久删除 ${deleteTargetNativeCodexCount} 个绑定的 Codex 原生会话文件和索引，无法恢复。`
+      : deleteTargetNativeCount > 0
+        ? `此操作会删除会话及其文件夹内容，并永久删除 ${deleteTargetNativeSummary} 绑定的原生会话数据。Codex 会删除 rollout jsonl 和索引；Grok 会删除 ~/.grok/sessions 下对应 session 目录；Claude 会删除 ~/.claude/projects 下对应 session jsonl 文件；Kimi 会删除 ~/.kimi 或 ~/.kimi-code/sessions 下对应 session 目录。不会删除整个 CLI 配置目录，无法恢复。`
         : "此操作会删除会话及其文件夹内容，无法恢复。";
 
   useEffect(() => {
@@ -1937,31 +2003,34 @@ export default function App() {
   }
 
   function insertSkill(name: string) {
-    const input = composerInputRef.current;
-    const start = input?.selectionStart ?? draft.length;
-    const end = input?.selectionEnd ?? start;
-    // Codex uses `$skill-name`; Grok/Claude/Kimi accept slash invocation.
-    const prefix = activeRuntimeId === "codex" ? "$" : "/";
-    const token = `${prefix}${name} `;
-    const next = `${draft.slice(0, start)}${token}${draft.slice(end)}`;
-    setDraft(next);
+    const skill = findSkillByName(skills, name);
+    if (!skill) return;
+    setSelectedSkillNames((prev) => {
+      if (prev.some((item) => skillKey(item) === skillKey(skill.name))) return prev;
+      return [...prev, skill.name];
+    });
     requestAnimationFrame(() => {
-      input?.focus();
-      const caret = start + token.length;
-      input?.setSelectionRange(caret, caret);
+      composerInputRef.current?.focus();
     });
   }
 
   async function sendMessage() {
     const body = draft.trim();
-    if (!body || !active) return;
+    const selectedSkillTokens = selectedSkillNames
+      .filter((name) => Boolean(findSkillByName(skills, name)))
+      .map((name) => skillInvocationToken(name, activeRuntimeId));
+    if ((!body && selectedSkillTokens.length === 0) || !active) return;
     if (active.archived) {
       setStatusLine("请先恢复归档会话再继续发送");
       return;
     }
-    const text = composeMessageText(quoteTarget, body);
+    const bodyWithSkills = [selectedSkillTokens.join(" "), body]
+      .filter(Boolean)
+      .join(body ? "\n\n" : "");
+    const text = composeMessageText(quoteTarget, bodyWithSkills);
     const session = active;
     setDraft("");
+    setSelectedSkillNames([]);
     stickToBottomRef.current = true;
     scrollChatToBottom("smooth");
     const userMsg: ChatMessage = {
@@ -2402,6 +2471,7 @@ export default function App() {
                 onRevealMessage={revealMessageForNavigation}
                 fallbackRuntimeId={active.runtimeId ?? snapshot.runtimeId ?? null}
                 assistantTypingUntil={assistantTypingUntil}
+                skills={skills}
                 onTypingProgress={handleTypingProgress}
                 onQuote={(target) => {
                   setQuoteTarget(target);
@@ -2438,6 +2508,7 @@ export default function App() {
                 skills={skills}
                 skillsLoading={skillsLoading}
                 skillsError={skillsError}
+                selectedSkillNames={selectedSkillNames}
                 projectPath={active.projectPath ?? null}
                 projectPathEditable={projectPathEditable}
                 projectPathBusy={projectPathBusy}
@@ -2461,6 +2532,11 @@ export default function App() {
                   })
                 }
                 onSkillSelect={insertSkill}
+                onSkillRemove={(name) =>
+                  setSelectedSkillNames((prev) =>
+                    prev.filter((item) => skillKey(item) !== skillKey(name)),
+                  )
+                }
                 onPickProjectPath={() => void pickActiveProjectDirectory()}
               />
             </>

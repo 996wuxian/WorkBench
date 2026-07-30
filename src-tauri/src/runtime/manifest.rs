@@ -39,6 +39,10 @@ pub enum RuntimeProtocol {
 pub enum NativeSessionSource {
     /// `<home>/sessions/**/summary.json` (Grok layout).
     AcpSummaryFiles,
+    /// `<home>/projects/**/<session-id>.jsonl` (Claude Code layout).
+    ClaudeProjectJsonl,
+    /// `<home>/sessions/**/wire.jsonl` (Kimi Code layout).
+    KimiWireJsonl,
     /// Queried over the Codex App Server RPC.
     CodexAppServer,
 }
@@ -292,9 +296,8 @@ fn load_user_manifests() -> Vec<RuntimeManifest> {
             continue;
         };
         // Accept either a single manifest or an array of them.
-        let parsed = serde_json::from_str::<Vec<RuntimeManifest>>(&text).or_else(|_| {
-            serde_json::from_str::<RuntimeManifest>(&text).map(|single| vec![single])
-        });
+        let parsed = serde_json::from_str::<Vec<RuntimeManifest>>(&text)
+            .or_else(|_| serde_json::from_str::<RuntimeManifest>(&text).map(|single| vec![single]));
         match parsed {
             Ok(list) => out.extend(list),
             Err(err) => tracing::warn!("invalid runtime manifest {}: {err}", path.display()),

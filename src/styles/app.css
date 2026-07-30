@@ -2047,7 +2047,7 @@ select,
   gap: 8px;
   padding: 8px 7px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 8px;
   background: transparent;
   color: var(--text-primary);
   text-align: left;
@@ -2134,6 +2134,82 @@ select,
 .composer__quote-close:hover {
   background: var(--bg-active);
   color: var(--text-primary);
+}
+
+.composer-skill-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 0;
+}
+
+.composer-skill-chips__label {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.skill-chip {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font: inherit;
+  font-weight: 650;
+  vertical-align: baseline;
+}
+
+.skill-chip--composer {
+  min-width: 0;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.skill-chip--composer:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+.skill-chip--composer:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.skill-chip--composer > span:first-of-type {
+  min-width: 0;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-chip--message {
+  margin: 0 2px;
+  padding: 1px 7px;
+  border-color: rgba(138, 164, 255, 0.24);
+  background: rgba(138, 164, 255, 0.1);
+  color: var(--accent-hover);
+  font-size: 0.92em;
+  line-height: 1.55;
+}
+
+.skill-chip__prefix,
+.skill-chip__source {
+  color: var(--text-tertiary);
+  font-weight: 700;
+}
+
+.skill-chip__source {
+  padding-left: 2px;
+  font-size: 10px;
 }
 
 .composer__toolbar > .composer-control {

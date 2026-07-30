@@ -78,7 +78,10 @@ pub fn runtime_override(runtime_id: &str) -> RuntimeOverride {
 }
 
 /// Replace one runtime's override and persist. An empty override removes the entry.
-pub fn set_runtime_override(runtime_id: &str, value: RuntimeOverride) -> Result<AppSettings, String> {
+pub fn set_runtime_override(
+    runtime_id: &str,
+    value: RuntimeOverride,
+) -> Result<AppSettings, String> {
     let next = {
         let mut guard = cache().write();
         if value.is_empty() {

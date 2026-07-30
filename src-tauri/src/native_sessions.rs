@@ -60,11 +60,292 @@ pub async fn sync_native_sessions(
         Some(NativeSessionSource::AcpSummaryFiles) => {
             sync_summary_file_sessions(manifest, limit, cursor)
         }
+        Some(NativeSessionSource::ClaudeProjectJsonl) => {
+            sync_claude_project_jsonl_sessions(manifest, limit, cursor)
+        }
+        Some(NativeSessionSource::KimiWireJsonl) => {
+            sync_kimi_wire_jsonl_sessions(manifest, limit, cursor)
+        }
         Some(NativeSessionSource::CodexAppServer) => {
             sync_codex_threads(manifest, limit, cursor).await
         }
         None => Err(format!("{} 不提供可导入的历史会话", manifest.display_name)),
     }
+}
+
+fn sync_kimi_wire_jsonl_sessions(
+    manifest: &RuntimeManifest,
+    limit: usize,
+    cursor: Option<String>,
+) -> Result<NativeSessionPage, String> {
+    let runtime_id = manifest
+        .runtime_id()
+        .ok_or_else(|| format!("invalid runtime id in manifest: {}", manifest.id))?;
+    let mut all = Vec::new();
+    for home in kimi_history_homes(manifest) {
+        let root = home.join("sessions");
+        if root.is_dir() {
+            collect_kimi_wire_jsonl_files(manifest, &root, &home, &mut all)?;
+        }
+    }
+    all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let total = all.len();
+
+    let offset = cursor
+        .as_deref()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let items: Vec<_> = all.into_iter().skip(offset).take(limit).collect();
+    let next = offset + items.len();
+    let has_more = next < total;
+
+    Ok(NativeSessionPage {
+        runtime_id,
+        next_cursor: has_more.then(|| next.to_string()),
+        has_more,
+        items,
+    })
+}
+
+fn kimi_history_homes(manifest: &RuntimeManifest) -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+    push_unique_path(&mut homes, manifest.resolve_home());
+    if let Ok(value) = std::env::var("KIMI_HOME") {
+        push_unique_path(&mut homes, PathBuf::from(value));
+    }
+    if let Ok(value) = std::env::var("KIMI_DATA_DIR") {
+        push_unique_path(&mut homes, PathBuf::from(value));
+    }
+    let user_home = process_util::user_home();
+    push_unique_path(&mut homes, user_home.join(".kimi"));
+    push_unique_path(&mut homes, user_home.join(".kimi-code"));
+    homes
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if path.as_os_str().is_empty() {
+        return;
+    }
+    if !paths.iter().any(|item| item == &path) {
+        paths.push(path);
+    }
+}
+
+fn collect_kimi_wire_jsonl_files(
+    manifest: &RuntimeManifest,
+    dir: &Path,
+    home: &Path,
+    out: &mut Vec<NativeSessionItem>,
+) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.is_dir() {
+            collect_kimi_wire_jsonl_files(manifest, &path, home, out)?;
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) != Some("wire.jsonl") {
+            continue;
+        }
+        if let Some(item) = parse_kimi_wire_jsonl_file(manifest, &path, home) {
+            out.push(item);
+        }
+    }
+    Ok(())
+}
+
+fn parse_kimi_wire_jsonl_file(
+    manifest: &RuntimeManifest,
+    path: &Path,
+    home: &Path,
+) -> Option<NativeSessionItem> {
+    let runtime_id = manifest.runtime_id()?;
+    let session_dir = kimi_session_dir_for_wire(path)?;
+    let session_id = session_dir.file_name()?.to_str()?.to_string();
+    let file = File::open(path).ok()?;
+    let mut created_at = None;
+    let mut updated_at = None;
+    let mut cwd = None;
+    let mut model_id = None;
+    let mut first_text = None;
+
+    for line in StdBufReader::new(file).lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(item) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(timestamp) = kimi_wire_timestamp(&item) {
+            created_at.get_or_insert_with(|| timestamp.clone());
+            updated_at = Some(timestamp);
+        }
+        cwd = cwd.or_else(|| kimi_wire_cwd(&item));
+        model_id = model_id.or_else(|| kimi_wire_model(&item));
+        first_text = first_text.or_else(|| kimi_wire_text(&item));
+    }
+
+    let created_at = created_at.unwrap_or_else(|| file_updated_at(path));
+    let updated_at = updated_at.unwrap_or_else(|| created_at.clone());
+    let title = first_text
+        .as_ref()
+        .map(|text| compact_text(text, 80))
+        .unwrap_or_else(|| format!("{} session", manifest.display_name));
+    let summary = cwd
+        .as_ref()
+        .map(|cwd| format!("kimi · {cwd}"))
+        .or_else(|| Some("kimi".to_string()));
+
+    Some(NativeSessionItem {
+        runtime_id,
+        native_source: manifest.id.clone(),
+        native_session_id: Some(session_id),
+        native_thread_id: None,
+        native_home: Some(home.display().to_string()),
+        title,
+        summary,
+        project_path: cwd,
+        model_id,
+        created_at,
+        updated_at,
+    })
+}
+
+fn sync_claude_project_jsonl_sessions(
+    manifest: &RuntimeManifest,
+    limit: usize,
+    cursor: Option<String>,
+) -> Result<NativeSessionPage, String> {
+    let runtime_id = manifest
+        .runtime_id()
+        .ok_or_else(|| format!("invalid runtime id in manifest: {}", manifest.id))?;
+    let home = manifest.resolve_home();
+    let root = home.join("projects");
+    if !root.is_dir() {
+        return Ok(NativeSessionPage {
+            runtime_id,
+            items: Vec::new(),
+            next_cursor: None,
+            has_more: false,
+        });
+    }
+
+    let mut all = Vec::new();
+    collect_claude_project_jsonl_files(manifest, &root, &home, &mut all)?;
+    all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let total = all.len();
+
+    let offset = cursor
+        .as_deref()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let items: Vec<_> = all.into_iter().skip(offset).take(limit).collect();
+    let next = offset + items.len();
+    let has_more = next < total;
+
+    Ok(NativeSessionPage {
+        runtime_id,
+        next_cursor: has_more.then(|| next.to_string()),
+        has_more,
+        items,
+    })
+}
+
+fn collect_claude_project_jsonl_files(
+    manifest: &RuntimeManifest,
+    dir: &Path,
+    home: &Path,
+    out: &mut Vec<NativeSessionItem>,
+) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.is_dir() {
+            collect_claude_project_jsonl_files(manifest, &path, home, out)?;
+            continue;
+        }
+        if path.extension().and_then(|name| name.to_str()) != Some("jsonl") {
+            continue;
+        }
+        if let Some(item) = parse_claude_project_jsonl_file(manifest, &path, home) {
+            out.push(item);
+        }
+    }
+    Ok(())
+}
+
+fn parse_claude_project_jsonl_file(
+    manifest: &RuntimeManifest,
+    path: &Path,
+    home: &Path,
+) -> Option<NativeSessionItem> {
+    let runtime_id = manifest.runtime_id()?;
+    let file_session_id = path.file_stem()?.to_str()?.to_string();
+    let file = File::open(path).ok()?;
+    let mut session_id = None;
+    let mut created_at = None;
+    let mut updated_at = None;
+    let mut cwd = None;
+    let mut model_id = None;
+    let mut slug = None;
+    let mut first_user_text = None;
+
+    for line in StdBufReader::new(file).lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(item) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+
+        session_id = session_id.or_else(|| clean_str(item.get("sessionId")));
+        cwd = cwd.or_else(|| clean_str(item.get("cwd")));
+        slug = slug.or_else(|| clean_str(item.get("slug")));
+        if let Some(timestamp) = clean_str(item.get("timestamp")) {
+            created_at.get_or_insert_with(|| timestamp.clone());
+            updated_at = Some(timestamp);
+        }
+        if let Some(message) = item.get("message") {
+            model_id = model_id.or_else(|| clean_str(message.get("model")));
+            if first_user_text.is_none()
+                && item.get("type").and_then(|v| v.as_str()) == Some("user")
+            {
+                first_user_text = claude_message_content_text(message.get("content"));
+            }
+        }
+    }
+
+    let session_id = session_id.unwrap_or(file_session_id);
+    let created_at = created_at.unwrap_or_else(|| file_updated_at(path));
+    let updated_at = updated_at.unwrap_or_else(|| created_at.clone());
+    let title = slug
+        .map(|slug| slug.replace('-', " "))
+        .or_else(|| first_user_text.as_ref().map(|text| compact_text(text, 80)))
+        .unwrap_or_else(|| format!("{} session", manifest.display_name));
+    let summary = cwd
+        .as_ref()
+        .map(|cwd| format!("claude · {cwd}"))
+        .or_else(|| Some("claude".to_string()));
+
+    Some(NativeSessionItem {
+        runtime_id,
+        native_source: manifest.id.clone(),
+        native_session_id: Some(session_id),
+        native_thread_id: None,
+        native_home: Some(home.display().to_string()),
+        title,
+        summary,
+        project_path: cwd,
+        model_id,
+        created_at,
+        updated_at,
+    })
 }
 
 fn sync_summary_file_sessions(
@@ -224,6 +505,236 @@ pub fn load_acp_summary_session_messages(
     parse_acp_chat_history(runtime_id, &chat_path)
 }
 
+pub async fn delete_acp_summary_session(
+    runtime_id: RuntimeId,
+    native_session_id: &str,
+) -> Result<(), String> {
+    let native_session_id = native_session_id.trim();
+    if native_session_id.is_empty() {
+        return Err("native session id is empty".into());
+    }
+
+    let manifest =
+        manifest::get(runtime_id).ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
+    if manifest.native_sessions != Some(NativeSessionSource::AcpSummaryFiles) {
+        return Err(format!(
+            "{} does not use ACP summary-file history",
+            manifest.display_name
+        ));
+    }
+
+    let home = manifest.resolve_home();
+    let display_name = manifest.display_name.clone();
+    let native_session_id = native_session_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        delete_acp_summary_session_blocking(&home, &display_name, &native_session_id)
+    })
+    .await
+    .map_err(|err| format!("ACP summary delete task failed: {err}"))?
+}
+
+fn delete_acp_summary_session_blocking(
+    home: &Path,
+    display_name: &str,
+    native_session_id: &str,
+) -> Result<(), String> {
+    let root = home.join("sessions");
+    if !root.is_dir() {
+        return Ok(());
+    }
+
+    let Some(summary_path) = find_summary_file_for_session(&root, native_session_id)? else {
+        return Ok(());
+    };
+    let Some(session_dir) = summary_path.parent() else {
+        return Ok(());
+    };
+
+    ensure_acp_summary_session_dir(&root, session_dir, display_name)?;
+    fs::remove_dir_all(session_dir).map_err(|err| {
+        format!(
+            "{display_name} native delete failed: delete session directory {} failed: {err}",
+            session_dir.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn ensure_acp_summary_session_dir(
+    sessions_root: &Path,
+    session_dir: &Path,
+    display_name: &str,
+) -> Result<(), String> {
+    let sessions_root = sessions_root.canonicalize().map_err(|err| {
+        format!(
+            "{display_name} native delete failed: resolve sessions root {} failed: {err}",
+            sessions_root.display()
+        )
+    })?;
+    let session_dir = session_dir.canonicalize().map_err(|err| {
+        format!(
+            "{display_name} native delete failed: resolve session directory {} failed: {err}",
+            session_dir.display()
+        )
+    })?;
+
+    if session_dir == sessions_root {
+        return Err(format!(
+            "{display_name} native delete refused: resolved session directory is the sessions root"
+        ));
+    }
+    if !session_dir.starts_with(&sessions_root) {
+        return Err(format!(
+            "{display_name} native delete refused: session directory is outside {}: {}",
+            sessions_root.display(),
+            session_dir.display()
+        ));
+    }
+    Ok(())
+}
+
+pub fn load_claude_project_jsonl_messages(
+    runtime_id: RuntimeId,
+    native_session_id: &str,
+) -> Result<Vec<StoredChatMessage>, String> {
+    let manifest =
+        manifest::get(runtime_id).ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
+    if manifest.native_sessions != Some(NativeSessionSource::ClaudeProjectJsonl) {
+        return Err(format!(
+            "{} does not use Claude project JSONL history",
+            manifest.display_name
+        ));
+    }
+
+    let home = manifest.resolve_home();
+    let root = home.join("projects");
+    let Some(path) = find_claude_project_jsonl_for_session(&root, native_session_id)? else {
+        return Ok(Vec::new());
+    };
+    parse_claude_project_jsonl_messages(runtime_id, &path)
+}
+
+pub async fn delete_claude_project_jsonl_session(
+    runtime_id: RuntimeId,
+    native_session_id: &str,
+) -> Result<(), String> {
+    let native_session_id = native_session_id.trim();
+    if native_session_id.is_empty() {
+        return Err("native session id is empty".into());
+    }
+
+    let manifest =
+        manifest::get(runtime_id).ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
+    if manifest.native_sessions != Some(NativeSessionSource::ClaudeProjectJsonl) {
+        return Err(format!(
+            "{} does not use Claude project JSONL history",
+            manifest.display_name
+        ));
+    }
+
+    let home = manifest.resolve_home();
+    let display_name = manifest.display_name.clone();
+    let native_session_id = native_session_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        delete_claude_project_jsonl_session_blocking(&home, &display_name, &native_session_id)
+    })
+    .await
+    .map_err(|err| format!("Claude project JSONL delete task failed: {err}"))?
+}
+
+fn delete_claude_project_jsonl_session_blocking(
+    home: &Path,
+    display_name: &str,
+    native_session_id: &str,
+) -> Result<(), String> {
+    let root = home.join("projects");
+    if !root.is_dir() {
+        return Ok(());
+    }
+
+    let Some(path) = find_claude_project_jsonl_for_session(&root, native_session_id)? else {
+        return Ok(());
+    };
+    ensure_claude_project_jsonl_path(&root, &path, display_name)?;
+    fs::remove_file(&path).map_err(|err| {
+        format!(
+            "{display_name} native delete failed: delete project JSONL {} failed: {err}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+pub fn load_kimi_wire_jsonl_messages(
+    runtime_id: RuntimeId,
+    native_session_id: &str,
+) -> Result<Vec<StoredChatMessage>, String> {
+    let manifest =
+        manifest::get(runtime_id).ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
+    if manifest.native_sessions != Some(NativeSessionSource::KimiWireJsonl) {
+        return Err(format!(
+            "{} does not use Kimi wire JSONL history",
+            manifest.display_name
+        ));
+    }
+
+    let Some(path) = find_kimi_wire_jsonl_for_session(manifest, native_session_id)? else {
+        return Ok(Vec::new());
+    };
+    parse_kimi_wire_jsonl_messages(runtime_id, &path)
+}
+
+pub async fn delete_kimi_wire_jsonl_session(
+    runtime_id: RuntimeId,
+    native_session_id: &str,
+) -> Result<(), String> {
+    let native_session_id = native_session_id.trim();
+    if native_session_id.is_empty() {
+        return Err("native session id is empty".into());
+    }
+
+    let manifest =
+        manifest::get(runtime_id).ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
+    if manifest.native_sessions != Some(NativeSessionSource::KimiWireJsonl) {
+        return Err(format!(
+            "{} does not use Kimi wire JSONL history",
+            manifest.display_name
+        ));
+    }
+
+    let display_name = manifest.display_name.clone();
+    let homes = kimi_history_homes(manifest);
+    let native_session_id = native_session_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        delete_kimi_wire_jsonl_session_blocking(&homes, &display_name, &native_session_id)
+    })
+    .await
+    .map_err(|err| format!("Kimi wire JSONL delete task failed: {err}"))?
+}
+
+fn delete_kimi_wire_jsonl_session_blocking(
+    homes: &[PathBuf],
+    display_name: &str,
+    native_session_id: &str,
+) -> Result<(), String> {
+    let Some((home, wire_path)) =
+        find_kimi_wire_jsonl_for_session_in_homes(homes, native_session_id)?
+    else {
+        return Ok(());
+    };
+    let Some(session_dir) = kimi_session_dir_for_wire(&wire_path) else {
+        return Ok(());
+    };
+    ensure_kimi_session_dir(&home.join("sessions"), session_dir, display_name)?;
+    fs::remove_dir_all(session_dir).map_err(|err| {
+        format!(
+            "{display_name} native delete failed: delete session directory {} failed: {err}",
+            session_dir.display()
+        )
+    })?;
+    Ok(())
+}
+
 fn find_summary_file_for_session(
     dir: &Path,
     native_session_id: &str,
@@ -266,6 +777,391 @@ fn summary_file_session_id(path: &Path) -> Option<String> {
         .pointer("/info/id")
         .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+fn find_claude_project_jsonl_for_session(
+    dir: &Path,
+    native_session_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_claude_project_jsonl_for_session(&path, native_session_id)? {
+                return Ok(Some(found));
+            }
+            continue;
+        }
+        if path.extension().and_then(|name| name.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let file_matches =
+            path.file_stem().and_then(|name| name.to_str()) == Some(native_session_id);
+        if file_matches
+            || claude_project_jsonl_session_id(&path).as_deref() == Some(native_session_id)
+        {
+            return Ok(Some(path));
+        }
+    }
+
+    Ok(None)
+}
+
+fn claude_project_jsonl_session_id(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    for line in StdBufReader::new(file).lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(session_id) = clean_str(value.get("sessionId")) {
+            return Some(session_id);
+        }
+    }
+    None
+}
+
+fn ensure_claude_project_jsonl_path(
+    projects_root: &Path,
+    path: &Path,
+    display_name: &str,
+) -> Result<(), String> {
+    let projects_root = projects_root.canonicalize().map_err(|err| {
+        format!(
+            "{display_name} native delete failed: resolve projects root {} failed: {err}",
+            projects_root.display()
+        )
+    })?;
+    let path = path.canonicalize().map_err(|err| {
+        format!(
+            "{display_name} native delete failed: resolve project JSONL {} failed: {err}",
+            path.display()
+        )
+    })?;
+
+    if !path.starts_with(&projects_root) {
+        return Err(format!(
+            "{display_name} native delete refused: project JSONL is outside {}: {}",
+            projects_root.display(),
+            path.display()
+        ));
+    }
+    if path.extension().and_then(|name| name.to_str()) != Some("jsonl") {
+        return Err(format!(
+            "{display_name} native delete refused: target is not a JSONL file: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn parse_claude_project_jsonl_messages(
+    runtime_id: RuntimeId,
+    path: &Path,
+) -> Result<Vec<StoredChatMessage>, String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let mut messages = Vec::new();
+    for line in StdBufReader::new(file).lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(item) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        messages.extend(parse_claude_project_jsonl_item(runtime_id, &item));
+    }
+    Ok(messages)
+}
+
+fn parse_claude_project_jsonl_item(runtime_id: RuntimeId, item: &Value) -> Vec<StoredChatMessage> {
+    let created_at = clean_str(item.get("timestamp")).unwrap_or_else(|| Utc::now().to_rfc3339());
+    let Some(message) = item.get("message") else {
+        return Vec::new();
+    };
+    let role = match item.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        "user" => "user",
+        "assistant" => "assistant",
+        _ => return Vec::new(),
+    };
+    let content = claude_message_content_text(message.get("content"));
+    message_from_text(role, content, runtime_id, &created_at)
+}
+
+fn claude_message_content_text(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) => clean_plain_text(text),
+        Value::Array(parts) => {
+            let chunks = parts
+                .iter()
+                .filter_map(
+                    |part| match part.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                        "text" => clean_str(part.get("text")),
+                        "thinking" => clean_str(part.get("thinking")),
+                        "tool_use" => {
+                            let name = clean_str(part.get("name")).unwrap_or_else(|| "tool".into());
+                            Some(format!("tool use: {name}"))
+                        }
+                        "tool_result" => {
+                            clean_str(part.get("content")).or_else(|| Some("tool result".into()))
+                        }
+                        _ => clean_str(part.get("text")).or_else(|| clean_str(part.get("content"))),
+                    },
+                )
+                .collect::<Vec<_>>();
+            join_non_empty(chunks)
+        }
+        Value::Object(map) => clean_str(map.get("text")).or_else(|| clean_str(map.get("content"))),
+        _ => None,
+    }
+}
+
+fn find_kimi_wire_jsonl_for_session(
+    manifest: &RuntimeManifest,
+    native_session_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    let homes = kimi_history_homes(manifest);
+    find_kimi_wire_jsonl_for_session_in_homes(&homes, native_session_id)
+        .map(|found| found.map(|(_, path)| path))
+}
+
+fn find_kimi_wire_jsonl_for_session_in_homes(
+    homes: &[PathBuf],
+    native_session_id: &str,
+) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    for home in homes {
+        let root = home.join("sessions");
+        if !root.is_dir() {
+            continue;
+        }
+        if let Some(path) = find_kimi_wire_jsonl_for_session_dir(&root, native_session_id)? {
+            return Ok(Some((home.clone(), path)));
+        }
+    }
+    Ok(None)
+}
+
+fn find_kimi_wire_jsonl_for_session_dir(
+    dir: &Path,
+    native_session_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_kimi_wire_jsonl_for_session_dir(&path, native_session_id)? {
+                return Ok(Some(found));
+            }
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) != Some("wire.jsonl") {
+            continue;
+        }
+        let Some(session_dir) = kimi_session_dir_for_wire(&path) else {
+            continue;
+        };
+        if session_dir.file_name().and_then(|name| name.to_str()) == Some(native_session_id) {
+            return Ok(Some(path));
+        }
+    }
+
+    Ok(None)
+}
+
+fn kimi_session_dir_for_wire(path: &Path) -> Option<&Path> {
+    let current = path.parent()?;
+    if current.file_name().and_then(|name| name.to_str()) == Some("agents") {
+        return current.parent();
+    }
+    if current
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        == Some("agents")
+    {
+        return current.parent()?.parent();
+    }
+    Some(current)
+}
+
+fn ensure_kimi_session_dir(
+    sessions_root: &Path,
+    session_dir: &Path,
+    display_name: &str,
+) -> Result<(), String> {
+    let sessions_root = sessions_root.canonicalize().map_err(|err| {
+        format!(
+            "{display_name} native delete failed: resolve sessions root {} failed: {err}",
+            sessions_root.display()
+        )
+    })?;
+    let session_dir = session_dir.canonicalize().map_err(|err| {
+        format!(
+            "{display_name} native delete failed: resolve session directory {} failed: {err}",
+            session_dir.display()
+        )
+    })?;
+
+    if session_dir == sessions_root {
+        return Err(format!(
+            "{display_name} native delete refused: resolved session directory is the sessions root"
+        ));
+    }
+    if !session_dir.starts_with(&sessions_root) {
+        return Err(format!(
+            "{display_name} native delete refused: session directory is outside {}: {}",
+            sessions_root.display(),
+            session_dir.display()
+        ));
+    }
+    Ok(())
+}
+
+fn parse_kimi_wire_jsonl_messages(
+    runtime_id: RuntimeId,
+    path: &Path,
+) -> Result<Vec<StoredChatMessage>, String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let mut messages = Vec::new();
+    for line in StdBufReader::new(file).lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(item) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(message) = kimi_wire_message(runtime_id, &item) {
+            messages.push(message);
+        }
+    }
+    Ok(messages)
+}
+
+fn kimi_wire_message(runtime_id: RuntimeId, item: &Value) -> Option<StoredChatMessage> {
+    let text = kimi_wire_text(item)?;
+    let role = kimi_wire_role(item);
+    let created_at = kimi_wire_timestamp(item).unwrap_or_else(|| Utc::now().to_rfc3339());
+    Some(StoredChatMessage::imported(
+        role,
+        text,
+        Some(runtime_id),
+        &created_at,
+    ))
+}
+
+fn kimi_wire_role(item: &Value) -> &'static str {
+    let role = item
+        .get("role")
+        .or_else(|| item.pointer("/params/role"))
+        .or_else(|| item.pointer("/params/message/role"))
+        .or_else(|| item.pointer("/params/update/role"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    match role {
+        "user" => "user",
+        "assistant" => "assistant",
+        "system" => "system",
+        _ => {
+            let method = item
+                .get("method")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if method.contains("prompt") {
+                "user"
+            } else if method.contains("update") || method.contains("message") {
+                "assistant"
+            } else {
+                "tool"
+            }
+        }
+    }
+}
+
+fn kimi_wire_text(item: &Value) -> Option<String> {
+    let candidates = [
+        item.get("text"),
+        item.get("content"),
+        item.pointer("/params/text"),
+        item.pointer("/params/content"),
+        item.pointer("/params/prompt"),
+        item.pointer("/params/message/text"),
+        item.pointer("/params/message/content"),
+        item.pointer("/params/update/text"),
+        item.pointer("/params/update/content"),
+        item.pointer("/result/text"),
+        item.pointer("/result/content"),
+    ];
+    candidates
+        .into_iter()
+        .find_map(|value| json_content_text(value))
+}
+
+fn kimi_wire_timestamp(item: &Value) -> Option<String> {
+    [
+        item.get("timestamp"),
+        item.get("created_at"),
+        item.get("createdAt"),
+        item.pointer("/params/timestamp"),
+        item.pointer("/params/createdAt"),
+    ]
+    .into_iter()
+    .find_map(|value| timestamp_to_rfc3339(value).or_else(|| clean_str(value)))
+}
+
+fn kimi_wire_cwd(item: &Value) -> Option<String> {
+    [
+        item.get("cwd"),
+        item.pointer("/params/cwd"),
+        item.pointer("/params/projectPath"),
+        item.pointer("/params/project_path"),
+    ]
+    .into_iter()
+    .find_map(clean_str)
+}
+
+fn kimi_wire_model(item: &Value) -> Option<String> {
+    [
+        item.get("model"),
+        item.get("modelId"),
+        item.pointer("/params/model"),
+        item.pointer("/params/modelId"),
+    ]
+    .into_iter()
+    .find_map(clean_str)
+}
+
+fn json_content_text(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) => clean_plain_text(text),
+        Value::Array(items) => {
+            let chunks = items
+                .iter()
+                .filter_map(|item| {
+                    clean_str(item.get("text"))
+                        .or_else(|| clean_str(item.get("content")))
+                        .or_else(|| item.as_str().map(str::to_string))
+                })
+                .collect::<Vec<_>>();
+            join_non_empty(chunks)
+        }
+        Value::Object(map) => clean_str(map.get("text")).or_else(|| clean_str(map.get("content"))),
+        _ => None,
+    }
 }
 
 fn parse_acp_chat_history(
@@ -1101,6 +1997,14 @@ fn timestamp_to_rfc3339(value: Option<&Value>) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+fn file_updated_at(path: &Path) -> String {
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .map(chrono::DateTime::<Utc>::from)
+        .map(|timestamp| timestamp.to_rfc3339())
+        .unwrap_or_else(|_| Utc::now().to_rfc3339())
 }
 
 struct JsonRpcClient {

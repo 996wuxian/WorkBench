@@ -17,7 +17,7 @@ import { useMessageNodeNavigation } from "../hooks/useMessageNodeNavigation";
 import { messageRoleLabel, toolMessageLabel, type QuoteTarget } from "../lib/messages";
 import { emitToast } from "../lib/toast";
 import { runtimeAvatarLabel, runtimeAvatarSrc, runtimeLabel } from "../lib/runtimes";
-import type { ChatMessage, RuntimeId } from "../lib/types";
+import type { ChatMessage, RuntimeId, SkillInfo } from "../lib/types";
 
 /** An assistant turn plus the tool calls it made, folded in as meta lines. */
 export interface MessageGroup {
@@ -39,6 +39,7 @@ export interface MessageListProps {
   /** Runtime to attribute a message to when it carries no id of its own. */
   fallbackRuntimeId: RuntimeId | null;
   assistantTypingUntil: Record<string, number>;
+  skills: SkillInfo[];
   onTypingProgress: () => void;
   onQuote: (target: QuoteTarget) => void;
 }
@@ -55,6 +56,7 @@ export function MessageList({
   onRevealMessage,
   fallbackRuntimeId,
   assistantTypingUntil,
+  skills,
   onTypingProgress,
   onQuote,
 }: MessageListProps) {
@@ -202,7 +204,10 @@ export function MessageList({
                     onProgress={onTypingProgress}
                   />
                 ) : (
-                  <MarkdownMessage content={m.content || ""} />
+                  <MarkdownMessage
+                    content={m.content || ""}
+                    skills={m.role === "user" ? skills : []}
+                  />
                 )}
                 {m.partial && !m.streaming && !m.pending ? (
                   <div className="message__interrupted">

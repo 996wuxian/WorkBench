@@ -76,10 +76,8 @@ pub fn enriched_path_env() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
         push(&format!(r"{home_s}\.grok\bin"));
+        push(&format!(r"{home_s}\.codex\bin"));
         push(&format!(r"{home_s}\.local\bin"));
-        push(r"D:\tools\cargo\bin");
-        push(r"D:\tools\grok\bin");
-        push(r"D:\codex");
         push(&format!(r"{home_s}\AppData\Roaming\npm"));
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
             push(&format!(r"{local}\Microsoft\WinGet\Links"));
