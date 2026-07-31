@@ -18,6 +18,7 @@ import type {
   SessionMeta,
   SessionSnapshot,
   SkillsListResult,
+  WorktreeChangeSnapshot,
 } from "./types";
 
 /** True when running inside Tauri webview. */
@@ -44,6 +45,8 @@ export const api = {
     call<string | null>("project_pick_directory", { initialPath }),
   skillsList: (runtimeId: string, projectPath?: string | null) =>
     call<SkillsListResult>("skills_list", { runtimeId, projectPath }),
+  projectWorktreeChanges: (projectPath: string) =>
+    call<WorktreeChangeSnapshot>("project_worktree_changes", { projectPath }),
   openSessionLocation: (sessionId: string) =>
     call<string>("session_open_location", { sessionId }),
 

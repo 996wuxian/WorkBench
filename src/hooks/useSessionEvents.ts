@@ -65,6 +65,7 @@ export interface SessionEventHandlers {
   ) => void;
   clearAssistantTypingForSession: (sessionId: string) => void;
   applySettledSessionMeta: (meta: SessionMeta) => void;
+  onTurnSettled: (event: TurnSettledEvent) => void;
   markSessionResult: (
     sessionId: string,
     kind: SessionUnreadKind,
@@ -411,6 +412,7 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
             "completed",
             ev.payload.meta,
           );
+          ref.current.onTurnSettled(ev.payload);
         },
       );
       if (!cancelled) unsubs.push(u10);

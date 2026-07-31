@@ -53,6 +53,7 @@ import {
   toolMessageKey,
   type QuoteTarget,
 } from "./lib/messages";
+import { diffWorktreeSnapshots } from "./lib/worktreeChanges";
 import { mockRuntimes, mockSessions } from "./lib/mocks";
 import {
   defaultPermissionMode,
@@ -88,6 +89,8 @@ import type {
   SessionState,
   SessionUnreadKind,
   SkillInfo,
+  TurnSettledEvent,
+  WorktreeChangeSnapshot,
 } from "./lib/types";
 import {
   allRuntimes,
@@ -525,6 +528,9 @@ export default function App() {
   const assistantTypingSessionRef = useRef<Record<string, string>>({});
   const sessionUnreadRef = useRef<Record<string, SessionUnreadKind>>({});
   const notifiedSessionResultRef = useRef<Record<string, SessionUnreadKind>>({});
+  const turnWorktreeBaselineRef = useRef<
+    Record<string, WorktreeChangeSnapshot | null>
+  >({});
 
   const beginSessionActivation = useCallback((sessionId: string | null) => {
     const requestId = activationRequestRef.current + 1;
@@ -653,6 +659,39 @@ export default function App() {
       void notifySessionResult(message, kind, isWindowBackground);
     },
     [sessions],
+  );
+
+  const applyTurnWorktreeChanges = useCallback(
+    (event: TurnSettledEvent) => {
+      const baseline = turnWorktreeBaselineRef.current[event.sessionId];
+      delete turnWorktreeBaselineRef.current[event.sessionId];
+      const projectPath = event.meta.projectPath?.trim();
+      if (!baseline || !projectPath || !isTauri()) return;
+
+      void api
+        .projectWorktreeChanges(projectPath)
+        .then((current) => {
+          const changes = diffWorktreeSnapshots(baseline, current);
+          if (changes.length === 0) return;
+          updateSessionMessages(event.sessionId, (items) => {
+            for (let index = items.length - 1; index >= 0; index -= 1) {
+              if (items[index].role !== "assistant") continue;
+              const next = items.slice();
+              next[index] = {
+                ...items[index],
+                worktreeChangeStats: changes,
+              };
+              return next;
+            }
+            return items;
+          });
+        })
+        .catch(() => {
+          // Diff stats are supplementary UI; failed git probes should not
+          // change the completed transcript.
+        });
+    },
+    [updateSessionMessages],
   );
 
   useEffect(() => {
@@ -859,6 +898,7 @@ export default function App() {
     queueAssistantTyping,
     clearAssistantTypingForSession,
     applySettledSessionMeta,
+    onTurnSettled: applyTurnWorktreeChanges,
     markSessionResult,
   });
 
@@ -2106,12 +2146,17 @@ export default function App() {
         },
       ]);
       setSnapshot((s) => ({ ...s, state: "streaming" }));
+      const projectPath = session.projectPath?.trim();
+      turnWorktreeBaselineRef.current[session.id] = projectPath
+        ? await api.projectWorktreeChanges(projectPath).catch(() => null)
+        : null;
       await api.send(session.id, text);
       const list = await api.listSessions();
       setSessions(list);
       setPendingSession((prev) => (prev?.id === session.id ? null : prev));
       setQuoteTarget(null);
     } catch (e) {
+      delete turnWorktreeBaselineRef.current[session.id];
       updateSessionMessages(session.id, (m) => [
         ...m.filter(
           (msg) =>

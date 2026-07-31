@@ -28,6 +28,15 @@ export function messageRoleLabel(
   }
 }
 
+export function isPermissionResolutionNotice(
+  message: Pick<ChatMessage, "role" | "content">,
+): boolean {
+  return (
+    message.role === "system" &&
+    /^权限请求「.+」已由 .+ 处理为 .+。$/.test(message.content.trim())
+  );
+}
+
 export function quoteText(message: QuoteTarget): string {
   const body = message.content.trim();
   if (!body) return "";

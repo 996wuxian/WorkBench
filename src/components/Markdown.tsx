@@ -3,7 +3,11 @@ import { useMemo, useState, type ReactNode } from "react";
 
 import { IconCheck, IconCopy } from "./icons";
 import { copyTextToClipboard } from "../lib/format";
-import { parseMarkdownBlocks, safeHref } from "../lib/markdown";
+import {
+  parseMarkdownBlocks,
+  safeHref,
+  splitReadableParagraph,
+} from "../lib/markdown";
 import { findSkillMentions } from "../lib/skills";
 import { emitToast } from "../lib/toast";
 import type { SkillInfo } from "../lib/types";
@@ -240,9 +244,11 @@ function CodeBlock({ language, text }: { language: string; text: string }) {
 export function MarkdownMessage({
   content,
   skills = [],
+  formatLongParagraphs = false,
 }: {
   content: string;
   skills?: SkillInfo[];
+  formatLongParagraphs?: boolean;
 }) {
   const blocks = parseMarkdownBlocks(content);
   return (
@@ -312,8 +318,21 @@ export function MarkdownMessage({
                 </table>
               </div>
             );
-          case "paragraph":
-            return <p key={index}>{renderInlineMarkdown(block.text, skills)}</p>;
+          case "paragraph": {
+            const paragraphs = formatLongParagraphs
+              ? splitReadableParagraph(block.text)
+              : [block.text];
+            return paragraphs.map((paragraph, paragraphIndex) => (
+              <p
+                key={`${index}-${paragraphIndex}`}
+                className={
+                  paragraphs.length > 1 ? "markdown-message__readable-p" : undefined
+                }
+              >
+                {renderInlineMarkdown(paragraph, skills)}
+              </p>
+            ));
+          }
         }
       })}
     </div>

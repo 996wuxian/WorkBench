@@ -6,15 +6,31 @@
  * runtime ids). Everything with a side effect — copying, quoting, status text —
  * is a callback, so this file stays a view.
  */
-import type { RefObject, UIEvent } from "react";
+import { useState, type RefObject, type UIEvent } from "react";
 
 import { MarkdownMessage } from "./Markdown";
-import { AssistantTiming, StreamingText, ThinkingIndicator } from "./ChatStream";
-import { IconChat, IconCopy, IconQuote } from "./icons";
+import {
+  AssistantTiming,
+  AssistantWorktreeChanges,
+  StreamingText,
+  ThinkingIndicator,
+} from "./ChatStream";
+import {
+  IconChat,
+  IconChevronDown,
+  IconChevronUp,
+  IconCopy,
+  IconQuote,
+} from "./icons";
 import { MessageNodeRail } from "./MessageNodeRail";
 import { copyTextToClipboard } from "../lib/format";
 import { useMessageNodeNavigation } from "../hooks/useMessageNodeNavigation";
-import { messageRoleLabel, toolMessageLabel, type QuoteTarget } from "../lib/messages";
+import {
+  isPermissionResolutionNotice,
+  messageRoleLabel,
+  toolMessageLabel,
+  type QuoteTarget,
+} from "../lib/messages";
 import { emitToast } from "../lib/toast";
 import { runtimeAvatarLabel, runtimeAvatarSrc, runtimeLabel } from "../lib/runtimes";
 import type { ChatMessage, RuntimeId, SkillInfo } from "../lib/types";
@@ -42,6 +58,49 @@ export interface MessageListProps {
   skills: SkillInfo[];
   onTypingProgress: () => void;
   onQuote: (target: QuoteTarget) => void;
+}
+
+const COLLAPSED_META_LINE_COUNT = 3;
+
+function MessageMetaStack({
+  lines,
+}: {
+  lines: Array<{ id: string; label: string }>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  if (lines.length === 0) return null;
+
+  const hiddenCount = Math.max(0, lines.length - COLLAPSED_META_LINE_COUNT);
+  const visibleLines =
+    expanded || hiddenCount === 0
+      ? lines
+      : lines.slice(lines.length - COLLAPSED_META_LINE_COUNT);
+
+  return (
+    <div className="message__meta-stack">
+      {hiddenCount > 0 ? (
+        <button
+          type="button"
+          className="message__meta-toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded ? <IconChevronUp size={13} /> : <IconChevronDown size={13} />}
+          <span>{expanded ? "收起过程" : `展开 ${hiddenCount} 条较早记录`}</span>
+        </button>
+      ) : null}
+      <div className="message__meta-lines">
+        {visibleLines.map((line) => (
+          <div key={line.id} className="message__meta-line">
+            <span className="message__meta-icon" aria-hidden="true">
+              ⚙
+            </span>
+            <span className="message__meta-text">{line.label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export function MessageList({
@@ -123,6 +182,7 @@ export function MessageList({
               return null;
             }
             const isThought = m.role === "thought";
+            const isPermissionNotice = isPermissionResolutionNotice(m);
             const visualRole =
               m.role === "thought" || m.role === "tool" ? "system" : m.role;
             const messageRuntime = m.runtimeId ?? fallbackRuntimeId ?? "grok";
@@ -136,19 +196,17 @@ export function MessageList({
               !thinking;
             const messageMetaLines =
               m.role === "assistant" && toolMessages.length
-                ? toolMessages.map((tool) => (
-                    <div key={tool.id} className="message__meta-line">
-                      <span className="message__meta-icon" aria-hidden="true">
-                        ⚙
-                      </span>
-                      <span className="message__meta-text">
-                        {toolMessageLabel(tool)}
-                      </span>
-                    </div>
-                  ))
+                ? toolMessages.map((tool) => ({
+                    id: tool.id,
+                    label: toolMessageLabel(tool),
+                  }))
                 : null;
             const quoteLabel = messageRoleLabel(m, messageRuntimeLabel);
-            const canCopy = Boolean(m.content?.trim()) && !thinking && !isThought;
+            const canCopy =
+              Boolean(m.content?.trim()) &&
+              !thinking &&
+              !isThought &&
+              !isPermissionNotice;
             const canQuote = canCopy;
             const messageActionButtons =
               canCopy || canQuote ? (
@@ -207,6 +265,7 @@ export function MessageList({
                   <MarkdownMessage
                     content={m.content || ""}
                     skills={m.role === "user" ? skills : []}
+                    formatLongParagraphs={m.role === "assistant"}
                   />
                 )}
                 {m.partial && !m.streaming && !m.pending ? (
@@ -215,15 +274,20 @@ export function MessageList({
                   </div>
                 ) : null}
                 {messageMetaLines ? (
-                  <div className="message__meta-stack">{messageMetaLines}</div>
+                  <MessageMetaStack lines={messageMetaLines} />
                 ) : null}
               </>
             );
             const messageActions =
               messageActionButtons || m.role === "assistant" ? (
                 <div className={`message__actions message__actions--${visualRole}`}>
-                  {messageActionButtons}
-                  {m.role === "assistant" ? <AssistantTiming message={m} /> : null}
+                  <div className="message__actions-row">
+                    {messageActionButtons}
+                    {m.role === "assistant" ? <AssistantTiming message={m} /> : null}
+                  </div>
+                  {m.role === "assistant" && m.worktreeChangeStats?.length ? (
+                    <AssistantWorktreeChanges files={m.worktreeChangeStats} />
+                  ) : null}
                 </div>
               ) : null;
 
@@ -242,7 +306,8 @@ export function MessageList({
                   <div
                     className={
                       `message message--${visualRole}` +
-                      (isThought ? " message--thought" : "")
+                      (isThought ? " message--thought" : "") +
+                      (isPermissionNotice ? " message--permission-notice" : "")
                     }
                     style={
                       isThought

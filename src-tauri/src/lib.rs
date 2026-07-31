@@ -63,6 +63,7 @@ pub fn run() {
             commands::claude_route_status,
             commands::open_cc_switch,
             commands::skills_list,
+            commands::project_worktree_changes,
             commands::project_pick_directory,
             commands::session_list,
             commands::session_create,

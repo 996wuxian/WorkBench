@@ -23,6 +23,74 @@ export type MarkdownBlock =
 
 export type TableAlignment = "left" | "center" | "right" | null;
 
+const READABLE_PARAGRAPH_MIN_LENGTH = 96;
+const READABLE_PARAGRAPH_TARGET_LENGTH = 112;
+const READABLE_PARAGRAPH_MAX_LENGTH = 156;
+
+export function splitReadableParagraph(text: string): string[] {
+  if (
+    text.length < READABLE_PARAGRAPH_MIN_LENGTH ||
+    text.includes("\n") ||
+    !/[。！？!?；;]/.test(text)
+  ) {
+    return [text];
+  }
+
+  const sentences = splitSentences(text);
+  if (sentences.length < 2) return [text];
+
+  const paragraphs: string[] = [];
+  let current = "";
+  for (const sentence of sentences) {
+    const next = current ? `${current}${sentence}` : sentence;
+    if (
+      current &&
+      (current.length >= READABLE_PARAGRAPH_TARGET_LENGTH ||
+        next.length > READABLE_PARAGRAPH_MAX_LENGTH)
+    ) {
+      paragraphs.push(current.trim());
+      current = sentence;
+    } else {
+      current = next;
+    }
+  }
+  if (current.trim()) paragraphs.push(current.trim());
+
+  return paragraphs.length > 1 ? paragraphs : [text];
+}
+
+function splitSentences(text: string): string[] {
+  const sentences: string[] = [];
+  let start = 0;
+  let inCode = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "`") {
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode || !/[。！？!?；;]/.test(char)) continue;
+
+    let end = index + 1;
+    while (end < text.length && /[”’」』）)\]]/.test(text[end])) {
+      end += 1;
+    }
+    while (end < text.length && /\s/.test(text[end])) {
+      end += 1;
+    }
+    sentences.push(text.slice(start, end));
+    start = end;
+    index = end - 1;
+  }
+
+  if (start < text.length) {
+    sentences.push(text.slice(start));
+  }
+
+  return sentences.filter((sentence) => sentence.trim().length > 0);
+}
+
 function splitTableRow(line: string): string[] {
   const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
   const cells: string[] = [];

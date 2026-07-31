@@ -1,8 +1,10 @@
 /** Streaming-turn affordances: the thinking dots, the typewriter, the timer. */
 import { useEffect, useMemo, useState } from "react";
 
+import { IconFileText } from "./icons";
 import { assistantElapsedLabel } from "../lib/messages";
-import type { ChatMessage } from "../lib/types";
+import { worktreeChangeTotals } from "../lib/worktreeChanges";
+import type { ChatMessage, WorktreeChangeStat } from "../lib/types";
 
 export function ThinkingIndicator() {
   return (
@@ -37,6 +39,51 @@ export function AssistantTiming({ message }: { message: ChatMessage }) {
 
   return (
     <span className="message__duration message__duration--inline">{label}</span>
+  );
+}
+
+export function AssistantWorktreeChanges({
+  files,
+}: {
+  files: WorktreeChangeStat[];
+}) {
+  const totals = worktreeChangeTotals(files);
+  if (files.length === 0) return null;
+
+  return (
+    <div
+      className="message-change-summary"
+      aria-label={`改动 ${files.length} 个文件，新增 ${totals.additions} 行，删除 ${totals.deletions} 行`}
+    >
+      <div className="message-change-summary__head">
+        <IconFileText size={13} />
+        <span>改动 {files.length} 个文件</span>
+        <span className="message-change-summary__count message-change-summary__count--add">
+          +{totals.additions}
+        </span>
+        <span className="message-change-summary__count message-change-summary__count--delete">
+          -{totals.deletions}
+        </span>
+      </div>
+      <ul className="message-change-summary__list">
+        {files.map((file) => (
+          <li key={file.path} className="message-change-summary__file">
+            <span className="message-change-summary__path" title={file.path}>
+              {file.path}
+            </span>
+            <span className="message-change-summary__lines">
+              {file.additions + file.deletions} 行
+            </span>
+            <span className="message-change-summary__count message-change-summary__count--add">
+              +{file.additions}
+            </span>
+            <span className="message-change-summary__count message-change-summary__count--delete">
+              -{file.deletions}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

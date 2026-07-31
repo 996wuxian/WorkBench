@@ -490,72 +490,73 @@ export function SessionSidebar({
         </div>
       ) : null}
 
-      <div className="sidebar__scroll" ref={sessionScrollRef} onScroll={handleScroll}>
-        <div className="sidebar__section-row">
-          <div className="sidebar__section-head">
-            <div className="sidebar__section-label">
-              {showArchived ? "Archived" : "Sessions"}
-            </div>
-            {showArchived ? (
-              <div className="sidebar__section-stats">{runtimeSessionCount}个</div>
-            ) : null}
+      <div className="sidebar__section-row">
+        <div className="sidebar__section-head">
+          <div className="sidebar__section-label">
+            {showArchived ? "Archived" : "Sessions"}
           </div>
-          <div className="sidebar__section-actions">
-            <button
-              type="button"
-              className={"section-icon-btn" + (showArchived ? " is-on" : "")}
-              title={showArchived ? "返回会话列表" : "查看归档会话"}
-              aria-label={showArchived ? "返回会话列表" : "查看归档会话"}
-              onClick={() => onShowArchivedChange(!showArchived)}
-            >
-              {showArchived ? <IconArchiveOff size={14} /> : <IconArchive size={14} />}
-            </button>
-            {!showArchived ? (
-              <>
-                <button
-                  type="button"
-                  className="section-icon-btn"
-                  title={`同步 ${runtimeLabel(runtimePick)} 原生会话`}
-                  disabled={syncing}
-                  onClick={() => onSyncNativeSessions("reset")}
-                >
-                  <IconRefresh size={14} />
-                </button>
-                <button
-                  type="button"
-                  className="section-icon-btn"
-                  title={
-                    sessionFilter.trim()
-                      ? "搜索时项目组保持展开"
-                      : allProjectGroupsCollapsed
-                        ? "展开全部项目"
-                        : "折叠全部项目"
-                  }
-                  aria-label={
-                    allProjectGroupsCollapsed ? "展开全部项目" : "折叠全部项目"
-                  }
-                  disabled={projectGroups.length === 0 || Boolean(sessionFilter.trim())}
-                  onClick={() =>
-                    setCollapsedProjects((current) => {
-                      const next = new Set(current);
-                      for (const group of projectGroups) {
-                        if (allProjectGroupsCollapsed) next.delete(group.key);
-                        else next.add(group.key);
-                      }
-                      return next;
-                    })
-                  }
-                >
-                  {allProjectGroupsCollapsed ? (
-                    <IconChevronsDown size={14} />
-                  ) : (
-                    <IconChevronsUp size={14} />
-                  )}
-                </button>
-              </>
-            ) : null}
-          </div>
+          {showArchived ? (
+            <div className="sidebar__section-stats">{runtimeSessionCount}个</div>
+          ) : null}
         </div>
+        <div className="sidebar__section-actions">
+          <button
+            type="button"
+            className={"section-icon-btn" + (showArchived ? " is-on" : "")}
+            title={showArchived ? "返回会话列表" : "查看归档会话"}
+            aria-label={showArchived ? "返回会话列表" : "查看归档会话"}
+            onClick={() => onShowArchivedChange(!showArchived)}
+          >
+            {showArchived ? <IconArchiveOff size={14} /> : <IconArchive size={14} />}
+          </button>
+          {!showArchived ? (
+            <>
+              <button
+                type="button"
+                className="section-icon-btn"
+                title={`同步 ${runtimeLabel(runtimePick)} 原生会话`}
+                disabled={syncing}
+                onClick={() => onSyncNativeSessions("reset")}
+              >
+                <IconRefresh size={14} />
+              </button>
+              <button
+                type="button"
+                className="section-icon-btn"
+                title={
+                  sessionFilter.trim()
+                    ? "搜索时项目组保持展开"
+                    : allProjectGroupsCollapsed
+                      ? "展开全部项目"
+                      : "折叠全部项目"
+                }
+                aria-label={
+                  allProjectGroupsCollapsed ? "展开全部项目" : "折叠全部项目"
+                }
+                disabled={projectGroups.length === 0 || Boolean(sessionFilter.trim())}
+                onClick={() =>
+                  setCollapsedProjects((current) => {
+                    const next = new Set(current);
+                    for (const group of projectGroups) {
+                      if (allProjectGroupsCollapsed) next.delete(group.key);
+                      else next.add(group.key);
+                    }
+                    return next;
+                  })
+                }
+              >
+                {allProjectGroupsCollapsed ? (
+                  <IconChevronsDown size={14} />
+                ) : (
+                  <IconChevronsUp size={14} />
+                )}
+              </button>
+            </>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="sidebar__scroll" ref={sessionScrollRef} onScroll={handleScroll}>
         {filteredSessions.length === 0 ? (
           <div className="sidebar-empty">
             {runtimeSessionCount === 0

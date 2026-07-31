@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   assistantElapsedLabel,
   finalizeStreamingMessage,
+  isPermissionResolutionNotice,
   normalizeLoadedMessages,
   restoreSessionMessages,
 } from "./messages";
@@ -48,6 +49,27 @@ describe("finalizeStreamingMessage", () => {
       streaming: false,
       pending: false,
     });
+  });
+});
+
+describe("permission resolution notices", () => {
+  it("recognizes Host permission resolution system notices", () => {
+    expect(
+      isPermissionResolutionNotice({
+        role: "system",
+        content:
+          "权限请求「工具调用」已由 本会话已记住的授权 处理为 允许。",
+      }),
+    ).toBe(true);
+  });
+
+  it("does not treat other system messages as permission notices", () => {
+    expect(
+      isPermissionResolutionNotice({
+        role: "system",
+        content: "Agent 进程已退出。下次发送会自动重连。",
+      }),
+    ).toBe(false);
   });
 });
 

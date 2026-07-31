@@ -146,6 +146,17 @@ export interface SkillsListResult {
   searchedPaths: string[];
 }
 
+export interface WorktreeChangeStat {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+export interface WorktreeChangeSnapshot {
+  projectPath: string;
+  files: WorktreeChangeStat[];
+}
+
 export interface SessionDeleteResult {
   deletedSessionId: string;
   deletedPath: string;
@@ -211,6 +222,8 @@ export interface ChatMessage {
   pending?: boolean;
   /** Live-only: revisiting this stream should not replay received text from zero. */
   revealImmediately?: boolean;
+  /** Live-only: net file changes detected for this assistant turn. */
+  worktreeChangeStats?: WorktreeChangeStat[];
 }
 
 /** A pending tool approval waiting on the user. */

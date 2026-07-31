@@ -1,5 +1,6 @@
 //! Tauri command surface for the Workbench UI.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -136,6 +137,21 @@ pub struct SkillsListResult {
     pub searched_paths: Vec<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeChangeStat {
+    pub path: String,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeChangeSnapshot {
+    pub project_path: String,
+    pub files: Vec<WorktreeChangeStat>,
+}
+
 /// Discover skill manifests without invoking or modifying a user's CLI.
 /// Project-local skills win over user-level skills with the same name.
 #[tauri::command]
@@ -210,6 +226,132 @@ pub fn skills_list(
         skills,
         searched_paths,
     })
+}
+
+#[tauri::command]
+pub fn project_worktree_changes(project_path: String) -> Result<WorktreeChangeSnapshot, String> {
+    let Some(root) = resolve_git_root(&project_path)? else {
+        return Ok(WorktreeChangeSnapshot {
+            project_path,
+            files: Vec::new(),
+        });
+    };
+
+    let mut files = BTreeMap::<String, WorktreeChangeStat>::new();
+
+    let numstat = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["diff", "--numstat", "HEAD", "--"])
+        .output()
+        .map_err(|err| format!("failed to run git diff: {err}"))?;
+    if numstat.status.success() {
+        let text = String::from_utf8_lossy(&numstat.stdout);
+        for line in text.lines() {
+            if let Some(stat) = parse_numstat_line(line) {
+                files.insert(stat.path.clone(), stat);
+            }
+        }
+    }
+
+    let untracked = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .output()
+        .map_err(|err| format!("failed to list untracked files: {err}"))?;
+    if untracked.status.success() {
+        for raw in untracked.stdout.split(|byte| *byte == 0) {
+            if raw.is_empty() {
+                continue;
+            }
+            let path = String::from_utf8_lossy(raw).replace('\\', "/");
+            if files.contains_key(&path) {
+                continue;
+            }
+            let additions = count_text_lines(&root.join(&path)).unwrap_or(0);
+            files.insert(
+                path.clone(),
+                WorktreeChangeStat {
+                    path,
+                    additions,
+                    deletions: 0,
+                },
+            );
+        }
+    }
+
+    Ok(WorktreeChangeSnapshot {
+        project_path: root.display().to_string(),
+        files: files.into_values().collect(),
+    })
+}
+
+fn resolve_git_root(project_path: &str) -> Result<Option<PathBuf>, String> {
+    let path = project_path.trim();
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let path = PathBuf::from(path);
+    if !path.is_dir() {
+        return Ok(None);
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&path)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|err| format!("failed to run git: {err}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let root = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if root.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PathBuf::from(root)))
+}
+
+fn parse_numstat_line(line: &str) -> Option<WorktreeChangeStat> {
+    let mut parts = line.splitn(3, '\t');
+    let additions = parse_numstat_count(parts.next()?)?;
+    let deletions = parse_numstat_count(parts.next()?)?;
+    let path = parts.next()?.trim().replace('\\', "/");
+    if path.is_empty() {
+        return None;
+    }
+    Some(WorktreeChangeStat {
+        path,
+        additions,
+        deletions,
+    })
+}
+
+fn parse_numstat_count(value: &str) -> Option<u32> {
+    if value == "-" {
+        return Some(0);
+    }
+    value.parse().ok()
+}
+
+fn count_text_lines(path: &Path) -> Option<u32> {
+    if !path.is_file() {
+        return None;
+    }
+    let bytes = fs::read(path).ok()?;
+    if bytes.iter().any(|byte| *byte == 0) {
+        return None;
+    }
+    let mut lines = bytes.iter().filter(|byte| **byte == b'\n').count();
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        lines += 1;
+    }
+    u32::try_from(lines).ok()
 }
 
 fn find_skill_manifests(root: &Path, max_depth: usize) -> Vec<PathBuf> {
