@@ -64,8 +64,8 @@ fn permission_label(mode: PermissionMode) -> (&'static str, &'static str) {
 }
 
 /// Default catalog for runtimes that cannot be queried for their own options.
-/// Unsupported permission modes are listed but disabled, so the UI shows *why*
-/// a mode is unavailable instead of silently hiding it.
+/// A non-empty manifest `permissionModes` list is authoritative; otherwise all
+/// Host-known modes are offered.
 pub fn from_manifest(
     manifest: &RuntimeManifest,
     current_model: Option<String>,
@@ -81,18 +81,16 @@ pub fn from_manifest(
         model_options.push(option.clone());
     }
 
-    let permission_options = ALL_PERMISSION_MODES
+    let permission_modes: Vec<PermissionMode> = if manifest.permission_modes.is_empty() {
+        ALL_PERMISSION_MODES.to_vec()
+    } else {
+        manifest.permission_modes.clone()
+    };
+    let permission_options = permission_modes
         .iter()
         .map(|&mode| {
             let (label, hint) = permission_label(mode);
-            let supported = manifest.supports_permission_mode(mode);
-            ChoiceOption::new(mode.as_str(), label)
-                .with_hint(if supported {
-                    hint.to_string()
-                } else {
-                    format!("{} 暂不支持", manifest.display_name)
-                })
-                .disabled(!supported)
+            ChoiceOption::new(mode.as_str(), label).with_hint(hint.to_string())
         })
         .collect();
 
@@ -102,5 +100,24 @@ pub fn from_manifest(
             .expect("catalog built from a validated manifest"),
         model_options,
         permission_options,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::manifest;
+
+    #[test]
+    fn grok_catalog_only_exposes_supported_permission_modes() {
+        let manifest = manifest::get(RuntimeId::GROK).expect("grok manifest");
+        let catalog = from_manifest(manifest, None);
+        let values = catalog
+            .permission_options
+            .iter()
+            .map(|option| option.value.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(values, vec!["ask", "auto"]);
     }
 }

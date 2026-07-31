@@ -53,6 +53,8 @@ pub struct AcpSpawnOpts {
     /// Host-owned approval gate. Every `session/request_permission` is routed
     /// through this — the transport never decides on its own.
     pub permissions: PermissionBroker,
+    /// Grok only: enable auto-approval of all permission requests.
+    pub auto_allow_permissions: bool,
 }
 
 pub struct AcpClient {
@@ -95,6 +97,9 @@ impl AcpClient {
         let mut cmd = Command::new(&opts.cli_path);
         for a in &opts.pre_stdio_args {
             cmd.arg(a);
+        }
+        if opts.auto_allow_permissions {
+            cmd.arg("--auto-allow-permissions");
         }
         if let (Some(flag), Some(model)) = (opts.model_arg.as_deref(), opts.model_id.as_deref()) {
             let model = model.trim();

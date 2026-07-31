@@ -116,6 +116,17 @@ export function fallbackPermissionOptions(
 ): SessionSelectionCatalog["permissionOptions"] {
   const info = runtimeInfo(runtimeId);
   const supported = info?.permissionModes ?? [];
+
+  // Grok 本身只支持 ask + auto，不要显示四种（避免重复回复 + 耗时问题）
+  if (runtimeId === "grok") {
+    return ["ask", "auto"].map((mode) => ({
+      value: mode as PermissionMode,
+      label: PERMISSION_MODE_LABEL[mode as PermissionMode],
+      hint: PERMISSION_MODE_HINT[mode as PermissionMode],
+      disabled: false,
+    }));
+  }
+
   return PERMISSION_MODE_ORDER.map((mode) => {
     const usable = supported.length === 0 || supported.includes(mode);
     return {

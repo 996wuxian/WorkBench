@@ -26,7 +26,6 @@ import { MessageNodeRail } from "./MessageNodeRail";
 import { copyTextToClipboard } from "../lib/format";
 import { useMessageNodeNavigation } from "../hooks/useMessageNodeNavigation";
 import {
-  isPermissionResolutionNotice,
   messageRoleLabel,
   toolMessageLabel,
   type QuoteTarget,
@@ -182,7 +181,7 @@ export function MessageList({
               return null;
             }
             const isThought = m.role === "thought";
-            const isPermissionNotice = isPermissionResolutionNotice(m);
+            const isSystemNotice = m.role === "system";
             const visualRole =
               m.role === "thought" || m.role === "tool" ? "system" : m.role;
             const messageRuntime = m.runtimeId ?? fallbackRuntimeId ?? "grok";
@@ -206,7 +205,7 @@ export function MessageList({
               Boolean(m.content?.trim()) &&
               !thinking &&
               !isThought &&
-              !isPermissionNotice;
+              !isSystemNotice;
             const canQuote = canCopy;
             const messageActionButtons =
               canCopy || canQuote ? (
@@ -306,8 +305,7 @@ export function MessageList({
                   <div
                     className={
                       `message message--${visualRole}` +
-                      (isThought ? " message--thought" : "") +
-                      (isPermissionNotice ? " message--permission-notice" : "")
+                      (isThought ? " message--thought" : "")
                     }
                     style={
                       isThought

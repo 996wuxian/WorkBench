@@ -67,6 +67,11 @@ impl PermissionMode {
     pub fn auto_allow(self) -> bool {
         matches!(self, Self::Auto | Self::FullAccess)
     }
+
+    /// Grok-specific: auto-approve (only supported mode for Grok).
+    pub fn grok_auto_allow(self) -> bool {
+        matches!(self, Self::Auto)
+    }
 }
 
 /// Session-level settings owned by the Host but validated per runtime.

@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::error::{AgentError, AgentErrorCode};
 use crate::host::events::{HostEvent, StreamKind};
-use crate::host::permissions::{PermissionBroker, PermissionDecision};
+use crate::host::permissions::{DecisionSource, PermissionBroker, PermissionDecision};
 use crate::native_sessions::NativeSessionItem;
 use crate::runtime::{
     self, ConnectOpts, LiveSession, NativeSessionSource, PermissionMode, PromptInput, RuntimeId,
@@ -84,6 +84,7 @@ struct LiveSessionSlot {
     prompt_paused_ms: u64,
     permission_pause_started_at: Option<DateTime<Utc>>,
     pending_permission_count: usize,
+    pending_permission_titles: HashMap<String, String>,
     persisted: bool,
 }
 
@@ -252,6 +253,25 @@ fn permission_request_trace_details(
     })
 }
 
+fn permission_decision_label(decision: PermissionDecision) -> &'static str {
+    match decision {
+        PermissionDecision::AllowOnce => "允许",
+        PermissionDecision::AllowAlways => "始终允许",
+        PermissionDecision::Deny => "拒绝",
+        PermissionDecision::Cancel => "取消",
+    }
+}
+
+fn permission_source_label(source: DecisionSource) -> &'static str {
+    match source {
+        DecisionSource::User => "你",
+        DecisionSource::Mode => "会话权限模式",
+        DecisionSource::Remembered => "本会话已记住的授权",
+        DecisionSource::Timeout => "超时策略",
+        DecisionSource::Aborted => "进程退出",
+    }
+}
+
 fn session_settings_trace_details(patch: &SessionSettingsPatch) -> serde_json::Value {
     let mut details = serde_json::Map::new();
     let mut changed_fields = Vec::new();
@@ -397,6 +417,7 @@ impl SessionManager {
                     prompt_paused_ms: 0,
                     permission_pause_started_at: None,
                     pending_permission_count: 0,
+                    pending_permission_titles: HashMap::new(),
                     persisted: true,
                 },
             );
@@ -524,6 +545,7 @@ impl SessionManager {
                         prompt_paused_ms: 0,
                         permission_pause_started_at: None,
                         pending_permission_count: 0,
+                        pending_permission_titles: HashMap::new(),
                         persisted: true,
                     },
                 );
@@ -594,6 +616,7 @@ impl SessionManager {
             prompt_paused_ms: 0,
             permission_pause_started_at: None,
             pending_permission_count: 0,
+            pending_permission_titles: HashMap::new(),
             persisted: false,
         };
 
@@ -1124,7 +1147,18 @@ impl SessionManager {
                         );
                         // Auto-allowed requests are surfaced for the transcript but
                         // must not park the FSM: nobody is going to answer them.
-                        if !auto_allowed && mgr_events.mark_awaiting_permission(&sid_events) {
+                        if *auto_allowed {
+                            mgr_events.append_tool_message(
+                                &sid_events,
+                                request_id,
+                                tool_name,
+                                title,
+                                "auto approved",
+                            );
+                        } else {
+                            mgr_events.remember_permission_title(&sid_events, request_id, title);
+                        }
+                        if !*auto_allowed && mgr_events.mark_awaiting_permission(&sid_events) {
                             mgr_events.emit_state(&app_events, &sid_events);
                         }
                         let _ = app_events.emit(
@@ -1144,6 +1178,8 @@ impl SessionManager {
                         decision,
                         source,
                     } => {
+                        let resolved_title =
+                            mgr_events.take_permission_title(&sid_events, request_id);
                         mgr_events.record_trace(
                             &sid_events,
                             "permission_resolved",
@@ -1154,6 +1190,18 @@ impl SessionManager {
                         );
                         if mgr_events.mark_permission_resolved(&sid_events) {
                             mgr_events.emit_state(&app_events, &sid_events);
+                        }
+                        if !matches!(*source, DecisionSource::User | DecisionSource::Mode) {
+                            let title = resolved_title.as_deref().unwrap_or("工具调用");
+                            mgr_events.append_system_message(
+                                &sid_events,
+                                format!(
+                                    "权限请求「{}」已由 {} 处理为 {}。",
+                                    title,
+                                    permission_source_label(*source),
+                                    permission_decision_label(*decision)
+                                ),
+                            );
                         }
                         let _ = app_events.emit(
                             "session://permission_resolved",
@@ -1423,6 +1471,14 @@ impl SessionManager {
                 tracing::warn!("failed to save session meta {}: {err}", slot.meta.id);
             }
         }
+        drop(guard);
+        self.append_system_message(
+            session_id,
+            match code {
+                Some(code) => format!("Agent 进程已退出（exit code {code}）。下次发送会自动重连。"),
+                None => "Agent 进程已退出。下次发送会自动重连。".to_string(),
+            },
+        );
         true
     }
 
@@ -1517,7 +1573,8 @@ impl SessionManager {
             let Some(slot) = guard.sessions.get_mut(session_id) else {
                 return;
             };
-            if slot.prompt_started_at.is_none()
+            let had_prompt_started = slot.prompt_started_at.is_some();
+            if !had_prompt_started
                 && slot.mirror.assistant.text.is_empty()
                 && slot.mirror.thought.text.is_empty()
             {
@@ -1570,14 +1627,37 @@ impl SessionManager {
                 "assistantBytes": assistant_bytes,
                 "thoughtBytes": thought_bytes,
             });
-            (messages, incomplete_streams, details)
+            (
+                messages,
+                incomplete_streams,
+                details,
+                had_prompt_started,
+                runtime_id,
+            )
         };
-        let (messages, incomplete_streams, details) = result;
+        let (messages, incomplete_streams, details, had_prompt_started, runtime_id) = result;
         for stream_details in incomplete_streams {
             self.record_trace(session_id, "stream_completed", stream_details);
         }
+        let had_visible_messages = !messages.is_empty();
         for message in messages {
             self.append_message(session_id, &message);
+        }
+        if had_prompt_started
+            && !had_visible_messages
+            && !matches!(
+                stop_reason,
+                "error" | "exited" | "cancelled" | "disconnected"
+            )
+        {
+            let runtime_name = runtime::manifest::display_name(runtime_id);
+            self.append_system_message(
+                session_id,
+                format!(
+                    "error EMPTY_RESPONSE: {} 本轮已结束，但没有返回任何可显示内容（stopReason: {}）。",
+                    runtime_name, stop_reason
+                ),
+            );
         }
         self.record_trace(session_id, "prompt_completed", details);
     }
@@ -1585,13 +1665,10 @@ impl SessionManager {
     fn record_error(&self, session_id: &str, error: &AgentError) {
         self.record_prompt_complete(session_id, "error");
         self.record_trace(session_id, "agent_error", error_trace_details(error));
-        let runtime_id = self.runtime_id_for_session(session_id);
-        let message = StoredChatMessage::new(
-            "system",
+        self.append_system_message(
+            session_id,
             format!("error {}: {}", error.code.as_str(), error.message),
-            runtime_id,
         );
-        self.append_message(session_id, &message);
     }
 
     fn runtime_id_for_session(&self, session_id: &str) -> Option<RuntimeId> {
@@ -1606,6 +1683,40 @@ impl SessionManager {
         if let Err(err) = session_store::append_message(session_id, message) {
             tracing::warn!("failed to append session message {session_id}: {err}");
         }
+    }
+
+    fn append_system_message(&self, session_id: &str, content: String) {
+        let runtime_id = self.runtime_id_for_session(session_id);
+        let message = StoredChatMessage::new("system", content, runtime_id);
+        self.append_message(session_id, &message);
+    }
+
+    fn append_tool_message(
+        &self,
+        session_id: &str,
+        id: &str,
+        name: &str,
+        title: &str,
+        status: &str,
+    ) {
+        let runtime_id = self.runtime_id_for_session(session_id);
+        let message = StoredChatMessage::tool(id, name, title, status, runtime_id);
+        self.append_message(session_id, &message);
+    }
+
+    fn remember_permission_title(&self, session_id: &str, request_id: &str, title: &str) {
+        let mut guard = self.inner.lock();
+        let Some(slot) = guard.sessions.get_mut(session_id) else {
+            return;
+        };
+        slot.pending_permission_titles
+            .insert(request_id.to_string(), title.to_string());
+    }
+
+    fn take_permission_title(&self, session_id: &str, request_id: &str) -> Option<String> {
+        let mut guard = self.inner.lock();
+        let slot = guard.sessions.get_mut(session_id)?;
+        slot.pending_permission_titles.remove(request_id)
     }
 
     fn record_trace(&self, session_id: &str, event: &str, details: serde_json::Value) {
@@ -1777,7 +1888,7 @@ impl SessionManager {
         tokio::spawn(async move {
             let result = live.prompt(PromptInput { text }).await;
             if let Err(error) = &result {
-                mgr.record_prompt_complete(&session_id, "error");
+                mgr.record_error(&session_id, error);
                 mgr.record_trace(&session_id, "prompt_failed", error_trace_details(error));
                 let _ = live.shutdown().await;
                 let mut guard = mgr.inner.lock();
@@ -2157,6 +2268,7 @@ mod tests {
             prompt_paused_ms: 0,
             permission_pause_started_at: None,
             pending_permission_count: 0,
+            pending_permission_titles: HashMap::new(),
             persisted: false,
         };
 

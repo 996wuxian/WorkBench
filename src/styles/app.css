@@ -1457,17 +1457,11 @@ select,
   align-self: center;
   color: var(--text-tertiary);
   background: transparent;
-  border-style: dashed;
-  font-size: 12px;
-  max-width: 560px;
-}
-
-.message--permission-notice {
   padding: 0;
   border: 0;
   border-radius: 0;
-  background: transparent;
-  max-width: min(620px, 100%);
+  font-size: 12px;
+  max-width: 560px;
 }
 
 .markdown-message {

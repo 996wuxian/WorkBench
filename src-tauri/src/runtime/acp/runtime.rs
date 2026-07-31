@@ -18,6 +18,7 @@ use crate::process_util;
 use crate::runtime::acp::{AcpClient, AcpSpawnOpts};
 use crate::runtime::manifest::RuntimeManifest;
 use crate::runtime::traits::{AgentRuntime, ConnectOpts, LiveSession, ProbeResult, PromptInput};
+use crate::runtime::RuntimeId;
 
 pub struct AcpRuntime {
     manifest: &'static RuntimeManifest,
@@ -98,6 +99,8 @@ impl AgentRuntime for AcpRuntime {
             client_name: "workbench".into(),
             runtime_id: self.id(),
             permissions: opts.permissions.clone(),
+            auto_allow_permissions: self.id() == RuntimeId::GROK
+                && opts.permission_mode.grok_auto_allow(),
         };
 
         let (client, mut rx) = AcpClient::spawn(spawn_opts)?;
