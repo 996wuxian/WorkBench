@@ -158,6 +158,42 @@ function tableBlockAt(
   };
 }
 
+function isImplicitIndentedListLine(line: string): boolean {
+  return /^\s{2,}\S/.test(line) && !/^(\s*)([-*+]|\d+\.)\s+/.test(line);
+}
+
+function paragraphBlocksFromLines(lines: string[]): MarkdownBlock[] {
+  const blocks: MarkdownBlock[] = [];
+  let paragraph: string[] = [];
+  let index = 0;
+
+  const flushParagraph = () => {
+    if (paragraph.length === 0) return;
+    blocks.push({ type: "paragraph", text: paragraph.join("\n") });
+    paragraph = [];
+  };
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!isImplicitIndentedListLine(line)) {
+      paragraph.push(line);
+      index += 1;
+      continue;
+    }
+
+    flushParagraph();
+    const items: string[] = [];
+    while (index < lines.length && isImplicitIndentedListLine(lines[index])) {
+      items.push(lines[index].trim());
+      index += 1;
+    }
+    blocks.push({ type: "list", ordered: false, items });
+  }
+
+  flushParagraph();
+  return blocks;
+}
+
 export function parseMarkdownBlocks(source: string): MarkdownBlock[] {
   const lines = source.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
   const blocks: MarkdownBlock[] = [];
@@ -242,7 +278,7 @@ export function parseMarkdownBlocks(source: string): MarkdownBlock[] {
       paragraph.push(lines[index]);
       index += 1;
     }
-    blocks.push({ type: "paragraph", text: paragraph.join("\n") });
+    blocks.push(...paragraphBlocksFromLines(paragraph));
   }
 
   return blocks;

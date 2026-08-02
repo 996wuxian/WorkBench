@@ -975,13 +975,13 @@ select,
 }
 
 .message-node-rail__step {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--text-tertiary);
   flex: 0 0 auto;
 }
@@ -1002,11 +1002,11 @@ select,
   min-height: 0;
   max-height: min(56vh, 420px);
   margin: 0;
-  padding: 4px 0;
+  padding: 1px 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 3px;
+  gap: 0;
   overflow-x: hidden;
   overflow-y: auto;
   list-style: none;
@@ -1019,15 +1019,15 @@ select,
 }
 
 .message-node-rail__item {
-  width: 24px;
-  height: 13px;
+  width: 26px;
+  height: 10px;
   flex: 0 0 auto;
 }
 
 .message-node-rail__tick {
   position: relative;
-  width: 24px;
-  height: 13px;
+  width: 26px;
+  height: 10px;
   padding: 0;
   display: block;
   border-radius: 4px;
@@ -1038,7 +1038,7 @@ select,
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 11px;
+  width: var(--message-node-width, 12px);
   height: 2px;
   border-radius: 1px;
   background: color-mix(in srgb, var(--text-tertiary) 62%, transparent);
@@ -1051,18 +1051,17 @@ select,
 }
 
 .message-node-rail__tick--user::before {
-  width: 8px;
   opacity: 0.72;
 }
 
 .message-node-rail__tick:hover::before,
 .message-node-rail__tick:focus-visible::before {
-  width: 16px;
+  width: min(22px, calc(var(--message-node-width, 12px) + 5px));
   background: var(--text-secondary);
 }
 
 .message-node-rail__tick.is-active::before {
-  width: 18px;
+  width: min(24px, calc(var(--message-node-width, 12px) + 8px));
   height: 3px;
   background: var(--accent-hover);
   opacity: 1;
@@ -1161,6 +1160,7 @@ select,
   display: flex;
   align-items: flex-start;
   gap: 9px;
+  padding-left: 14px;
 }
 
 .message-row--assistant .message-block {
@@ -1827,6 +1827,23 @@ select,
 .markdown-message ol {
   margin: 0 0 8px 1.25em;
   padding: 0;
+}
+
+.markdown-message ul {
+  margin-left: 0;
+  list-style: none;
+}
+
+.markdown-message ul li {
+  position: relative;
+  padding-left: 1em;
+}
+
+.markdown-message ul li::before {
+  content: "-";
+  position: absolute;
+  left: 0;
+  color: var(--text-tertiary);
 }
 
 .markdown-message li + li {

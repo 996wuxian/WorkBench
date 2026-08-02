@@ -1,5 +1,5 @@
 import { createPortal } from "react-dom";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { IconChevronDown, IconChevronUp } from "./icons";
 import type { SessionMessageNode } from "../lib/sessionMessageNodes";
@@ -25,6 +25,15 @@ interface TipState {
   node: SessionMessageNode;
   top: number;
   left: number;
+}
+
+const assistantTickWidths = [11, 15, 13, 18, 12, 16];
+const userTickWidths = [7, 10, 8, 11, 9];
+
+function tickStyle(node: SessionMessageNode): CSSProperties {
+  const widths = node.role === "user" ? userTickWidths : assistantTickWidths;
+  const width = widths[node.nodeIndex % widths.length];
+  return { "--message-node-width": `${width}px` } as CSSProperties;
 }
 
 export function MessageNodeRail({
@@ -95,7 +104,7 @@ export function MessageNodeRail({
         disabled={!canPrevious}
         onClick={onPrevious}
       >
-        <IconChevronUp size={14} />
+        <IconChevronUp size={18} />
       </button>
 
       <ol ref={listRef} className="message-node-rail__list">
@@ -113,6 +122,7 @@ export function MessageNodeRail({
                   (node.status === "pending" ? " is-pending" : "") +
                   (node.status === "interrupted" ? " is-interrupted" : "")
                 }
+                style={tickStyle(node)}
                 aria-label={`${roleLabel}: ${node.preview}`}
                 aria-current={active ? "true" : undefined}
                 onMouseEnter={(event) => showTip(node, event.currentTarget)}
@@ -134,7 +144,7 @@ export function MessageNodeRail({
         disabled={!canNext}
         onClick={onNext}
       >
-        <IconChevronDown size={14} />
+        <IconChevronDown size={18} />
       </button>
 
       {tip

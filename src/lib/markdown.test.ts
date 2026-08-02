@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { splitReadableParagraph } from "./markdown";
+import { parseMarkdownBlocks, splitReadableParagraph } from "./markdown";
 
 describe("readable paragraph splitting", () => {
   it("splits long assistant-style Chinese paragraphs at sentence boundaries", () => {
@@ -22,5 +22,29 @@ describe("readable paragraph splitting", () => {
       "第二行继续说明，所以显示层不应该再二次拆分。";
 
     expect(splitReadableParagraph(text)).toStrictEqual([text]);
+  });
+});
+
+describe("markdown block parsing", () => {
+  it("turns indented assistant summary lines into unordered list items", () => {
+    const blocks = parseMarkdownBlocks(
+      "首页已调整并重新打包:\n" +
+        "  去掉顶部主标题，保留操作提示。\n" +
+        "  瓶子放大为 `300 × 345`。\n" +
+        "检查结果：`flutter analyze` 无问题。",
+    );
+
+    expect(blocks).toStrictEqual([
+      { type: "paragraph", text: "首页已调整并重新打包:" },
+      {
+        type: "list",
+        ordered: false,
+        items: [
+          "去掉顶部主标题，保留操作提示。",
+          "瓶子放大为 `300 × 345`。",
+        ],
+      },
+      { type: "paragraph", text: "检查结果：`flutter analyze` 无问题。" },
+    ]);
   });
 });
