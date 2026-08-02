@@ -6,6 +6,7 @@ import {
   isPermissionResolutionNotice,
   normalizeLoadedMessages,
   restoreSessionMessages,
+  toolMessageLabel,
 } from "./messages";
 import type { ChatMessage, SessionSnapshot } from "./types";
 
@@ -70,6 +71,22 @@ describe("permission resolution notices", () => {
         content: "Agent 进程已退出。下次发送会自动重连。",
       }),
     ).toBe(false);
+  });
+});
+
+describe("tool message labels", () => {
+  it("compacts long PowerShell write commands", () => {
+    const label = toolMessageLabel({
+      id: "tool-1",
+      role: "tool",
+      content: "",
+      toolName: "command",
+      toolTitle:
+        "C:\\Program Files\\PowerShell\\pwsh.exe -Command \"@'\\n<html>very long generated html</html>\\n'@ | Set-Content -LiteralPath 'X:\\test\\neon-voyage.html' -Encoding UTF8\"",
+      toolStatus: "completed",
+    });
+
+    expect(label).toBe("PowerShell · write X:\\test\\neon-voyage.html · completed");
   });
 });
 

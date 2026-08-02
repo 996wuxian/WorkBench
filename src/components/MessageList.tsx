@@ -32,6 +32,10 @@ import {
 } from "../lib/messages";
 import { emitToast } from "../lib/toast";
 import { runtimeAvatarLabel, runtimeAvatarSrc, runtimeLabel } from "../lib/runtimes";
+import {
+  splitWorktreeChangeMarkers,
+  stripWorktreeChangeMarkers,
+} from "../lib/worktreeChanges";
 import type { ChatMessage, RuntimeId, SkillInfo } from "../lib/types";
 
 /** An assistant turn plus the tool calls it made, folded in as meta lines. */
@@ -99,6 +103,74 @@ function MessageMetaStack({
         ))}
       </div>
     </div>
+  );
+}
+
+function AssistantBubbleContent({
+  message,
+  typing,
+  thinking,
+  skills,
+  revealImmediately,
+  onTypingProgress,
+}: {
+  message: ChatMessage;
+  typing: boolean;
+  thinking: boolean;
+  skills: SkillInfo[];
+  revealImmediately?: boolean;
+  onTypingProgress: () => void;
+}) {
+  if (thinking) return <ThinkingIndicator />;
+
+  const blocks = new Map(
+    (message.worktreeChangeBlocks ?? []).map((block) => [block.id, block.files]),
+  );
+  if (blocks.size === 0) {
+    return typing ? (
+      <StreamingText
+        content={message.content || ""}
+        revealImmediately={revealImmediately}
+        onProgress={onTypingProgress}
+      />
+    ) : (
+      <MarkdownMessage
+        content={message.content || ""}
+        skills={skills}
+        formatLongParagraphs
+      />
+    );
+  }
+
+  return (
+    <>
+      {splitWorktreeChangeMarkers(message.content || "").map((part, index) => {
+        if (part.kind === "marker") {
+          const files = blocks.get(part.id);
+          return files?.length ? (
+            <AssistantWorktreeChanges key={`${part.id}:${index}`} files={files} />
+          ) : null;
+        }
+        if (!part.text) return null;
+        return (
+          <div key={`text:${index}`} className="message__content-segment">
+            {typing ? (
+              <StreamingText
+                content={part.text}
+                revealImmediately={revealImmediately}
+                onProgress={onTypingProgress}
+              />
+            ) : (
+              <MarkdownMessage
+                content={part.text}
+                skills={skills}
+                formatLongParagraphs
+              />
+            )}
+          </div>
+        );
+      })}
+    </>
   );
 }
 
@@ -188,7 +260,9 @@ export function MessageList({
             const messageRuntimeLabel = runtimeLabel(messageRuntime);
             const avatarSrc =
               m.role === "assistant" ? runtimeAvatarSrc[messageRuntime] : null;
-            const thinking = m.role === "assistant" && m.pending && m.streaming;
+            const thinking = Boolean(
+              m.role === "assistant" && m.pending && m.streaming,
+            );
             const typing =
               m.role === "assistant" &&
               (m.streaming || (assistantTypingUntil[m.id] ?? 0) > Date.now()) &&
@@ -202,7 +276,7 @@ export function MessageList({
                 : null;
             const quoteLabel = messageRoleLabel(m, messageRuntimeLabel);
             const canCopy =
-              Boolean(m.content?.trim()) &&
+              Boolean(stripWorktreeChangeMarkers(m.content || "").trim()) &&
               !thinking &&
               !isThought &&
               !isSystemNotice;
@@ -217,7 +291,9 @@ export function MessageList({
                       title="复制消息"
                       onClick={(ev) => {
                         ev.stopPropagation();
-                        void copyTextToClipboard(m.content).then(
+                        void copyTextToClipboard(
+                          stripWorktreeChangeMarkers(m.content),
+                        ).then(
                           () => emitToast("已复制"),
                           (error) => emitToast({
                             message: `复制失败: ${String(error)}`,
@@ -241,7 +317,7 @@ export function MessageList({
                           role: m.role,
                           runtimeId: m.runtimeId ?? fallbackRuntimeId,
                           label: quoteLabel,
-                          content: m.content,
+                          content: stripWorktreeChangeMarkers(m.content),
                         });
                       }}
                     >
@@ -252,19 +328,20 @@ export function MessageList({
               ) : null;
             const messageBubble = (
               <>
-                {thinking ? (
-                  <ThinkingIndicator />
-                ) : typing ? (
-                  <StreamingText
-                    content={m.content || ""}
+                {m.role === "assistant" ? (
+                  <AssistantBubbleContent
+                    message={m}
+                    typing={typing}
+                    thinking={thinking}
+                    skills={[]}
                     revealImmediately={m.revealImmediately}
-                    onProgress={onTypingProgress}
+                    onTypingProgress={onTypingProgress}
                   />
                 ) : (
                   <MarkdownMessage
                     content={m.content || ""}
                     skills={m.role === "user" ? skills : []}
-                    formatLongParagraphs={m.role === "assistant"}
+                    formatLongParagraphs={false}
                   />
                 )}
                 {m.partial && !m.streaming && !m.pending ? (
@@ -284,9 +361,6 @@ export function MessageList({
                     {messageActionButtons}
                     {m.role === "assistant" ? <AssistantTiming message={m} /> : null}
                   </div>
-                  {m.role === "assistant" && m.worktreeChangeStats?.length ? (
-                    <AssistantWorktreeChanges files={m.worktreeChangeStats} />
-                  ) : null}
                 </div>
               ) : null;
 

@@ -1,7 +1,7 @@
 //! Codex adapter — `codex app-server --stdio` (Codex App Server JSON-RPC).
 
 use std::collections::{HashMap, HashSet};
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -17,7 +17,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
 use crate::error::{AgentError, AgentErrorCode};
-use crate::host::events::{HostEvent, StreamKind};
+use crate::host::events::{FileChangeHunk, FileChangeLine, FileChangeStat, HostEvent, StreamKind};
 use crate::host::permissions::{PermissionBroker, PermissionDecision, PermissionRequest};
 use crate::process_util;
 use crate::runtime::catalog::{ChoiceOption, SessionSelectionCatalog};
@@ -34,6 +34,10 @@ const INTERRUPT_TIMEOUT_SECS: u64 = 5;
 const PROMPT_TIMEOUT_SECS: u64 = 60 * 20;
 const PROMPT_MAX_ATTEMPTS: usize = 3;
 const PROMPT_RETRY_BACKOFF_MS: u64 = 1000;
+const FILE_CHANGE_MAX_FILES: usize = 8;
+const FILE_CHANGE_MAX_LINES: usize = 120;
+const FILE_CHANGE_MAX_LINE_CHARS: usize = 240;
+const FILE_CHANGE_MAX_BYTES: u64 = 512 * 1024;
 static RPC_TRACE_LOCK: OnceLock<ParkingMutex<()>> = OnceLock::new();
 
 struct Pending {
@@ -417,6 +421,7 @@ struct CodexAppServerClient {
     turn_waiters: ParkingMutex<HashMap<String, oneshot::Sender<Result<String, String>>>>,
     completed_turns: ParkingMutex<HashMap<String, Result<String, String>>>,
     emitted_agent_message_items: ParkingMutex<HashSet<String>>,
+    file_change_deltas: ParkingMutex<HashMap<String, String>>,
     stopped: AtomicBool,
     shutdown_requested: AtomicBool,
     reader_alive: AtomicBool,
@@ -499,6 +504,7 @@ impl CodexAppServerClient {
             turn_waiters: ParkingMutex::new(HashMap::new()),
             completed_turns: ParkingMutex::new(HashMap::new()),
             emitted_agent_message_items: ParkingMutex::new(HashSet::new()),
+            file_change_deltas: ParkingMutex::new(HashMap::new()),
             stopped: AtomicBool::new(false),
             shutdown_requested: AtomicBool::new(false),
             reader_alive: AtomicBool::new(true),
@@ -913,6 +919,7 @@ impl CodexAppServerClient {
 
         self.stopped.store(false, Ordering::SeqCst);
         self.emitted_agent_message_items.lock().clear();
+        self.file_change_deltas.lock().clear();
         let mut params = json!({
             "threadId": thread_id,
             "input": [
@@ -1212,8 +1219,10 @@ impl CodexAppServerClient {
                 }
             }
             "item/started" => self.emit_tool_item(params, "running"),
+            "item/fileChange/outputDelta" => self.emit_file_change_delta(params),
             "item/completed" => {
                 self.emit_completed_agent_message_fallback(params);
+                self.emit_completed_file_change(params);
                 self.emit_tool_item(params, "completed");
             }
             "turn/completed" => self.complete_turn(params),
@@ -1363,20 +1372,366 @@ impl CodexAppServerClient {
                 .insert(turn_id.to_string(), result);
         }
     }
+
+    fn emit_file_change_delta(&self, params: &Value) {
+        if self.stopped.load(Ordering::SeqCst) {
+            return;
+        }
+        let item_id = codex_item_id(params).unwrap_or("file_change").to_string();
+        let Some(delta) = codex_delta_text(params) else {
+            return;
+        };
+        let text = {
+            let mut deltas = self.file_change_deltas.lock();
+            let entry = deltas.entry(item_id).or_default();
+            entry.push_str(&delta);
+            entry.clone()
+        };
+        let files = parse_codex_file_change_text(&text, &self.cwd);
+        if files.is_empty() {
+            return;
+        }
+        let _ = self.event_tx.send(HostEvent::FileChange { files });
+    }
+
+    fn emit_completed_file_change(&self, params: &Value) {
+        if self.stopped.load(Ordering::SeqCst) {
+            return;
+        }
+        let item = params.get("item").unwrap_or(params);
+        if item.get("type").and_then(|v| v.as_str()) != Some("fileChange") {
+            return;
+        }
+
+        let item_id = codex_item_id(params).unwrap_or("file_change");
+        let files = {
+            let deltas = self.file_change_deltas.lock();
+            deltas
+                .get(item_id)
+                .map(|text| parse_codex_file_change_text(text, &self.cwd))
+                .unwrap_or_default()
+        };
+        let files = if files.is_empty() {
+            parse_codex_file_change_item(item, &self.cwd)
+        } else {
+            files
+        };
+        if files.is_empty() {
+            return;
+        }
+        let _ = self.event_tx.send(HostEvent::FileChange { files });
+    }
 }
 
 fn codex_client_capabilities() -> Value {
     json!({
         "experimentalApi": true,
         "requestAttestation": false,
-        // These high-volume events are not projected by Workbench. Assistant
-        // and reasoning deltas must remain enabled because they drive the chat.
+        // Command output and plan deltas are still too noisy for the transcript.
+        // File-change deltas are projected as compact diff previews.
         "optOutNotificationMethods": [
             "command/exec/outputDelta",
-            "item/plan/delta",
-            "item/fileChange/outputDelta"
+            "item/plan/delta"
         ]
     })
+}
+
+fn codex_item_id(params: &Value) -> Option<&str> {
+    params
+        .get("itemId")
+        .and_then(|v| v.as_str())
+        .or_else(|| params.pointer("/item/id").and_then(|v| v.as_str()))
+        .or_else(|| params.get("id").and_then(|v| v.as_str()))
+}
+
+fn codex_delta_text(params: &Value) -> Option<String> {
+    ["delta", "text", "output"]
+        .iter()
+        .find_map(|key| params.get(*key).and_then(|v| v.as_str()))
+        .map(str::to_string)
+}
+
+fn parse_codex_file_change_text(text: &str, cwd: &Path) -> Vec<FileChangeStat> {
+    let mut files = Vec::new();
+    let mut current: Option<FileChangeStat> = None;
+
+    for line in text.lines() {
+        if let Some((path, additions, deletions)) = parse_codex_file_header(line) {
+            if let Some(file) = current.take() {
+                files.push(finalize_codex_file_change(file));
+            }
+            if files.len() >= FILE_CHANGE_MAX_FILES {
+                current = Some(FileChangeStat {
+                    full_path: full_path_for_change(cwd, &path),
+                    path,
+                    additions,
+                    deletions,
+                    hunks: Vec::new(),
+                    truncated: true,
+                });
+                break;
+            }
+            current = Some(FileChangeStat {
+                full_path: full_path_for_change(cwd, &path),
+                path,
+                additions,
+                deletions,
+                hunks: vec![FileChangeHunk {
+                    old_start: None,
+                    new_start: None,
+                    lines: Vec::new(),
+                    truncated: false,
+                }],
+                truncated: false,
+            });
+            continue;
+        }
+
+        let Some(file) = current.as_mut() else {
+            continue;
+        };
+        let Some(parsed) = parse_codex_file_change_line(line) else {
+            continue;
+        };
+        let Some(hunk) = file.hunks.first_mut() else {
+            continue;
+        };
+        if hunk.lines.len() >= FILE_CHANGE_MAX_LINES {
+            hunk.truncated = true;
+            file.truncated = true;
+            continue;
+        }
+        if hunk.old_start.is_none() && parsed.old_line.is_some() {
+            hunk.old_start = parsed.old_line;
+        }
+        if hunk.new_start.is_none() && parsed.new_line.is_some() {
+            hunk.new_start = parsed.new_line;
+        }
+        hunk.lines.push(parsed);
+    }
+
+    if let Some(file) = current {
+        files.push(finalize_codex_file_change(file));
+    }
+
+    files
+        .into_iter()
+        .filter(|file| file.additions > 0 || file.deletions > 0 || !file.hunks.is_empty())
+        .collect()
+}
+
+fn parse_codex_file_header(line: &str) -> Option<(String, u32, u32)> {
+    let mut text = line.trim();
+    text = text.strip_prefix('•').unwrap_or(text).trim();
+    text = text.strip_prefix('-').unwrap_or(text).trim();
+
+    let stats_start = text.rfind("(+")?;
+    let stats_end = text[stats_start..].find(')')? + stats_start;
+    let mut path = text[..stats_start].trim();
+    for prefix in [
+        "Edited ",
+        "Created ",
+        "Added ",
+        "Modified ",
+        "Deleted ",
+        "Updated ",
+        "Wrote ",
+    ] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            path = rest.trim();
+            break;
+        }
+    }
+    if path.is_empty() {
+        return None;
+    }
+
+    let stats = &text[stats_start + 1..stats_end];
+    let additions = stats
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix('+'))
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    let deletions = stats
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix('-'))
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    Some((path.to_string(), additions, deletions))
+}
+
+fn parse_codex_file_change_line(line: &str) -> Option<FileChangeLine> {
+    let trimmed = line.trim_start();
+    let digit_count = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digit_count == 0 {
+        return None;
+    }
+    let number = trimmed[..digit_count].parse::<u32>().ok()?;
+    let after_number = trimmed[digit_count..].strip_prefix(' ')?;
+    let mut chars = after_number.chars();
+    let marker = chars.next()?;
+    let content = truncate_file_change_line(chars.as_str());
+
+    match marker {
+        '+' => Some(FileChangeLine {
+            kind: "add".into(),
+            old_line: None,
+            new_line: Some(number),
+            content,
+        }),
+        '-' => Some(FileChangeLine {
+            kind: "delete".into(),
+            old_line: Some(number),
+            new_line: None,
+            content,
+        }),
+        ' ' => Some(FileChangeLine {
+            kind: "context".into(),
+            old_line: Some(number),
+            new_line: Some(number),
+            content,
+        }),
+        _ => None,
+    }
+}
+
+fn finalize_codex_file_change(mut file: FileChangeStat) -> FileChangeStat {
+    let mut additions = 0_u32;
+    let mut deletions = 0_u32;
+    file.hunks.retain(|hunk| !hunk.lines.is_empty());
+    for line in file.hunks.iter().flat_map(|hunk| &hunk.lines) {
+        match line.kind.as_str() {
+            "add" => additions = additions.saturating_add(1),
+            "delete" => deletions = deletions.saturating_add(1),
+            _ => {}
+        }
+    }
+    if file.additions == 0 {
+        file.additions = additions;
+    }
+    if file.deletions == 0 {
+        file.deletions = deletions;
+    }
+    file
+}
+
+fn parse_codex_file_change_item(item: &Value, cwd: &Path) -> Vec<FileChangeStat> {
+    let Some(changes) = item.get("changes").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+
+    changes
+        .iter()
+        .take(FILE_CHANGE_MAX_FILES)
+        .filter_map(|change| {
+            let path = ["path", "filePath", "displayPath"]
+                .iter()
+                .find_map(|key| change.get(*key).and_then(|v| v.as_str()))?;
+            let text = ["diff", "patch", "unifiedDiff", "preview"]
+                .iter()
+                .find_map(|key| change.get(*key).and_then(|v| v.as_str()))
+                .unwrap_or("");
+            let mut files = parse_codex_file_change_text(text, cwd);
+            if let Some(file) = files.pop() {
+                return Some(file);
+            }
+            let additions = change
+                .get("additions")
+                .and_then(|v| v.as_u64())
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0);
+            let deletions = change
+                .get("deletions")
+                .and_then(|v| v.as_u64())
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0);
+            if additions == 0 && deletions == 0 {
+                if let Some(file) = preview_text_file_as_added_change(cwd, path) {
+                    return Some(file);
+                }
+            }
+            Some(FileChangeStat {
+                path: path.to_string(),
+                full_path: full_path_for_change(cwd, path),
+                additions,
+                deletions,
+                hunks: Vec::new(),
+                truncated: false,
+            })
+        })
+        .collect()
+}
+
+fn preview_text_file_as_added_change(cwd: &Path, path: &str) -> Option<FileChangeStat> {
+    let full_path = path_for_change(cwd, path)?;
+    let metadata = fs::metadata(&full_path).ok()?;
+    if !metadata.is_file() || metadata.len() > FILE_CHANGE_MAX_BYTES {
+        return None;
+    }
+
+    let bytes = fs::read(&full_path).ok()?;
+    if bytes.iter().any(|byte| *byte == 0) {
+        return None;
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    let total_lines = text.lines().count();
+    if total_lines == 0 {
+        return None;
+    }
+
+    let mut hunk = FileChangeHunk {
+        old_start: None,
+        new_start: Some(1),
+        lines: Vec::new(),
+        truncated: total_lines > FILE_CHANGE_MAX_LINES,
+    };
+    for (index, line) in text.lines().take(FILE_CHANGE_MAX_LINES).enumerate() {
+        let new_line = u32::try_from(index + 1).ok()?;
+        hunk.lines.push(FileChangeLine {
+            kind: "add".into(),
+            old_line: None,
+            new_line: Some(new_line),
+            content: truncate_file_change_line(line),
+        });
+    }
+
+    Some(FileChangeStat {
+        path: path.to_string(),
+        full_path: Some(full_path.display().to_string()),
+        additions: u32::try_from(total_lines).unwrap_or(u32::MAX),
+        deletions: 0,
+        hunks: vec![hunk],
+        truncated: total_lines > FILE_CHANGE_MAX_LINES,
+    })
+}
+
+fn full_path_for_change(cwd: &Path, path: &str) -> Option<String> {
+    path_for_change(cwd, path).map(|path| path.display().to_string())
+}
+
+fn path_for_change(cwd: &Path, path: &str) -> Option<PathBuf> {
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let candidate = PathBuf::from(path);
+    Some(if candidate.is_absolute() {
+        candidate
+    } else {
+        cwd.join(candidate)
+    })
+}
+
+fn truncate_file_change_line(value: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index >= FILE_CHANGE_MAX_LINE_CHARS {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 pub async fn read_selection_catalog(
@@ -1704,6 +2059,7 @@ mod tests {
 
         for visible_method in [
             "item/agentMessage/delta",
+            "item/fileChange/outputDelta",
             "item/reasoning/summaryTextDelta",
             "item/reasoning/textDelta",
         ] {
@@ -1761,6 +2117,69 @@ mod tests {
                 "permissions": [],
             })
         );
+    }
+
+    #[test]
+    fn codex_file_change_text_parses_cli_style_diff_preview() {
+        let files = parse_codex_file_change_text(
+            "\
+• Edited X:\\WorkBench\\AGENTS.md (+2 -1)
+  10  context
+  11 -old
+  11 +new
+  12 +next
+",
+            Path::new("X:\\WorkBench"),
+        );
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "X:\\WorkBench\\AGENTS.md");
+        assert_eq!(files[0].additions, 2);
+        assert_eq!(files[0].deletions, 1);
+        assert_eq!(files[0].hunks.len(), 1);
+        assert_eq!(files[0].hunks[0].lines[0].kind, "context");
+        assert_eq!(files[0].hunks[0].lines[1].kind, "delete");
+        assert_eq!(files[0].hunks[0].lines[2].kind, "add");
+        assert_eq!(files[0].hunks[0].lines[3].new_line, Some(12));
+    }
+
+    #[test]
+    fn codex_file_change_item_reads_text_file_when_preview_is_missing() {
+        let token = format!(
+            "workbench-codex-file-change-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let dir = std::env::temp_dir().join(token);
+        fs::create_dir_all(&dir).expect("create temp test dir");
+        let file = dir.join("created.html");
+        fs::write(
+            &file,
+            "<!doctype html>\n<title>Demo</title>\n<main>ok</main>\n",
+        )
+        .expect("write temp text file");
+
+        let files = parse_codex_file_change_item(
+            &json!({
+                "type": "fileChange",
+                "changes": [{ "path": "created.html" }]
+            }),
+            &dir,
+        );
+
+        let _ = fs::remove_file(&file);
+        let _ = fs::remove_dir(&dir);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "created.html");
+        assert_eq!(files[0].additions, 3);
+        assert_eq!(files[0].deletions, 0);
+        assert_eq!(files[0].hunks.len(), 1);
+        assert_eq!(files[0].hunks[0].new_start, Some(1));
+        assert_eq!(files[0].hunks[0].lines.len(), 3);
+        assert_eq!(files[0].hunks[0].lines[0].kind, "add");
+        assert_eq!(files[0].hunks[0].lines[0].new_line, Some(1));
+        assert_eq!(files[0].hunks[0].lines[0].content, "<!doctype html>");
     }
 }
 

@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::error::{AgentError, AgentErrorCode};
-use crate::host::events::{HostEvent, StreamKind};
+use crate::host::events::{FileChangeStat, HostEvent, StreamKind};
 use crate::host::permissions::{DecisionSource, PermissionBroker, PermissionDecision};
 use crate::native_sessions::NativeSessionItem;
 use crate::runtime::{
@@ -21,7 +21,9 @@ use crate::runtime::{
     SessionSettings,
 };
 use crate::session_fsm::{SessionFsm, SessionState};
-use crate::session_store::{self, StoredChatMessage, StoredSessionMeta, StoredTraceEvent};
+use crate::session_store::{
+    self, StoredChatMessage, StoredSessionMeta, StoredTraceEvent, StoredWorktreeChangeBlock,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -171,6 +173,8 @@ struct StreamBuffer {
     /// Prevent duplicate completion records when an adapter emits more than one
     /// terminal stream frame.
     trace_completed: bool,
+    /// File-change preview blocks inserted into `text` as markers.
+    worktree_change_blocks: Vec<StoredWorktreeChangeBlock>,
 }
 
 impl StreamBuffer {
@@ -184,15 +188,46 @@ impl StreamBuffer {
     }
 
     /// Take the accumulated turn, leaving the buffer ready for the next one.
-    fn take(&mut self) -> (Option<String>, String, bool) {
+    fn take(&mut self) -> (Option<String>, String, bool, Vec<StoredWorktreeChangeBlock>) {
         self.checkpointed = 0;
         let trace_completed = std::mem::take(&mut self.trace_completed);
         (
             self.id.take(),
             std::mem::take(&mut self.text),
             trace_completed,
+            std::mem::take(&mut self.worktree_change_blocks),
         )
     }
+}
+
+fn worktree_change_marker(id: &str) -> String {
+    format!("[[workbench-file-change:{id}]]")
+}
+
+fn merge_file_changes(current: &[FileChangeStat], incoming: &[FileChangeStat]) -> Vec<FileChangeStat> {
+    let mut merged = current.to_vec();
+    let mut positions = HashMap::new();
+    for (index, file) in merged.iter().enumerate() {
+        positions.insert(file_change_key(file), index);
+    }
+    for file in incoming {
+        let key = file_change_key(file);
+        if let Some(index) = positions.get(&key).copied() {
+            merged[index] = file.clone();
+        } else {
+            positions.insert(key, merged.len());
+            merged.push(file.clone());
+        }
+    }
+    merged
+}
+
+fn file_change_key(file: &FileChangeStat) -> String {
+    file.full_path
+        .as_deref()
+        .unwrap_or(&file.path)
+        .replace('\\', "/")
+        .to_lowercase()
 }
 
 fn stream_role(kind: StreamKind) -> &'static str {
@@ -1128,6 +1163,25 @@ impl SessionManager {
                             }),
                         );
                     }
+                    HostEvent::FileChange { files } => {
+                        mgr_events.record_file_change(&sid_events, files.clone());
+                        mgr_events.record_trace(
+                            &sid_events,
+                            "file_change_preview",
+                            serde_json::json!({
+                                "fileCount": files.len(),
+                                "additions": files.iter().map(|file| file.additions).sum::<u32>(),
+                                "deletions": files.iter().map(|file| file.deletions).sum::<u32>(),
+                            }),
+                        );
+                        let _ = app_events.emit(
+                            "session://file_change",
+                            serde_json::json!({
+                                "sessionId": sid_events,
+                                "files": files,
+                            }),
+                        );
+                    }
                     HostEvent::PermissionRequest {
                         request_id,
                         tool_name,
@@ -1539,6 +1593,7 @@ impl SessionManager {
                     started_at,
                 );
                 checkpoint.elapsed_paused_ms = elapsed_paused_ms;
+                checkpoint.worktree_change_blocks = buffer.worktree_change_blocks.clone();
                 Some(checkpoint)
             };
             (checkpoint, first_delta, completed)
@@ -1563,6 +1618,90 @@ impl SessionManager {
         let runtime_id = self.runtime_id_for_session(session_id);
         let message = StoredChatMessage::tool(id, name, title, status, runtime_id);
         self.append_message(session_id, &message);
+    }
+
+    fn record_file_change(&self, session_id: &str, files: Vec<FileChangeStat>) {
+        if files.is_empty() {
+            return;
+        }
+        let checkpoint = {
+            let mut guard = self.inner.lock();
+            let Some(slot) = guard.sessions.get_mut(session_id) else {
+                return;
+            };
+            let runtime_id = slot.meta.runtime_id;
+            let started_at = slot
+                .prompt_started_at
+                .clone()
+                .unwrap_or_else(|| Utc::now().to_rfc3339());
+            let elapsed_paused_ms = slot.elapsed_paused_ms_through(Utc::now());
+            let buffer = &mut slot.mirror.assistant;
+            let id = buffer
+                .id
+                .get_or_insert_with(|| Uuid::new_v4().to_string())
+                .clone();
+
+            if let Some(latest) = buffer.worktree_change_blocks.last_mut() {
+                let marker = worktree_change_marker(&latest.id);
+                if let Some(index) = buffer.text.rfind(&marker) {
+                    let after_marker = buffer.text[index + marker.len()..].trim();
+                    if after_marker.is_empty() {
+                        latest.files = merge_file_changes(&latest.files, &files);
+                        buffer.checkpointed = buffer.text.len();
+                        let mut checkpoint = StoredChatMessage::checkpoint(
+                            id.clone(),
+                            "assistant",
+                            buffer.text.clone(),
+                            Some(runtime_id),
+                            started_at.clone(),
+                        );
+                        checkpoint.elapsed_paused_ms = elapsed_paused_ms;
+                        checkpoint.worktree_change_blocks = buffer.worktree_change_blocks.clone();
+                        Some(checkpoint)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+            .or_else(|| {
+            let block_id = Uuid::new_v4().to_string();
+            let marker = worktree_change_marker(&block_id);
+            if buffer.text.trim().is_empty() {
+                buffer.text.push_str(&marker);
+                buffer.text.push_str("\n\n");
+            } else if buffer.text.ends_with('\n') {
+                buffer.text.push_str(&marker);
+                buffer.text.push_str("\n\n");
+            } else {
+                    buffer.text.push_str("\n\n");
+                    buffer.text.push_str(&marker);
+                    buffer.text.push_str("\n\n");
+                }
+                buffer.worktree_change_blocks.push(StoredWorktreeChangeBlock {
+                    id: block_id,
+                    files,
+                });
+                buffer.checkpointed = buffer.text.len();
+                let mut checkpoint = StoredChatMessage::checkpoint(
+                    id,
+                    "assistant",
+                    buffer.text.clone(),
+                    Some(runtime_id),
+                    started_at,
+                );
+                checkpoint.elapsed_paused_ms = elapsed_paused_ms;
+                checkpoint.worktree_change_blocks = buffer.worktree_change_blocks.clone();
+                Some(checkpoint)
+            })
+        };
+
+        if let Some(checkpoint) = checkpoint {
+            self.append_message(session_id, &checkpoint);
+        }
     }
 
     /// Close the turn: promote both mirrors to final records. They reuse the id
@@ -1597,7 +1736,7 @@ impl SessionManager {
                 ("thought", &mut slot.mirror.thought),
                 ("assistant", &mut slot.mirror.assistant),
             ] {
-                let (id, text, trace_completed) = buffer.take();
+                let (id, text, trace_completed, worktree_change_blocks) = buffer.take();
                 if !trace_completed && !text.is_empty() {
                     incomplete_streams.push(serde_json::json!({
                         "kind": role,
@@ -1617,6 +1756,7 @@ impl SessionManager {
                     completed_at.clone(),
                 );
                 message.elapsed_paused_ms = elapsed_paused_ms;
+                message.worktree_change_blocks = worktree_change_blocks;
                 messages.push(message);
             }
             let details = serde_json::json!({

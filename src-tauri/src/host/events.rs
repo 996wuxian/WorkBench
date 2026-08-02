@@ -26,6 +26,9 @@ pub enum HostEvent {
         status: String,
         title: String,
     },
+    FileChange {
+        files: Vec<FileChangeStat>,
+    },
     /// A tool call is waiting for approval. `request_id` is Host-generated and
     /// is what `session_permission_respond` expects — adapters never expose
     /// their own protocol ids to the UI.
@@ -54,6 +57,35 @@ pub enum HostEvent {
     ProcessExited {
         code: Option<i32>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChangeStat {
+    pub path: String,
+    pub full_path: Option<String>,
+    pub additions: u32,
+    pub deletions: u32,
+    pub hunks: Vec<FileChangeHunk>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChangeHunk {
+    pub old_start: Option<u32>,
+    pub new_start: Option<u32>,
+    pub lines: Vec<FileChangeLine>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChangeLine {
+    pub kind: String,
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

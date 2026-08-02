@@ -31,6 +31,7 @@ import {
   type PermissionQueue,
 } from "../lib/permissions";
 import { runtimeLabel } from "../lib/runtimes";
+import { insertOrUpdateWorktreeChangeBlock } from "../lib/worktreeChanges";
 import type {
   ChatMessage,
   PermissionRequestEvent,
@@ -40,6 +41,7 @@ import type {
   SessionState,
   SessionUnreadKind,
   TurnSettledEvent,
+  WorktreeChangeStat,
 } from "../lib/types";
 
 /** Placeholder shown between "turn started" and the first token. */
@@ -232,6 +234,29 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
 
       const u4 = await listen<{
         sessionId: string;
+        files: WorktreeChangeStat[];
+      }>("session://file_change", (ev) => {
+        if (cancelled) return;
+        const files = ev.payload.files ?? [];
+        if (files.length === 0) return;
+        ref.current.updateSessionMessages(ev.payload.sessionId, (m) => {
+          for (let index = m.length - 1; index >= 0; index -= 1) {
+            if (m[index].role !== "assistant") continue;
+            const next = m.slice();
+            next[index] = insertOrUpdateWorktreeChangeBlock(
+              m[index],
+              uid("chg"),
+              files,
+            );
+            return next;
+          }
+          return m;
+        });
+      });
+      if (!cancelled) unsubs.push(u4);
+
+      const u5 = await listen<{
+        sessionId: string;
         code: string;
         message: string;
       }>("session://error", (ev) => {
@@ -251,9 +276,9 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
           ];
         });
       });
-      if (!cancelled) unsubs.push(u4);
+      if (!cancelled) unsubs.push(u5);
 
-      const u5 = await listen<{ sessionId: string; stopReason: string }>(
+      const u6 = await listen<{ sessionId: string; stopReason: string }>(
         "session://prompt_complete",
         (ev) => {
           if (cancelled) return;
@@ -280,9 +305,9 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
           clearAssistantTypingForSession(sessionId);
         },
       );
-      if (!cancelled) unsubs.push(u5);
+      if (!cancelled) unsubs.push(u6);
 
-      const u6 = await listen<PermissionRequestEvent>(
+      const u7 = await listen<PermissionRequestEvent>(
         "session://permission",
         (ev) => {
           if (cancelled) return;
@@ -315,9 +340,9 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
           );
         },
       );
-      if (!cancelled) unsubs.push(u6);
+      if (!cancelled) unsubs.push(u7);
 
-      const u7 = await listen<PermissionResolvedEvent>(
+      const u8 = await listen<PermissionResolvedEvent>(
         "session://permission_resolved",
         (ev) => {
           if (cancelled) return;
@@ -354,9 +379,9 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
           ]);
         },
       );
-      if (!cancelled) unsubs.push(u7);
+      if (!cancelled) unsubs.push(u8);
 
-      const u8 = await listen<{ sessionId: string; code?: number | null }>(
+      const u9 = await listen<{ sessionId: string; code?: number | null }>(
         "session://exited",
         (ev) => {
           if (cancelled) return;
@@ -385,9 +410,9 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
           ]);
         },
       );
-      if (!cancelled) unsubs.push(u8);
+      if (!cancelled) unsubs.push(u9);
 
-      const u9 = await listen<{
+      const u10 = await listen<{
         sessionId: string;
         state: SessionState;
         runtimeId: string;
@@ -400,9 +425,9 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
           prev.sessionId === sessionId ? { ...prev, state, backend } : prev,
         );
       });
-      if (!cancelled) unsubs.push(u9);
+      if (!cancelled) unsubs.push(u10);
 
-      const u10 = await listen<TurnSettledEvent>(
+      const u11 = await listen<TurnSettledEvent>(
         "session://turn_settled",
         (ev) => {
           if (cancelled) return;
@@ -415,7 +440,7 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
           ref.current.onTurnSettled(ev.payload);
         },
       );
-      if (!cancelled) unsubs.push(u10);
+      if (!cancelled) unsubs.push(u11);
     })();
 
     return () => {

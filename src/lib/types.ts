@@ -148,8 +148,30 @@ export interface SkillsListResult {
 
 export interface WorktreeChangeStat {
   path: string;
+  fullPath?: string | null;
   additions: number;
   deletions: number;
+  hunks?: WorktreeDiffHunk[];
+  truncated?: boolean;
+}
+
+export interface WorktreeChangeBlock {
+  id: string;
+  files: WorktreeChangeStat[];
+}
+
+export interface WorktreeDiffHunk {
+  oldStart?: number | null;
+  newStart?: number | null;
+  lines: WorktreeDiffLine[];
+  truncated?: boolean;
+}
+
+export interface WorktreeDiffLine {
+  kind: "context" | "add" | "delete";
+  oldLine?: number | null;
+  newLine?: number | null;
+  content: string;
 }
 
 export interface WorktreeChangeSnapshot {
@@ -224,6 +246,8 @@ export interface ChatMessage {
   revealImmediately?: boolean;
   /** Live-only: net file changes detected for this assistant turn. */
   worktreeChangeStats?: WorktreeChangeStat[];
+  /** Live-only: file-change blocks inserted into the assistant text stream. */
+  worktreeChangeBlocks?: WorktreeChangeBlock[];
 }
 
 /** A pending tool approval waiting on the user. */

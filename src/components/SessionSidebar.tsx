@@ -16,6 +16,7 @@ import {
   IconChevronsDown,
   IconChevronsUp,
   IconFolder,
+  IconGitFork,
   IconNewChat,
   IconPanel,
   IconPinnedFilled,
@@ -82,6 +83,7 @@ type Props = {
   onToggleMaximize: () => void;
   onRuntimePickChange: (id: RuntimeId) => void;
   onCreateSession: (projectPath?: string | null) => void;
+  onOpenOrchestration: () => void;
   onToggleSearch: () => void;
   onShowArchivedChange: (showArchived: boolean) => void;
   onSessionFilterChange: (value: string) => void;
@@ -123,6 +125,7 @@ export function SessionSidebar({
   onToggleMaximize,
   onRuntimePickChange,
   onCreateSession,
+  onOpenOrchestration,
   onToggleSearch,
   onShowArchivedChange,
   onSessionFilterChange,
@@ -141,6 +144,7 @@ export function SessionSidebar({
   );
   const [draggingProjectKey, setDraggingProjectKey] = useState<string | null>(null);
   const [dragOverProjectKey, setDragOverProjectKey] = useState<string | null>(null);
+  const [showScrollTop, setShowScrollTop] = useState(false);
   const longPressTimerRef = useRef<number | null>(null);
   const longPressPointerIdRef = useRef<number | null>(null);
   const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -255,11 +259,21 @@ export function SessionSidebar({
   const handleScroll = () => {
     const el = sessionScrollRef.current;
     if (!el) return;
+    setShowScrollTop(el.scrollTop > 96);
     const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 48;
     if (!nearBottom) return;
     if (hasMore === false) return;
     if (loadingMore || syncing) return;
     onSyncNativeSessions("more");
+  };
+
+  useEffect(() => {
+    const el = sessionScrollRef.current;
+    setShowScrollTop(Boolean(el && el.scrollTop > 96));
+  }, [sessionScrollRef, runtimePick, showArchived, sessionFilter, filteredSessions.length]);
+
+  const scrollSessionsToTop = () => {
+    sessionScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   const clearProjectLongPress = () => {
@@ -475,6 +489,16 @@ export function SessionSidebar({
             <IconSearch size={16} />
           </button>
         </div>
+        <button
+          type="button"
+          className="nav-orchestration"
+          onClick={onOpenOrchestration}
+        >
+          <span className="nav-item__icon">
+            <IconGitFork size={16} />
+          </span>
+          编排
+        </button>
       </div>
 
       {showSearch ? (
@@ -556,98 +580,111 @@ export function SessionSidebar({
         </div>
       </div>
 
-      <div className="sidebar__scroll" ref={sessionScrollRef} onScroll={handleScroll}>
-        {filteredSessions.length === 0 ? (
-          <div className="sidebar-empty">
-            {runtimeSessionCount === 0
-              ? showArchived
-                ? `没有已归档的 ${runtimeLabel(runtimePick)} 会话。`
-                : `还没有 ${runtimeLabel(runtimePick)} 会话。点同步或新建会话。`
-              : "没有匹配的会话。"}
-          </div>
-        ) : null}
-        {projectGroups.map((group) => {
-          const collapsed = !sessionFilter.trim() && collapsedProjects.has(group.key);
-          const pinned = pinnedProjectKeys.includes(group.key);
-          return (
-            <section
-              className={
-                "session-project" +
-                (pinned ? " is-pinned" : "") +
-                (draggingProjectKey === group.key ? " is-dragging" : "") +
-                (dragOverProjectKey === group.key && draggingProjectKey !== group.key
-                  ? " is-drag-over"
-                  : "")
-              }
-              key={group.key}
-              data-project-key={group.key}
-            >
-              <div
-                className="session-project__header"
-                title={group.path ?? "没有绑定工作目录的会话"}
-                onContextMenu={(ev) => {
-                  if (!group.path) return;
-                  ev.preventDefault();
-                  ev.stopPropagation();
-                  onProjectContextMenu(
-                    { ...group, pinned },
-                    Math.max(8, Math.min(ev.clientX, window.innerWidth - 252)),
-                    Math.max(8, Math.min(ev.clientY, window.innerHeight - 220)),
-                  );
-                }}
+      <div className="sidebar__scroll-wrap">
+        <div className="sidebar__scroll" ref={sessionScrollRef} onScroll={handleScroll}>
+          {filteredSessions.length === 0 ? (
+            <div className="sidebar-empty">
+              {runtimeSessionCount === 0
+                ? showArchived
+                  ? `没有已归档的 ${runtimeLabel(runtimePick)} 会话。`
+                  : `还没有 ${runtimeLabel(runtimePick)} 会话。点同步或新建会话。`
+                : "没有匹配的会话。"}
+            </div>
+          ) : null}
+          {projectGroups.map((group) => {
+            const collapsed = !sessionFilter.trim() && collapsedProjects.has(group.key);
+            const pinned = pinnedProjectKeys.includes(group.key);
+            return (
+              <section
+                className={
+                  "session-project" +
+                  (pinned ? " is-pinned" : "") +
+                  (draggingProjectKey === group.key ? " is-dragging" : "") +
+                  (dragOverProjectKey === group.key && draggingProjectKey !== group.key
+                    ? " is-drag-over"
+                    : "")
+                }
+                key={group.key}
+                data-project-key={group.key}
               >
-                <button
-                  type="button"
-                  className="session-project__toggle"
-                  aria-expanded={!collapsed}
-                  onClick={() => toggleProjectCollapsed(group.key)}
-                  onPointerDown={(event) => beginProjectLongPress(event, group)}
-                  onPointerMove={moveProjectDrag}
-                  onPointerUp={finishProjectDrag}
-                  onPointerCancel={cancelProjectDrag}
-                  onPointerLeave={() => {
-                    if (!draggingProjectKey) clearProjectLongPress();
+                <div
+                  className="session-project__header"
+                  title={group.path ?? "没有绑定工作目录的会话"}
+                  onContextMenu={(ev) => {
+                    if (!group.path) return;
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    onProjectContextMenu(
+                      { ...group, pinned },
+                      Math.max(8, Math.min(ev.clientX, window.innerWidth - 252)),
+                      Math.max(8, Math.min(ev.clientY, window.innerHeight - 220)),
+                    );
                   }}
                 >
-                  {collapsed ? <IconChevronRight size={14} /> : <IconChevronDown size={14} />}
-                  <IconFolder size={14} />
-                  <span className="session-project__name">{group.label}</span>
-                  {pinned ? (
-                    <span className="session-project__pin">
-                      <IconPinnedFilled size={12} title="目录已置顶" />
-                    </span>
-                  ) : null}
-                  <span className="session-project__count">{group.sessions.length}</span>
-                </button>
-                {group.path ? (
                   <button
                     type="button"
-                    className="session-project__add"
-                    title={`在 ${group.path} 新建会话`}
-                    aria-label={`在 ${group.label} 新建会话`}
-                    disabled={busy}
-                    onClick={() => onCreateSession(group.path)}
+                    className="session-project__toggle"
+                    aria-expanded={!collapsed}
+                    onClick={() => toggleProjectCollapsed(group.key)}
+                    onPointerDown={(event) => beginProjectLongPress(event, group)}
+                    onPointerMove={moveProjectDrag}
+                    onPointerUp={finishProjectDrag}
+                    onPointerCancel={cancelProjectDrag}
+                    onPointerLeave={() => {
+                      if (!draggingProjectKey) clearProjectLongPress();
+                    }}
                   >
-                    <IconPlus size={14} />
+                    {collapsed ? <IconChevronRight size={14} /> : <IconChevronDown size={14} />}
+                    <IconFolder size={14} />
+                    <span className="session-project__name">{group.label}</span>
+                    {pinned ? (
+                      <span className="session-project__pin">
+                        <IconPinnedFilled size={12} title="目录已置顶" />
+                      </span>
+                    ) : null}
+                    <span className="session-project__count">{group.sessions.length}</span>
                   </button>
-                ) : null}
-              </div>
-              {!collapsed ? (
-                <div className="session-project__sessions">
-                  {group.sessions.map(renderSession)}
+                  {group.path ? (
+                    <button
+                      type="button"
+                      className="session-project__add"
+                      title={`在 ${group.path} 新建会话`}
+                      aria-label={`在 ${group.label} 新建会话`}
+                      disabled={busy}
+                      onClick={() => onCreateSession(group.path)}
+                    >
+                      <IconPlus size={14} />
+                    </button>
+                  ) : null}
                 </div>
-              ) : null}
-            </section>
-          );
-        })}
-        {!showArchived && loadingMore ? (
-          <div className="session-load-state">加载更多…</div>
-        ) : !showArchived && hasMore ? (
-          <button type="button" className="session-load-more" onClick={() => onSyncNativeSessions("more")}>
-            加载更多
+                {!collapsed ? (
+                  <div className="session-project__sessions">
+                    {group.sessions.map(renderSession)}
+                  </div>
+                ) : null}
+              </section>
+            );
+          })}
+          {!showArchived && loadingMore ? (
+            <div className="session-load-state">加载更多…</div>
+          ) : !showArchived && hasMore ? (
+            <button type="button" className="session-load-more" onClick={() => onSyncNativeSessions("more")}>
+              加载更多
+            </button>
+          ) : !showArchived && runtimeSessionCount > 0 ? (
+            <div className="session-load-state">已到列表底部</div>
+          ) : null}
+        </div>
+        {showScrollTop ? (
+          <button
+            type="button"
+            className="sidebar-scroll-top"
+            title="回到顶部"
+            aria-label="回到会话列表顶部"
+            onClick={scrollSessionsToTop}
+          >
+            <IconChevronsUp size={16} />
           </button>
-        ) : !showArchived && runtimeSessionCount > 0 ? (
-          <div className="session-load-state">已到列表底部</div>
         ) : null}
       </div>
 

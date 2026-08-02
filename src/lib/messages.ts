@@ -1,6 +1,7 @@
 /** Transcript helpers: labelling, quoting and reconciling chat messages. */
 import type { ChatMessage, RuntimeId, SessionSnapshot } from "./types";
 import { formatElapsedSeconds, nowIso } from "./format";
+import { stripWorktreeChangeMarkers } from "./worktreeChanges";
 
 export type QuoteTarget = {
   messageId: string;
@@ -38,7 +39,7 @@ export function isPermissionResolutionNotice(
 }
 
 export function quoteText(message: QuoteTarget): string {
-  const body = message.content.trim();
+  const body = stripWorktreeChangeMarkers(message.content).trim();
   if (!body) return "";
   const quoted = body.replace(/\n/g, "\n> ");
   return `> ${message.label}\n> ${quoted}`;
@@ -82,7 +83,7 @@ export function toolMessageKey(message: ChatMessage): string {
 }
 
 export function toolMessageLabel(message: ChatMessage): string {
-  const title = message.toolTitle?.trim();
+  const title = compactToolTitle(message);
   const status = message.toolStatus?.trim();
   if (title && status) {
     return `${title} · ${status}`;
@@ -99,6 +100,24 @@ export function toolMessageLabel(message: ChatMessage): string {
   const content = message.content.trim();
   if (content) return content.replace(/^⚙\s*/, "");
   return "Tool";
+}
+
+function compactToolTitle(message: ChatMessage): string | undefined {
+  const title = message.toolTitle?.trim();
+  if (!title) return undefined;
+
+  if (message.toolName?.trim() === "command") {
+    const writtenPath = title.match(/Set-Content\s+-LiteralPath\s+['"]([^'"]+)['"]/i)?.[1];
+    if (writtenPath) return `PowerShell · write ${writtenPath}`;
+    if (title.length > 180) {
+      const cmdlet = title.match(/\b([A-Za-z]+-[A-Za-z]+)\b/)?.[1];
+      if (cmdlet) return `PowerShell · ${cmdlet}`;
+      return "Command";
+    }
+  }
+
+  if (title.length <= 180) return title;
+  return `${Array.from(title).slice(0, 177).join("")}...`;
 }
 
 export function assistantElapsedLabel(

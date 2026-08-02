@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::host::events::FileChangeStat;
 use crate::paths;
 use crate::runtime::{PermissionMode, RuntimeId};
 
@@ -85,11 +86,20 @@ pub struct StoredChatMessage {
     pub tool_title: Option<String>,
     #[serde(default)]
     pub tool_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worktree_change_blocks: Vec<StoredWorktreeChangeBlock>,
     /// True for a mid-stream checkpoint. The turn's final record carries the
     /// same `id` and clears it; a record that is still `partial` after replay
     /// means the turn was cut short by a crash or a killed process.
     #[serde(default)]
     pub partial: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredWorktreeChangeBlock {
+    pub id: String,
+    pub files: Vec<FileChangeStat>,
 }
 
 /// A privacy-safe execution timeline record.
@@ -143,6 +153,7 @@ impl StoredChatMessage {
             tool_name: None,
             tool_title: None,
             tool_status: None,
+            worktree_change_blocks: Vec::new(),
             partial: false,
         }
     }
@@ -747,5 +758,35 @@ mod tests {
         assert_eq!(replayed[0].content, "Read main.rs · completed");
         assert!(replayed[0].tool_call_id.is_none());
         assert!(!replayed[0].partial);
+    }
+
+    #[test]
+    fn worktree_change_blocks_survive_journal_replay() {
+        let mut message = StoredChatMessage::completed_with_id(
+            "turn-1".to_string(),
+            "assistant",
+            "done",
+            None,
+            "t0",
+            "t1",
+        );
+        message.worktree_change_blocks = vec![StoredWorktreeChangeBlock {
+            id: "chg-1".into(),
+            files: vec![crate::host::events::FileChangeStat {
+                path: "src/main.rs".into(),
+                full_path: Some("X:/repo/src/main.rs".into()),
+                additions: 3,
+                deletions: 1,
+                hunks: Vec::new(),
+                truncated: false,
+            }],
+        }];
+
+        let replayed = collapse_journal(lines(&[message]).into_iter());
+
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].worktree_change_blocks.len(), 1);
+        assert_eq!(replayed[0].worktree_change_blocks[0].id, "chg-1");
+        assert_eq!(replayed[0].worktree_change_blocks[0].files[0].additions, 3);
     }
 }

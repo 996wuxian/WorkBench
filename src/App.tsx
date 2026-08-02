@@ -53,7 +53,10 @@ import {
   toolMessageKey,
   type QuoteTarget,
 } from "./lib/messages";
-import { diffWorktreeSnapshots } from "./lib/worktreeChanges";
+import {
+  diffWorktreeSnapshots,
+  insertOrUpdateWorktreeChangeBlock,
+} from "./lib/worktreeChanges";
 import { mockRuntimes, mockSessions } from "./lib/mocks";
 import {
   defaultPermissionMode,
@@ -677,10 +680,11 @@ export default function App() {
             for (let index = items.length - 1; index >= 0; index -= 1) {
               if (items[index].role !== "assistant") continue;
               const next = items.slice();
-              next[index] = {
-                ...items[index],
-                worktreeChangeStats: changes,
-              };
+              next[index] = insertOrUpdateWorktreeChangeBlock(
+                items[index],
+                uid("chg"),
+                changes,
+              );
               return next;
             }
             return items;
@@ -2392,6 +2396,9 @@ export default function App() {
           onToggleMaximize={() => void toggleMaximizeFromTitlebar()}
           onRuntimePickChange={setRuntimePick}
           onCreateSession={(projectPath) => void createSession(projectPath)}
+          onOpenOrchestration={() =>
+            emitToast({ message: "编排功能待接入", tone: "neutral" })
+          }
           onToggleSearch={() => {
             setShowSearch((v) => !v);
             if (showSearch) setSessionFilter("");

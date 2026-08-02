@@ -141,8 +141,29 @@ pub struct SkillsListResult {
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeChangeStat {
     pub path: String,
+    pub full_path: Option<String>,
     pub additions: u32,
     pub deletions: u32,
+    pub hunks: Vec<WorktreeDiffHunk>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeDiffHunk {
+    pub old_start: Option<u32>,
+    pub new_start: Option<u32>,
+    pub lines: Vec<WorktreeDiffLine>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeDiffLine {
+    pub kind: String,
+    pub old_line: Option<u32>,
+    pub new_line: Option<u32>,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -151,6 +172,11 @@ pub struct WorktreeChangeSnapshot {
     pub project_path: String,
     pub files: Vec<WorktreeChangeStat>,
 }
+
+const MAX_DIFF_FILES_WITH_HUNKS: usize = 8;
+const MAX_DIFF_HUNKS_PER_FILE: usize = 2;
+const MAX_DIFF_LINES_PER_HUNK: usize = 80;
+const MAX_DIFF_LINE_CHARS: usize = 240;
 
 /// Discover skill manifests without invoking or modifying a user's CLI.
 /// Project-local skills win over user-level skills with the same name.
@@ -248,7 +274,16 @@ pub fn project_worktree_changes(project_path: String) -> Result<WorktreeChangeSn
     if numstat.status.success() {
         let text = String::from_utf8_lossy(&numstat.stdout);
         for line in text.lines() {
-            if let Some(stat) = parse_numstat_line(line) {
+            if let Some(mut stat) = parse_numstat_line(line) {
+                stat.full_path = Some(root.join(&stat.path).display().to_string());
+                if files.len() < MAX_DIFF_FILES_WITH_HUNKS {
+                    let (hunks, truncated) = diff_hunks_for_path(&root, &stat.path)
+                        .unwrap_or_else(|_| (Vec::new(), false));
+                    stat.hunks = hunks;
+                    stat.truncated = truncated;
+                } else {
+                    stat.truncated = true;
+                }
                 files.insert(stat.path.clone(), stat);
             }
         }
@@ -269,13 +304,22 @@ pub fn project_worktree_changes(project_path: String) -> Result<WorktreeChangeSn
             if files.contains_key(&path) {
                 continue;
             }
-            let additions = count_text_lines(&root.join(&path)).unwrap_or(0);
+            let file_path = root.join(&path);
+            let additions = count_text_lines(&file_path).unwrap_or(0);
+            let (hunks, truncated) = if files.len() < MAX_DIFF_FILES_WITH_HUNKS {
+                untracked_file_hunks(&file_path).unwrap_or_else(|| (Vec::new(), false))
+            } else {
+                (Vec::new(), true)
+            };
             files.insert(
                 path.clone(),
                 WorktreeChangeStat {
+                    full_path: Some(file_path.display().to_string()),
                     path,
                     additions,
                     deletions: 0,
+                    hunks,
+                    truncated,
                 },
             );
         }
@@ -327,8 +371,11 @@ fn parse_numstat_line(line: &str) -> Option<WorktreeChangeStat> {
     }
     Some(WorktreeChangeStat {
         path,
+        full_path: None,
         additions,
         deletions,
+        hunks: Vec::new(),
+        truncated: false,
     })
 }
 
@@ -352,6 +399,174 @@ fn count_text_lines(path: &Path) -> Option<u32> {
         lines += 1;
     }
     u32::try_from(lines).ok()
+}
+
+fn diff_hunks_for_path(root: &Path, path: &str) -> Result<(Vec<WorktreeDiffHunk>, bool), String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "diff",
+            "--unified=3",
+            "--no-ext-diff",
+            "--no-color",
+            "HEAD",
+            "--",
+        ])
+        .arg(path)
+        .output()
+        .map_err(|err| format!("failed to run git diff: {err}"))?;
+    if !output.status.success() {
+        return Ok((Vec::new(), false));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_unified_diff_hunks(&text))
+}
+
+fn parse_unified_diff_hunks(diff: &str) -> (Vec<WorktreeDiffHunk>, bool) {
+    let mut hunks = Vec::new();
+    let mut current: Option<WorktreeDiffHunk> = None;
+    let mut old_line = 0_u32;
+    let mut new_line = 0_u32;
+    let mut truncated = false;
+
+    for raw in diff.lines() {
+        if let Some((old_start, new_start)) = parse_hunk_header(raw) {
+            if let Some(hunk) = current.take() {
+                hunks.push(hunk);
+            }
+            if hunks.len() >= MAX_DIFF_HUNKS_PER_FILE {
+                truncated = true;
+                break;
+            }
+            old_line = old_start.unwrap_or(0);
+            new_line = new_start.unwrap_or(0);
+            current = Some(WorktreeDiffHunk {
+                old_start,
+                new_start,
+                lines: Vec::new(),
+                truncated: false,
+            });
+            continue;
+        }
+
+        let Some(hunk) = current.as_mut() else {
+            continue;
+        };
+        if raw.starts_with("\\ No newline") {
+            continue;
+        }
+        if hunk.lines.len() >= MAX_DIFF_LINES_PER_HUNK {
+            hunk.truncated = true;
+            truncated = true;
+            continue;
+        }
+
+        let Some((marker, content)) = raw.split_at_checked(1) else {
+            continue;
+        };
+        match marker {
+            " " => {
+                hunk.lines.push(WorktreeDiffLine {
+                    kind: "context".into(),
+                    old_line: Some(old_line),
+                    new_line: Some(new_line),
+                    content: truncate_diff_line(content),
+                });
+                old_line = old_line.saturating_add(1);
+                new_line = new_line.saturating_add(1);
+            }
+            "-" => {
+                hunk.lines.push(WorktreeDiffLine {
+                    kind: "delete".into(),
+                    old_line: Some(old_line),
+                    new_line: None,
+                    content: truncate_diff_line(content),
+                });
+                old_line = old_line.saturating_add(1);
+            }
+            "+" => {
+                hunk.lines.push(WorktreeDiffLine {
+                    kind: "add".into(),
+                    old_line: None,
+                    new_line: Some(new_line),
+                    content: truncate_diff_line(content),
+                });
+                new_line = new_line.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(hunk) = current {
+        hunks.push(hunk);
+    }
+
+    (hunks, truncated)
+}
+
+fn parse_hunk_header(line: &str) -> Option<(Option<u32>, Option<u32>)> {
+    let rest = line.strip_prefix("@@ ")?;
+    let end = rest.find(" @@")?;
+    let range = &rest[..end];
+    let mut parts = range.split_whitespace();
+    let old_start = parse_hunk_start(parts.next()?, '-');
+    let new_start = parse_hunk_start(parts.next()?, '+');
+    Some((old_start, new_start))
+}
+
+fn parse_hunk_start(raw: &str, prefix: char) -> Option<u32> {
+    let range = raw.strip_prefix(prefix)?;
+    range
+        .split(',')
+        .next()
+        .and_then(|value| value.parse::<u32>().ok())
+}
+
+fn untracked_file_hunks(path: &Path) -> Option<(Vec<WorktreeDiffHunk>, bool)> {
+    if !path.is_file() {
+        return None;
+    }
+    let bytes = fs::read(path).ok()?;
+    if bytes.iter().any(|byte| *byte == 0) {
+        return Some((Vec::new(), false));
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = Vec::new();
+    let mut truncated = false;
+    for (index, line) in text.lines().enumerate() {
+        if lines.len() >= MAX_DIFF_LINES_PER_HUNK {
+            truncated = true;
+            break;
+        }
+        lines.push(WorktreeDiffLine {
+            kind: "add".into(),
+            old_line: None,
+            new_line: u32::try_from(index + 1).ok(),
+            content: truncate_diff_line(line),
+        });
+    }
+    Some((
+        vec![WorktreeDiffHunk {
+            old_start: None,
+            new_start: Some(1),
+            lines,
+            truncated,
+        }],
+        truncated,
+    ))
+}
+
+fn truncate_diff_line(value: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index >= MAX_DIFF_LINE_CHARS {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn find_skill_manifests(root: &Path, max_depth: usize) -> Vec<PathBuf> {
@@ -993,5 +1208,36 @@ mod tests {
         assert!(markdown.contains("## Assistant"));
         assert!(markdown.contains("## Tool · Read file"));
         assert!(markdown.contains("> Status: completed"));
+    }
+
+    #[test]
+    fn unified_diff_hunks_keep_line_numbers_and_markers() {
+        let diff = "\
+diff --git a/AGENTS.md b/AGENTS.md
+index 1111111..2222222 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -10,3 +10,4 @@
+ context
+-old
++new
++next
+";
+
+        let (hunks, truncated) = parse_unified_diff_hunks(diff);
+
+        assert!(!truncated);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].old_start, Some(10));
+        assert_eq!(hunks[0].new_start, Some(10));
+        assert_eq!(hunks[0].lines[0].kind, "context");
+        assert_eq!(hunks[0].lines[0].old_line, Some(10));
+        assert_eq!(hunks[0].lines[0].new_line, Some(10));
+        assert_eq!(hunks[0].lines[1].kind, "delete");
+        assert_eq!(hunks[0].lines[1].old_line, Some(11));
+        assert_eq!(hunks[0].lines[1].new_line, None);
+        assert_eq!(hunks[0].lines[2].kind, "add");
+        assert_eq!(hunks[0].lines[2].old_line, None);
+        assert_eq!(hunks[0].lines[2].new_line, Some(11));
     }
 }

@@ -9,7 +9,8 @@
 | 名称 | **Workbench** |
 | 定位 | 本机多 Agent 桌面指挥台（Host 壳，不重写各家 Agent 大脑） |
 | P0 引擎 | **Grok**（`grok agent stdio` / ACP）+ **Codex**（`codex app-server --stdio`） |
-| 后置 | Claude、Kimi、工作流编排（未启用前不要当真实现） |
+| 已启用扩展 | Claude Code、Kimi Code（改动前必须验证各自 CLI、原生会话和权限链路） |
+| 后置 | 工作流编排（未启用前不要当真实现） |
 | 栈 | Tauri 2 + Rust Host · React 19 + TypeScript + Vite + Tailwind |
 | 参考 | 架构思想对齐 `../grok-app`；**本仓库独立**，不要直接改 grok-app 除非用户明确要求 |
 
@@ -104,7 +105,7 @@ src-tauri/src/
   host/events.rs             # 统一 HostEvent（UI 只认这个）
   runtime/
     traits.rs                # AgentRuntime / LiveSession
-    registry.rs              # 注册表；P0 仅启用 grok+codex
+    registry.rs              # 注册表；由 manifest 启用 Grok/Codex/Claude/Kimi 等 runtime
     grok.rs / codex.rs       # 各引擎适配器
 src-tauri/icons/             # Tauri bundle / exe / 任务栏图标源；由 `pnpm tauri icon` 生成
 docs/                        # 方案与 SPIKE 文档
@@ -126,7 +127,7 @@ App 数据根（运行时，非仓库）：Windows `%APPDATA%\workbench\Workbenc
 5. **不内嵌 CLI** — 只探测 PATH/常见路径；缺失时 UI 引导，不把 agent 打进安装包。
 6. **默认独立数据** — 不污染用户默认 `~/.grok` / Codex home；隔离目录用 `agent-homes/`。
 7. **权限默认 Ask** — 全局 YOLO 非默认；跨 runtime 的 session-allow 不互通。
-8. **P0 范围** — 真连接优先 Grok ACP 与 Codex App Server；Claude/Kimi 保持 disabled 占位，除非任务明确要求。
+8. **Runtime 范围** — 真连接优先保住 Grok ACP 与 Codex App Server 主链路；Claude/Kimi 当前已启用为扩展 runtime，改动时必须同步验证对应 CLI、原生会话同步/删除、权限模式和错误恢复。
 
 参考实现可读 `../grok-app`，**复制思想或局部模式**；不要无说明地大面积粘贴品牌化 UI/文案。
 
