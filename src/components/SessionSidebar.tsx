@@ -76,6 +76,7 @@ type Props = {
   showArchived: boolean;
   sessionFilter: string;
   sessionScrollRef: RefObject<HTMLDivElement | null>;
+  orchestrationActive: boolean;
   syncingRuntime: RuntimeId | null;
   loadingMoreRuntime: RuntimeId | null;
   nativeHasMore: Partial<Record<RuntimeId, boolean>>;
@@ -118,6 +119,7 @@ export function SessionSidebar({
   showArchived,
   sessionFilter,
   sessionScrollRef,
+  orchestrationActive,
   syncingRuntime,
   loadingMoreRuntime,
   nativeHasMore,
@@ -491,7 +493,7 @@ export function SessionSidebar({
         </div>
         <button
           type="button"
-          className="nav-orchestration"
+          className={"nav-orchestration" + (orchestrationActive ? " is-active" : "")}
           onClick={onOpenOrchestration}
         >
           <span className="nav-item__icon">

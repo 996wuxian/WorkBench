@@ -15,6 +15,10 @@ import {
   SessionSidebar,
   type ProjectContextTarget,
 } from "./components/SessionSidebar";
+import {
+  OrchestrationPage,
+} from "./components/OrchestrationPage";
+import { OrchestrationSidebar } from "./components/OrchestrationSidebar";
 import { ComposerPanel } from "./components/ComposerPanel";
 import { SessionInspector } from "./components/SessionInspector";
 import { AppOverlays } from "./components/AppOverlays";
@@ -22,6 +26,7 @@ import { ToastViewport } from "./components/Toast";
 import type { SettingsSection } from "./components/SettingsDialog";
 import {
   IconChat,
+  IconGitFork,
   IconPanelRight,
   IconThemeMoon,
   IconThemeSun,
@@ -102,6 +107,12 @@ import {
   runtimeLabel,
   sortRuntimes,
 } from "./lib/runtimes";
+import {
+  createOrchestrationTask,
+  loadOrchestrationTasks,
+  saveOrchestrationTasks,
+  type OrchestrationTask,
+} from "./lib/orchestration";
 
 const ASSISTANT_LOADING_TEXT = "thinking";
 const INITIAL_VISIBLE_MESSAGES = 60;
@@ -114,6 +125,8 @@ const PINNED_PROJECTS_STORAGE_KEY = "workbench.pinnedProjects";
 type DeleteSessionScope =
   | { kind: "sessions" }
   | { kind: "project"; label: string; path: string | null };
+
+type AppView = "chat" | "orchestration";
 
 function loadStringList(key: string): string[] {
   try {
@@ -219,6 +232,13 @@ function runtimeRouteDescription(runtime: RuntimeInfo): string {
 
 
 export default function App() {
+  const [activeView, setActiveView] = useState<AppView>("chat");
+  const [orchestrationTasks, setOrchestrationTasks] = useState<
+    OrchestrationTask[]
+  >(() => loadOrchestrationTasks());
+  const [activeOrchestrationId, setActiveOrchestrationId] = useState(
+    () => loadOrchestrationTasks()[0]?.id ?? "",
+  );
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [pendingSession, setPendingSession] = useState<SessionMeta | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -337,6 +357,12 @@ export default function App() {
   useEffect(() => {
     saveStringList(PINNED_PROJECTS_STORAGE_KEY, pinnedProjectKeys);
   }, [pinnedProjectKeys]);
+
+  useEffect(() => {
+    if (!saveOrchestrationTasks(orchestrationTasks)) {
+      setStatusLine("编排任务保存失败：localStorage 不可写");
+    }
+  }, [orchestrationTasks]);
 
   const active = useMemo(
     () =>
@@ -2371,66 +2397,102 @@ export default function App() {
       ))}
     </>
   );
+  const isOrchestrationView = activeView === "orchestration";
+  const activeOrchestrationTask = orchestrationTasks.find(
+    (task) => task.id === activeOrchestrationId,
+  ) ?? orchestrationTasks[0];
+  const createOrchestration = () => {
+    const nextTask = createOrchestrationTask(orchestrationTasks.length + 1);
+    setOrchestrationTasks((current) => [nextTask, ...current]);
+    setActiveOrchestrationId(nextTask.id);
+  };
+  const updateOrchestrationTask = (nextTask: OrchestrationTask) => {
+    setOrchestrationTasks((current) =>
+      current.map((task) => (task.id === nextTask.id ? nextTask : task)),
+    );
+  };
   return (
     <div className="app-shell platform-win has-custom-chrome" data-theme={theme}>
       <WindowControls visible={isTauri()} />
 
       <div className="workbench">
-        <SessionSidebar
-          hidden={sidebarHidden}
-          runtimePick={runtimePick}
-          runtimePickOptions={runtimePickOptions}
-          sessions={sessions}
-          sessionSnapshots={sessionSnapshots}
-          sessionUnread={sessionUnread}
-          activeId={activeId}
-          busy={busy}
-          showSearch={showSearch}
-          showArchived={showArchived}
-          sessionFilter={sessionFilter}
-          sessionScrollRef={sessionScrollRef}
-          syncingRuntime={syncingRuntime}
-          loadingMoreRuntime={loadingMoreRuntime}
-          nativeHasMore={nativeHasMore}
-          onHideSidebar={() => setSidebarHidden(true)}
-          onToggleMaximize={() => void toggleMaximizeFromTitlebar()}
-          onRuntimePickChange={setRuntimePick}
-          onCreateSession={(projectPath) => void createSession(projectPath)}
-          onOpenOrchestration={() =>
-            emitToast({ message: "编排功能待接入", tone: "neutral" })
-          }
-          onToggleSearch={() => {
-            setShowSearch((v) => !v);
-            if (showSearch) setSessionFilter("");
-          }}
-          onShowArchivedChange={changeArchivedView}
-          onSessionFilterChange={setSessionFilter}
-          selectedSessionIds={selectedSessionIds}
-          projectOrder={projectOrder}
-          pinnedProjectKeys={pinnedProjectKeys}
-          onSelectSession={(id, options) => selectSession(id, options)}
-          onSessionContextMenu={(sessionId, left, top) =>
-            {
-              setProjectContextMenu(null);
-              setSessionContextMenu({ sessionId, left, top });
+        {isOrchestrationView ? (
+          <OrchestrationSidebar
+            hidden={sidebarHidden}
+            tasks={orchestrationTasks}
+            activeTaskId={activeOrchestrationTask?.id ?? ""}
+            onSelectTask={setActiveOrchestrationId}
+            onCreateTask={createOrchestration}
+            onBackToChat={() => setActiveView("chat")}
+            onHideSidebar={() => setSidebarHidden(true)}
+            onToggleMaximize={() => void toggleMaximizeFromTitlebar()}
+          />
+        ) : (
+          <SessionSidebar
+            hidden={sidebarHidden}
+            runtimePick={runtimePick}
+            runtimePickOptions={runtimePickOptions}
+            sessions={sessions}
+            sessionSnapshots={sessionSnapshots}
+            sessionUnread={sessionUnread}
+            activeId={activeId}
+            busy={busy}
+            showSearch={showSearch}
+            showArchived={showArchived}
+            sessionFilter={sessionFilter}
+            sessionScrollRef={sessionScrollRef}
+            orchestrationActive={isOrchestrationView}
+            syncingRuntime={syncingRuntime}
+            loadingMoreRuntime={loadingMoreRuntime}
+            nativeHasMore={nativeHasMore}
+            onHideSidebar={() => setSidebarHidden(true)}
+            onToggleMaximize={() => void toggleMaximizeFromTitlebar()}
+            onRuntimePickChange={setRuntimePick}
+            onCreateSession={(projectPath) => {
+              setActiveView("chat");
+              void createSession(projectPath);
+            }}
+            onOpenOrchestration={() => setActiveView("orchestration")}
+            onToggleSearch={() => {
+              setShowSearch((v) => !v);
+              if (showSearch) setSessionFilter("");
+            }}
+            onShowArchivedChange={changeArchivedView}
+            onSessionFilterChange={setSessionFilter}
+            selectedSessionIds={selectedSessionIds}
+            projectOrder={projectOrder}
+            pinnedProjectKeys={pinnedProjectKeys}
+            onSelectSession={(id, options) => {
+              setActiveView("chat");
+              selectSession(id, options);
+            }}
+            onSessionContextMenu={(sessionId, left, top) =>
+              {
+                setProjectContextMenu(null);
+                setSessionContextMenu({ sessionId, left, top });
+              }
             }
-          }
-          onProjectContextMenu={(project, left, top) => {
-            setSessionContextMenu(null);
-            setProjectContextMenu({ ...project, left, top });
-          }}
-          onProjectReorder={(sourceKey, targetKey, visibleProjectKeys) =>
-            reorderProject(sourceKey, targetKey, visibleProjectKeys)
-          }
-          onSyncNativeSessions={(mode) => void syncNativeSessions(mode)}
-          onOpenSettings={() => {
-            setSettingsOpen(true);
-            refreshSettingsDiagnostics();
-            void refreshAppSettings();
-          }}
-        />
+            onProjectContextMenu={(project, left, top) => {
+              setSessionContextMenu(null);
+              setProjectContextMenu({ ...project, left, top });
+            }}
+            onProjectReorder={(sourceKey, targetKey, visibleProjectKeys) =>
+              reorderProject(sourceKey, targetKey, visibleProjectKeys)
+            }
+            onSyncNativeSessions={(mode) => void syncNativeSessions(mode)}
+            onOpenSettings={() => {
+              setSettingsOpen(true);
+              refreshSettingsDiagnostics();
+              void refreshAppSettings();
+            }}
+          />
+        )}
 
-        <main className={"main" + (asideHidden ? " main--aside-hidden" : "")}>
+        <main
+          className={
+            "main" + (asideHidden || isOrchestrationView ? " main--aside-hidden" : "")
+          }
+        >
           <div
             className="main__top"
             data-tauri-drag-region
@@ -2447,7 +2509,13 @@ export default function App() {
                   <IconPanelRight size={16} />
                 </button>
               ) : null}
-              {active ? (
+              {isOrchestrationView ? (
+                <>
+                  <IconGitFork size={16} />
+                  <h1 className="main__title">编排</h1>
+                  <span className="main__sub">半自动多 CLI 链路</span>
+                </>
+              ) : active ? (
                 <>
                   <h1 className="main__title" data-tauri-drag-region>
                     {active.title}
@@ -2478,18 +2546,30 @@ export default function App() {
                   <IconThemeMoon size={16} />
                 )}
               </button>
-              <button
-                type="button"
-                className={"chrome-btn" + (!asideHidden ? " is-on" : "")}
-                title={asideHidden ? "显示 Inspector" : "隐藏 Inspector"}
-                onClick={() => setAsideHidden((v) => !v)}
-              >
-                <IconPanelRight size={16} />
-              </button>
+              {!isOrchestrationView ? (
+                <button
+                  type="button"
+                  className={"chrome-btn" + (!asideHidden ? " is-on" : "")}
+                  title={asideHidden ? "显示 Inspector" : "隐藏 Inspector"}
+                  onClick={() => setAsideHidden((v) => !v)}
+                >
+                  <IconPanelRight size={16} />
+                </button>
+              ) : null}
             </div>
           </div>
 
-          {!active ? (
+          {isOrchestrationView ? (
+            activeOrchestrationTask ? (
+              <OrchestrationPage
+                task={activeOrchestrationTask}
+                onBackToChat={() => setActiveView("chat")}
+                onTaskChange={updateOrchestrationTask}
+              />
+            ) : (
+              <div className="empty-state">暂无编排任务</div>
+            )
+          ) : !active ? (
             <div className="empty-state">
               <div>
                 <div className="empty-state__icon">
@@ -2595,20 +2675,22 @@ export default function App() {
           )}
         </main>
 
-        <SessionInspector
-          hidden={asideHidden}
-          active={active}
-          snapshot={snapshot}
-          messages={messages}
-          permissionQueue={activePermissionQueue}
-          activeRuntimeId={activeRuntimeId}
-          activeModelLabel={activeModelLabel}
-          activeModelReasoningEffort={activeModelReasoningEffort}
-          activePermissionMode={activePermissionMode}
-          appDataDir={appDataDir}
-          statusLine={statusLine}
-          onToggleMaximize={() => void toggleMaximizeFromTitlebar()}
-        />
+        {!isOrchestrationView ? (
+          <SessionInspector
+            hidden={asideHidden}
+            active={active}
+            snapshot={snapshot}
+            messages={messages}
+            permissionQueue={activePermissionQueue}
+            activeRuntimeId={activeRuntimeId}
+            activeModelLabel={activeModelLabel}
+            activeModelReasoningEffort={activeModelReasoningEffort}
+            activePermissionMode={activePermissionMode}
+            appDataDir={appDataDir}
+            statusLine={statusLine}
+            onToggleMaximize={() => void toggleMaximizeFromTitlebar()}
+          />
+        ) : null}
       </div>
 
       <AppOverlays
