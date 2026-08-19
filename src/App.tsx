@@ -57,7 +57,6 @@ import {
   finalizeStreamingMessage,
   normalizeLoadedMessages,
   restoreSessionMessages,
-  toolMessageKey,
   type QuoteTarget,
 } from "./lib/messages";
 import {
@@ -125,7 +124,6 @@ import {
   type OrchestrationTask,
 } from "./lib/orchestration";
 
-const ASSISTANT_LOADING_TEXT = "thinking";
 const INITIAL_VISIBLE_MESSAGES = 60;
 const HISTORY_BATCH_SIZE = 40;
 const CHAT_BOTTOM_THRESHOLD = 80;
@@ -440,29 +438,21 @@ export default function App() {
   const visibleMessageGroups = useMemo(() => {
     const groups: Array<{ message: ChatMessage; toolMessages: ChatMessage[] }> = [];
     for (const message of visibleMessages) {
-      if (message.role === "tool") {
-        const previous = groups[groups.length - 1];
-        if (previous?.message.role === "assistant") {
-          const key = toolMessageKey(message);
-          const existingIndex = previous.toolMessages.findIndex(
-            (item) => toolMessageKey(item) === key,
-          );
-          if (existingIndex >= 0) {
-            previous.toolMessages[existingIndex] = message;
-          } else {
-            previous.toolMessages.push(message);
-          }
-        } else {
-          continue;
-        }
-        continue;
-      }
       groups.push({ message, toolMessages: [] });
     }
     return groups;
   }, [visibleMessages]);
   const hiddenMessageCount = Math.max(0, messages.length - visibleMessages.length);
   const lastMessage = messages[messages.length - 1];
+  const isActiveTurnStreaming = Boolean(
+    messages.some(
+      (message) =>
+        message.role === "assistant" &&
+        (message.streaming || message.pending),
+    ) ||
+      snapshot.state === "streaming" ||
+      snapshot.state === "awaiting_permission",
+  );
   const activeRuntimeCapabilities = runtimeInfo(activeRuntimeId)?.capabilities;
   const activeCodexModelFallback =
     active?.runtimeId === "codex"
@@ -567,6 +557,8 @@ export default function App() {
   const projectContextMenuRef = useRef<HTMLDivElement | null>(null);
   const sessionSelectionAnchorRef = useRef<string | null>(null);
   const stickToBottomRef = useRef(true);
+  const lastMessageScrollTopRef = useRef(0);
+  const userScrolledUpRef = useRef(false);
   const pendingHistoryRestoreRef = useRef<{
     scrollHeight: number;
     scrollTop: number;
@@ -807,6 +799,8 @@ export default function App() {
             : INITIAL_VISIBLE_MESSAGES,
       }));
       stickToBottomRef.current = true;
+      userScrolledUpRef.current = false;
+      lastMessageScrollTopRef.current = 0;
       scrollChatToBottom();
     },
     [scrollChatToBottom],
@@ -851,16 +845,27 @@ export default function App() {
   const handleMessageScroll = useCallback(() => {
     const el = messageScrollRef.current;
     if (!el) return;
+    const previousScrollTop = lastMessageScrollTopRef.current;
+    const movingUp = el.scrollTop < previousScrollTop - 2;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom <= CHAT_BOTTOM_THRESHOLD;
+    lastMessageScrollTopRef.current = el.scrollTop;
+    if (stickToBottomRef.current) {
+      userScrolledUpRef.current = false;
+    } else if (movingUp) {
+      userScrolledUpRef.current = true;
+    }
     if (
       performance.now() >= messageNavigationLockUntilRef.current &&
+      !isActiveTurnStreaming &&
+      userScrolledUpRef.current &&
       el.scrollTop <= CHAT_TOP_THRESHOLD &&
       hiddenMessageCount > 0
     ) {
+      userScrolledUpRef.current = false;
       revealOlderMessages();
     }
-  }, [hiddenMessageCount, revealOlderMessages]);
+  }, [hiddenMessageCount, isActiveTurnStreaming, revealOlderMessages]);
 
   const handleTypingProgress = useCallback(() => {
     if (!stickToBottomRef.current) return;
@@ -951,6 +956,7 @@ export default function App() {
       if (!el) return;
       const delta = el.scrollHeight - pending.scrollHeight;
       el.scrollTop = pending.scrollTop + delta;
+      lastMessageScrollTopRef.current = el.scrollTop;
     });
   }, [visibleMessages.length]);
 
@@ -2262,7 +2268,7 @@ export default function App() {
         {
           id: uid("a"),
           role: "assistant",
-          content: ASSISTANT_LOADING_TEXT,
+          content: "",
           runtimeId: session.runtimeId,
           streaming: true,
           pending: true,
@@ -2317,7 +2323,7 @@ export default function App() {
         {
           id: uid("a"),
           role: "assistant",
-          content: ASSISTANT_LOADING_TEXT,
+          content: "",
           runtimeId: session.runtimeId,
           streaming: true,
           pending: true,
@@ -2679,7 +2685,7 @@ export default function App() {
       {
         id: uid("a"),
         role: "assistant",
-        content: ASSISTANT_LOADING_TEXT,
+        content: "",
         runtimeId: session.runtimeId,
         streaming: true,
         pending: true,

@@ -50,6 +50,7 @@ describe("session message nodes", () => {
         content: "partial answer",
         streaming: true,
       }),
+      message({ id: "u2", role: "user", content: "next question" }),
       message({
         id: "interrupted",
         role: "assistant",
@@ -58,7 +59,25 @@ describe("session message nodes", () => {
       }),
     ]);
 
-    expect(nodes.map((node) => node.status)).toEqual(["pending", "interrupted"]);
+    expect(
+      nodes
+        .filter((node) => node.role === "assistant")
+        .map((node) => node.status),
+    ).toEqual(["pending", "interrupted"]);
+  });
+
+  it("collapses split assistant segments within one user turn", () => {
+    const nodes = buildSessionMessageNodes([
+      message({ id: "u1", role: "user", content: "inspect project" }),
+      message({ id: "a1", role: "assistant", content: "I will check it." }),
+      message({ id: "tool1", role: "tool", content: "list files" }),
+      message({ id: "a2", role: "assistant", content: "Now I found the README." }),
+      message({ id: "u2", role: "user", content: "continue" }),
+      message({ id: "a3", role: "assistant", content: "Continuing." }),
+    ]);
+
+    expect(nodes.map((node) => node.id)).toEqual(["u1", "a1", "u2", "a3"]);
+    expect(nodes.map((node) => node.messageIndex)).toEqual([0, 1, 4, 5]);
   });
 
   it("normalizes and truncates previews", () => {

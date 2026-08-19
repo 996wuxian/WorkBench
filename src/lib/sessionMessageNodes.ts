@@ -45,9 +45,17 @@ export function buildSessionMessageNodes(
   messages: readonly ChatMessage[],
 ): SessionMessageNode[] {
   const nodes: SessionMessageNode[] = [];
+  let hasAssistantNodeInTurn = false;
   for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
     const message = messages[messageIndex];
     if (!isSessionMessageNodeCandidate(message)) continue;
+    if (message.role === "user") {
+      hasAssistantNodeInTurn = false;
+    }
+    if (message.role === "assistant") {
+      if (hasAssistantNodeInTurn) continue;
+      hasAssistantNodeInTurn = true;
+    }
 
     nodes.push({
       id: message.id,

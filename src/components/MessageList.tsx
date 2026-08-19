@@ -10,6 +10,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  type ReactNode,
   type RefObject,
   type UIEvent,
 } from "react";
@@ -19,7 +20,6 @@ import {
   AssistantTiming,
   AssistantWorktreeChanges,
   StreamingText,
-  ThinkingIndicator,
 } from "./ChatStream";
 import {
   IconChat,
@@ -52,6 +52,25 @@ import type { ChatMessage, RuntimeId, SkillInfo } from "../lib/types";
 export interface MessageGroup {
   message: ChatMessage;
   toolMessages: ChatMessage[];
+}
+
+function isAgentTurnRole(role: ChatMessage["role"]): boolean {
+  return role === "assistant" || role === "thought" || role === "tool";
+}
+
+function isFirstAgentTurnItem(
+  groups: readonly MessageGroup[],
+  index: number,
+): boolean {
+  const message = groups[index]?.message;
+  if (!message || !isAgentTurnRole(message.role)) return false;
+
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const role = groups[cursor]?.message.role;
+    if (role === "user") return true;
+    if (role && isAgentTurnRole(role)) return false;
+  }
+  return true;
 }
 
 export interface MessageListProps {
@@ -340,56 +359,125 @@ function MessageMetaStack({
   );
 }
 
-function ThoughtBubbleContent({
-  message,
-  skills,
-  revealImmediately,
-  onTypingProgress,
+function ProcessRow({
+  kind,
+  label,
+  detail,
+  active = false,
 }: {
-  message: ChatMessage;
-  skills: SkillInfo[];
-  revealImmediately?: boolean;
-  onTypingProgress: () => void;
+  kind: "think" | "tool";
+  label: string;
+  detail?: string;
+  active?: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const content = stripWorktreeChangeMarkers(message.content || "").trim();
-  const hasContent = content.length > 0;
-
   return (
-    <div className="message__thought">
-      <button
-        type="button"
-        className="message__thought-toggle"
-        aria-expanded={expanded}
-        title={expanded ? "收起思考内容" : "展开思考内容"}
-        onClick={() => setExpanded((current) => !current)}
-      >
-        <span className="message__thought-toggle-head">
-          <span className="message__thought-title">{message.streaming ? "思考中" : "思考内容"}</span>
-          {message.streaming ? <ThinkingIndicator /> : null}
+    <div
+      className={
+        "message__process-row message__process-row--" +
+        kind +
+        (active ? " message__process-row--active" : "")
+      }
+      role={active ? "status" : undefined}
+      aria-live={active ? "polite" : undefined}
+      title={detail ? `${label} · ${detail}` : label}
+    >
+      <span className="message__process-kind">{label}</span>
+      {detail ? (
+        <span className="message__process-detail">{detail}</span>
+      ) : null}
+      {active ? (
+        <span className="message__process-dots" aria-hidden="true">
+          <span>.</span>
+          <span>.</span>
+          <span>.</span>
         </span>
-        <span className="message__thought-toggle-state">
-          {expanded ? "收起" : hasContent ? "查看" : "已隐藏"}
-        </span>
-      </button>
-      {expanded && hasContent ? (
-        <div className="message__thought-body">
-          {message.streaming ? (
-            <StreamingText
-              content={content}
-              revealImmediately={revealImmediately}
-              onProgress={onTypingProgress}
-            />
-          ) : (
-            <MarkdownMessage
-              content={content}
-              skills={skills}
-              formatLongParagraphs
-            />
-          )}
-        </div>
       ) : null}
     </div>
+  );
+}
+
+function MessageAvatar({
+  runtimeId,
+  src,
+}: {
+  runtimeId: RuntimeId;
+  src: string;
+}) {
+  return (
+    <img
+      className={`message-avatar message-avatar--${runtimeId}`}
+      src={src}
+      alt=""
+      title={runtimeAvatarLabel(runtimeId)}
+      width={30}
+      height={30}
+      draggable={false}
+    />
+  );
+}
+
+function summarizeProcessText(value: string): string {
+  return value
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/\s+·\s+(?:completed|done|success|running|pending|in_progress)$/i, "")
+    .replace(/\s+·\s+auto approved$/i, "")
+    .replace(/\s+·\s+blocked by policy$/i, "");
+}
+
+function processToolLabel(message: ChatMessage): string {
+  const name = (message.toolName ?? "").trim().toLowerCase();
+  const rawTitle = (message.toolTitle ?? "").trim();
+  const title = rawTitle.toLowerCase();
+  if (name === "command") return "Bash";
+  if (name.includes("read") || title.startsWith("read")) return "Read";
+  if (name.includes("write") || title.startsWith("write")) return "Write";
+  if (name.includes("edit") || title.startsWith("edit")) return "Edit";
+  if (name.includes("search") || title.includes("search")) return "Search";
+  if (rawTitle) {
+    const first = rawTitle.split(/[\\/\s·|]/, 1)[0]?.trim();
+    if (first) return first.slice(0, 1).toUpperCase() + first.slice(1);
+  }
+  return "Tool";
+}
+
+function processToolDetail(message: ChatMessage): string | undefined {
+  const detail = summarizeProcessText(
+    message.toolTitle?.trim() ||
+      message.toolStatus?.trim() ||
+      message.content.trim() ||
+      "",
+  );
+  return detail || undefined;
+}
+
+function processThoughtDetail(message: ChatMessage): string | undefined {
+  const detail = summarizeProcessText(message.content);
+  return detail || undefined;
+}
+
+function isProcessToolActive(message: ChatMessage): boolean {
+  const status = message.toolStatus?.trim().toLowerCase();
+  return (
+    !status ||
+    status === "pending" ||
+    status === "running" ||
+    status === "in_progress"
+  );
+}
+
+function ThoughtBubbleContent({
+  message,
+}: {
+  message: ChatMessage;
+}) {
+  return (
+    <ProcessRow
+      kind="think"
+      label="Think"
+      detail={processThoughtDetail(message)}
+      active={Boolean(message.streaming)}
+    />
   );
 }
 
@@ -408,7 +496,7 @@ function AssistantBubbleContent({
   revealImmediately?: boolean;
   onTypingProgress: () => void;
 }) {
-  if (thinking) return <ThinkingIndicator />;
+  if (thinking) return null;
 
   const blocks = new Map(
     (message.worktreeChangeBlocks ?? []).map((block) => [block.id, block.files]),
@@ -560,7 +648,7 @@ export function MessageList({
           ) : (
             <div className="message-history-state">已加载全部历史</div>
           )}
-          {groups.map(({ message: m, toolMessages }) => {
+          {groups.map(({ message: m, toolMessages }, groupIndex) => {
             // An assistant record with neither text nor an open stream is an
             // artifact of replay; drop it rather than render an empty bubble.
             if (m.role === "assistant" && !m.streaming && !m.content) {
@@ -573,7 +661,8 @@ export function MessageList({
             const messageRuntime = m.runtimeId ?? fallbackRuntimeId ?? "grok";
             const messageRuntimeLabel = runtimeLabel(messageRuntime);
             const avatarSrc =
-              m.role === "assistant" ? runtimeAvatarSrc[messageRuntime] : null;
+              isAgentTurnRole(m.role) ? runtimeAvatarSrc[messageRuntime] : null;
+            const firstAgentTurnItem = isFirstAgentTurnItem(groups, groupIndex);
             const thinking = Boolean(
               m.role === "assistant" && m.pending && m.streaming,
             );
@@ -640,6 +729,74 @@ export function MessageList({
                   ) : null}
                 </>
               ) : null;
+            const messageActions =
+              messageActionButtons || m.role === "assistant" ? (
+                <div className={`message__actions message__actions--${visualRole}`}>
+                  <div className="message__actions-row">
+                    {m.role === "assistant" ? <AssistantTiming message={m} /> : null}
+                    {messageActionButtons}
+                  </div>
+                </div>
+              ) : null;
+            const renderProcessBlock = (content: ReactNode) => {
+              const block = (
+                <div className="message-block message-block--assistant message-block--process">
+                  {content}
+                </div>
+              );
+              if (!firstAgentTurnItem || !avatarSrc) {
+                return (
+                  <div
+                    key={m.id}
+                    data-message-id={m.id}
+                    className={
+                      "message-block message-block--process" +
+                      (focusedMessageId === m.id ? " message-node-focus" : "")
+                    }
+                  >
+                    {content}
+                  </div>
+                );
+              }
+              return (
+                <div
+                  key={m.id}
+                  data-message-id={m.id}
+                  className={
+                    "message-row message-row--assistant" +
+                    (focusedMessageId === m.id ? " message-node-focus" : "")
+                  }
+                >
+                  <MessageAvatar runtimeId={messageRuntime} src={avatarSrc} />
+                  {block}
+                </div>
+              );
+            };
+
+            if (isThought) {
+              return renderProcessBlock(<ThoughtBubbleContent message={m} />);
+            }
+
+            if (m.role === "tool") {
+              return renderProcessBlock(
+                  <ProcessRow
+                    kind="tool"
+                    label={processToolLabel(m)}
+                    detail={processToolDetail(m)}
+                    active={isProcessToolActive(m)}
+                  />,
+              );
+            }
+
+            if (thinking && !m.content) {
+              return renderProcessBlock(
+                <>
+                    <ProcessRow kind="think" label="Thinking" active />
+                    {messageActions}
+                </>,
+              );
+            }
+
             const messageBubble = (
               <>
                 {m.role === "assistant" ? (
@@ -650,14 +807,7 @@ export function MessageList({
                     skills={[]}
                     revealImmediately={m.revealImmediately}
                     onTypingProgress={onTypingProgress}
-                  />
-                ) : isThought ? (
-                  <ThoughtBubbleContent
-                    message={m}
-                    skills={[]}
-                    revealImmediately={m.revealImmediately}
-                    onTypingProgress={onTypingProgress}
-                  />
+                    />
                 ) : (
                   <MessageContentWithImages
                     sessionId={sessionKey}
@@ -675,25 +825,20 @@ export function MessageList({
                 ) : null}
               </>
             );
-            const messageActions =
-              messageActionButtons || m.role === "assistant" ? (
-                <div className={`message__actions message__actions--${visualRole}`}>
-                  <div className="message__actions-row">
-                    {messageActionButtons}
-                    {m.role === "assistant" ? <AssistantTiming message={m} /> : null}
-                  </div>
-                </div>
-              ) : null;
 
             // Runtimes without bundled artwork fall back to the avatar-less
             // layout rather than rendering a broken image.
-            if (!avatarSrc) {
+            const showAssistantAvatar = firstAgentTurnItem && avatarSrc;
+            if (!showAssistantAvatar) {
               return (
                 <div
                   key={m.id}
                   data-message-id={m.id}
                   className={
                     `message-block message-block--${visualRole}` +
+                    (m.role === "assistant" && avatarSrc
+                      ? " message-block--agent-continuation"
+                      : "") +
                     (focusedMessageId === m.id ? " message-node-focus" : "")
                   }
                 >
@@ -724,15 +869,7 @@ export function MessageList({
                   (focusedMessageId === m.id ? " message-node-focus" : "")
                 }
               >
-                <img
-                  className={`message-avatar message-avatar--${messageRuntime}`}
-                  src={avatarSrc}
-                  alt=""
-                  title={runtimeAvatarLabel(messageRuntime)}
-                  width={30}
-                  height={30}
-                  draggable={false}
-                />
+                <MessageAvatar runtimeId={messageRuntime} src={avatarSrc} />
                 <div className="message-block message-block--assistant">
                   <div className="message message--assistant">{messageBubble}</div>
                   {messageActions}

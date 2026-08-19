@@ -44,9 +44,6 @@ import type {
   WorktreeChangeStat,
 } from "../lib/types";
 
-/** Placeholder shown between "turn started" and the first token. */
-const ASSISTANT_LOADING_TEXT = "thinking";
-
 export interface SessionEventHandlers {
   /** Snapshot events are only applied to the session the user is looking at. */
   activeSessionIdRef: RefObject<string | null>;
@@ -75,6 +72,25 @@ export interface SessionEventHandlers {
   ) => void;
 }
 
+function finalizeTrailingStreams(messages: ChatMessage[]): ChatMessage[] {
+  let next = messages;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = next[index];
+    if (
+      !message ||
+      (message.role !== "assistant" && message.role !== "thought") ||
+      !message.streaming
+    ) {
+      break;
+    }
+    if (next === messages) {
+      next = messages.slice();
+    }
+    next[index] = finalizeStreamingMessage(message);
+  }
+  return next;
+}
+
 export function useSessionEvents(handlers: SessionEventHandlers): void {
   const ref = useRef(handlers);
   const permissionQueueRef = useRef<PermissionQueue>({});
@@ -98,21 +114,32 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
         if (p.kind === "thought") {
           updateSessionMessages(p.sessionId, (m) => {
             const streamIndex = findLastStreamingMessageIndex(m, "thought");
-            if (streamIndex >= 0) {
+            if (streamIndex >= 0 && streamIndex === m.length - 1) {
               const last = m[streamIndex];
+              if (!last.streaming) {
+                return m;
+              }
               return [
                 ...m.slice(0, streamIndex),
-                { ...last, content: last.content + p.text },
+                {
+                  ...last,
+                  content: last.content + p.text,
+                  streaming: !p.done,
+                },
                 ...m.slice(streamIndex + 1),
               ];
             }
+            const closed = finalizeTrailingStreams(m);
+            const base = closed === m ? m : closed;
+            if (!p.text) return base;
             return [
-              ...m,
+              ...base,
               {
                 id: uid("th"),
                 role: "thought",
                 content: p.text,
-                streaming: true,
+                streaming: !p.done,
+                completedAt: p.done ? nowIso() : null,
               },
             ];
           });
@@ -121,19 +148,21 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
         // assistant
         updateSessionMessages(p.sessionId, (m) => {
           const streamIndex = findLastStreamingMessageIndex(m, "assistant");
-          if (streamIndex >= 0) {
+          if (streamIndex >= 0 && streamIndex === m.length - 1) {
             const last = m[streamIndex];
             if (last.pending) {
               if (!p.text && p.done) {
                 return [...m.slice(0, streamIndex), ...m.slice(streamIndex + 1)];
               }
-              const nextContent = p.text || last.content || ASSISTANT_LOADING_TEXT;
-              queueAssistantTyping(p.sessionId, last.id, nextContent);
+              if (!p.text) {
+                return m;
+              }
+              queueAssistantTyping(p.sessionId, last.id, p.text);
               return [
                 ...m.slice(0, streamIndex),
                 {
                   ...last,
-                  content: nextContent,
+                  content: p.text,
                   pending: false,
                   streaming: !p.done,
                   createdAt: last.createdAt ?? nowIso(),
@@ -154,11 +183,12 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
             };
             return [...m.slice(0, streamIndex), next, ...m.slice(streamIndex + 1)];
           }
+          const base = finalizeTrailingStreams(m);
           if (p.text) {
             const messageId = uid("a");
             queueAssistantTyping(p.sessionId, messageId, p.text);
             return [
-              ...m,
+              ...base,
               {
                 id: messageId,
                 role: "assistant",
@@ -170,7 +200,7 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
               },
             ];
           }
-          return m;
+          return base;
         });
       });
       if (!cancelled) unsubs.push(u1);
@@ -199,6 +229,7 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
         ).trim();
         const toolStatus = ev.payload.status.trim();
         ref.current.updateSessionMessages(ev.payload.sessionId, (m) => {
+          const closed = finalizeTrailingStreams(m);
           const nextMessage: ChatMessage = {
             id: toolCallId ? `tool:${toolCallId}` : uid("tool"),
             role: "tool",
@@ -227,7 +258,7 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
             next[existingIndex] = { ...existing, ...nextMessage, id: existing.id };
             return next;
           }
-          return [...m, nextMessage];
+          return [...closed, nextMessage];
         });
       });
       if (!cancelled) unsubs.push(u3);
