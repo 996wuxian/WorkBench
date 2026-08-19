@@ -164,7 +164,6 @@ function postPermissionRequest(payload) {
               "Content-Type": "application/json",
               "Content-Length": Buffer.byteLength(body, "utf8"),
             },
-            timeout: 305000,
           },
           (res) => {
             let data = "";
@@ -182,9 +181,6 @@ function postPermissionRequest(payload) {
           }
         );
 
-        req.on("timeout", () => {
-          req.destroy(new Error("permission request timed out"));
-        });
         req.on("error", (error) => {
           resolve({ behavior: "deny", message: `Workbench permission bridge failed: ${error.message}` });
         });

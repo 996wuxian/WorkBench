@@ -8,6 +8,9 @@ import { runtimeLabel } from "../lib/runtimes";
 import type { OrchestrationTask } from "../lib/orchestration";
 
 function taskStatusLabel(status: OrchestrationTask["status"]): string {
+  if (status === "running") return "运行";
+  if (status === "done") return "完成";
+  if (status === "failed") return "失败";
   if (status === "ready") return "就绪";
   if (status === "blocked") return "等待";
   return "草稿";

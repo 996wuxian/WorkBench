@@ -1,11 +1,20 @@
-import { useEffect, useRef, useState, type MouseEvent, type RefObject } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type MouseEvent,
+  type RefObject,
+} from "react";
 import { createPortal } from "react-dom";
 
 import { ChoiceSelect, type ChoiceOption } from "./ChoiceSelect";
 import {
   IconClipboard,
   IconClose,
+  IconExpand,
   IconFolder,
+  IconPhoto,
   IconQuote,
   IconPuzzle,
   IconRiskAsk,
@@ -17,15 +26,27 @@ import {
   IconStop,
 } from "./icons";
 import { compactLabel } from "../lib/format";
+import { copyImageSourceToClipboard } from "../lib/clipboardImages";
 import { findSkillByName } from "../lib/skills";
+import { emitToast } from "../lib/toast";
 import type { PermissionMode, SkillInfo } from "../lib/types";
 import type { QuoteTarget } from "../lib/messages";
+
+export type ComposerImageAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  path: string;
+  previewUrl: string;
+};
 
 type Props = {
   draft: string;
   busy: boolean;
   streaming: boolean;
   readOnly: boolean;
+  inputDisabled: boolean;
   settingsChangeDisabled: boolean;
   activeModelValue: string;
   activeModelLabel: string;
@@ -33,8 +54,8 @@ type Props = {
   activePermissionMode: PermissionMode;
   activeSupportsReasoningEffort: boolean;
   controlModelOptions: ChoiceOption[];
-  controlPermissionOptions: ChoiceOption[];
   controlReasoningOptions: ChoiceOption[];
+  controlPermissionOptions: ChoiceOption[];
   skills: SkillInfo[];
   skillsLoading: boolean;
   skillsError: string | null;
@@ -43,11 +64,15 @@ type Props = {
   projectPathEditable: boolean;
   projectPathBusy: boolean;
   quoteTarget: QuoteTarget | null;
+  imageAttachments: ComposerImageAttachment[];
+  imagePasteEnabled: boolean;
   composerInputRef: RefObject<HTMLTextAreaElement | null>;
   onDraftChange: (value: string) => void;
   onSend: () => void;
   onStop: () => void;
   onClearQuote: () => void;
+  onPasteImages: (files: File[]) => void;
+  onRemoveImageAttachment: (id: string) => void;
   onModelChange: (value: string) => void;
   onReasoningEffortChange: (value: string) => void;
   onPermissionChange: (value: string) => void;
@@ -63,43 +88,12 @@ type ComposerContextMenu = {
   selectionEnd: number;
 } | null;
 
-function permissionRiskIcon(option: ChoiceOption) {
-  const value = option.value as PermissionMode;
-  switch (value) {
-    case "read_only":
-      return <IconRiskReadOnly className="permission-risk-icon" />;
-    case "ask":
-      return <IconRiskAsk className="permission-risk-icon" />;
-    case "auto":
-      return <IconRiskAuto className="permission-risk-icon" />;
-    case "full_access":
-      return <IconRiskFullAccess className="permission-risk-icon" />;
-    default:
-      return <IconRiskUnknown className="permission-risk-icon" />;
-  }
-}
-
-function permissionRiskClassName(option: ChoiceOption) {
-  const value = option.value as PermissionMode;
-  switch (value) {
-    case "read_only":
-      return "permission-risk--safe";
-    case "ask":
-      return "permission-risk--ask";
-    case "auto":
-      return "permission-risk--auto";
-    case "full_access":
-      return "permission-risk--danger";
-    default:
-      return "permission-risk--unknown";
-  }
-}
-
 export function ComposerPanel({
   draft,
   busy,
   streaming,
   readOnly,
+  inputDisabled,
   settingsChangeDisabled,
   activeModelValue,
   activeModelLabel,
@@ -107,8 +101,8 @@ export function ComposerPanel({
   activePermissionMode,
   activeSupportsReasoningEffort,
   controlModelOptions,
-  controlPermissionOptions,
   controlReasoningOptions,
+  controlPermissionOptions,
   skills,
   skillsLoading,
   skillsError,
@@ -117,11 +111,15 @@ export function ComposerPanel({
   projectPathEditable,
   projectPathBusy,
   quoteTarget,
+  imageAttachments,
+  imagePasteEnabled,
   composerInputRef,
   onDraftChange,
   onSend,
   onStop,
   onClearQuote,
+  onPasteImages,
+  onRemoveImageAttachment,
   onModelChange,
   onReasoningEffortChange,
   onPermissionChange,
@@ -132,6 +130,7 @@ export function ComposerPanel({
   const [contextMenu, setContextMenu] = useState<ComposerContextMenu>(null);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [skillQuery, setSkillQuery] = useState("");
+  const [previewImage, setPreviewImage] = useState<ComposerImageAttachment | null>(null);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const skillsRef = useRef<HTMLDivElement | null>(null);
 
@@ -174,6 +173,28 @@ export function ComposerPanel({
     return () => window.removeEventListener("mousedown", close);
   }, [skillsOpen]);
 
+  useEffect(() => {
+    if (!inputDisabled) return;
+    setContextMenu(null);
+    setSkillsOpen(false);
+  }, [inputDisabled]);
+
+  useEffect(() => {
+    if (!previewImage) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPreviewImage(null);
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [previewImage]);
+
+  useEffect(() => {
+    if (!previewImage) return;
+    if (!imageAttachments.some((image) => image.id === previewImage.id)) {
+      setPreviewImage(null);
+    }
+  }, [imageAttachments, previewImage]);
+
   const filteredSkills = skills.filter((skill) => {
     const q = skillQuery.trim().toLowerCase();
     if (!q) return true;
@@ -182,7 +203,58 @@ export function ComposerPanel({
   const selectedSkills = selectedSkillNames
     .map((name) => findSkillByName(skills, name))
     .filter((skill): skill is SkillInfo => Boolean(skill));
-  const canSend = draft.trim().length > 0 || selectedSkills.length > 0;
+  const canSend =
+    draft.trim().length > 0 ||
+    selectedSkills.length > 0 ||
+    imageAttachments.length > 0;
+
+  const insertTextAtSelection = (text: string, input: HTMLTextAreaElement | null) => {
+    if (!text) return;
+    const start = Math.min(input?.selectionStart ?? draft.length, draft.length);
+    const end = Math.min(
+      Math.max(input?.selectionEnd ?? start, start),
+      draft.length,
+    );
+    const next = `${draft.slice(0, start)}${text}${draft.slice(end)}`;
+    onDraftChange(next);
+    requestAnimationFrame(() => {
+      input?.focus();
+      const caret = start + text.length;
+      input?.setSelectionRange(caret, caret);
+    });
+  };
+
+  const permissionRiskIcon = (option: ChoiceOption) => {
+    const value = option.value as PermissionMode;
+    switch (value) {
+      case "read_only":
+        return <IconRiskReadOnly className="permission-risk-icon" />;
+      case "ask":
+        return <IconRiskAsk className="permission-risk-icon" />;
+      case "auto":
+        return <IconRiskAuto className="permission-risk-icon" />;
+      case "full_access":
+        return <IconRiskFullAccess className="permission-risk-icon" />;
+      default:
+        return <IconRiskUnknown className="permission-risk-icon" />;
+    }
+  };
+
+  const permissionRiskClassName = (option: ChoiceOption) => {
+    const value = option.value as PermissionMode;
+    switch (value) {
+      case "read_only":
+        return "permission-risk--safe";
+      case "ask":
+        return "permission-risk--ask";
+      case "auto":
+        return "permission-risk--auto";
+      case "full_access":
+        return "permission-risk--danger";
+      default:
+        return "permission-risk--unknown";
+    }
+  };
 
   const openContextMenu = (event: MouseEvent<HTMLTextAreaElement>) => {
     event.preventDefault();
@@ -211,22 +283,68 @@ export function ComposerPanel({
     const text = await readText.call(navigator.clipboard).catch(() => "");
     if (!text) return;
 
-    const input = composerInputRef.current;
-    const start = Math.min(menu.selectionStart, draft.length);
-    const end = Math.min(Math.max(menu.selectionEnd, start), draft.length);
-    const next = `${draft.slice(0, start)}${text}${draft.slice(end)}`;
-    onDraftChange(next);
+    insertTextAtSelection(text, composerInputRef.current);
+  };
 
-    requestAnimationFrame(() => {
-      input?.focus();
-      const caret = start + text.length;
-      input?.setSelectionRange(caret, caret);
-    });
+  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (inputDisabled || !imagePasteEnabled) return;
+    const imageFiles = Array.from(event.clipboardData.files).filter((file) =>
+      file.type.startsWith("image/"),
+    );
+    if (imageFiles.length === 0) return;
+    event.preventDefault();
+    insertTextAtSelection(event.clipboardData.getData("text/plain"), event.currentTarget);
+    onPasteImages(imageFiles);
   };
 
   return (
     <div className="composer">
-      <div className={"composer__shell" + (readOnly ? " is-read-only" : "")}>
+      {imageAttachments.length > 0 ? (
+        <div className="composer-attachments" aria-label="已粘贴图片">
+          {imageAttachments.map((image) => (
+            <div className="composer-attachment" key={image.id} title={image.path}>
+              <button
+                type="button"
+                className="composer-attachment__preview"
+                title={`查看图片 ${image.name}`}
+                aria-label={`查看图片 ${image.name}`}
+                onClick={() => setPreviewImage(image)}
+              >
+                <img
+                  className="composer-attachment__image"
+                  src={image.previewUrl}
+                  alt=""
+                  draggable={false}
+                />
+                <span className="composer-attachment__zoom" aria-hidden>
+                  <IconExpand size={17} />
+                </span>
+                <span className="composer-attachment__meta">
+                  <IconPhoto size={12} />
+                  <span>{image.name}</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="composer-attachment__remove"
+                title="移除图片"
+                aria-label={`移除图片 ${image.name}`}
+                disabled={inputDisabled}
+                onClick={() => onRemoveImageAttachment(image.id)}
+              >
+                <IconClose size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div
+        className={
+          "composer__shell" +
+          (readOnly ? " is-read-only" : "") +
+          (inputDisabled && !readOnly ? " is-input-disabled" : "")
+        }
+      >
         <div className="composer__toolbar">
           <ChoiceSelect
             className="composer-control composer-control--model"
@@ -273,7 +391,7 @@ export function ComposerPanel({
               aria-label="选择当前 CLI 的 Skills"
               aria-haspopup="dialog"
               aria-expanded={skillsOpen}
-              disabled={readOnly}
+              disabled={inputDisabled}
               onClick={() => {
                 setSkillQuery("");
                 setSkillsOpen((open) => !open);
@@ -356,14 +474,16 @@ export function ComposerPanel({
                 key={`${skill.source}:${skill.name}`}
                 className="skill-chip skill-chip--composer"
                 title={`${skill.description ?? skill.name} · 左键或中键移除`}
-                disabled={readOnly}
+                disabled={inputDisabled}
                 onMouseDown={(event) => {
                   if (event.button !== 1) return;
                   event.preventDefault();
+                  if (inputDisabled) return;
                   onSkillRemove(skill.name);
                   requestAnimationFrame(() => composerInputRef.current?.focus());
                 }}
                 onClick={() => {
+                  if (inputDisabled) return;
                   onSkillRemove(skill.name);
                   requestAnimationFrame(() => composerInputRef.current?.focus());
                 }}
@@ -381,14 +501,22 @@ export function ComposerPanel({
         <textarea
           ref={composerInputRef}
           className="composer__input"
-          placeholder={readOnly ? "归档会话为只读" : "请输入"}
+          placeholder={
+            readOnly
+              ? "归档会话为只读"
+              : inputDisabled
+                ? "等待当前任务完成"
+                : "请输入"
+          }
           value={draft}
-          disabled={readOnly}
+          disabled={inputDisabled}
           onChange={(e) => onDraftChange(e.target.value)}
+          onPaste={handlePaste}
           onContextMenu={openContextMenu}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
+              if (streaming) return;
               onSend();
             }
           }}
@@ -402,7 +530,7 @@ export function ComposerPanel({
                 projectPath ??
                 "未选择工作目录；发送时将优先使用 D:\\workbench，其次 X:\\workbench"
               }
-              disabled={projectPathBusy || readOnly}
+              disabled={projectPathBusy || inputDisabled}
               onClick={onPickProjectPath}
             >
               <IconFolder size={15} />
@@ -431,7 +559,7 @@ export function ComposerPanel({
               type="button"
               className="composer__send"
               title="发送"
-              disabled={readOnly || !canSend || busy}
+              disabled={inputDisabled || !canSend || busy}
               onClick={onSend}
             >
               <IconSend size={16} />
@@ -461,6 +589,65 @@ export function ComposerPanel({
                 <IconClipboard size={14} />
                 <span>粘贴</span>
               </button>
+            </div>,
+            document.body,
+          )
+        : null}
+      {previewImage
+        ? createPortal(
+            <div
+              className="composer-image-viewer"
+              role="presentation"
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget) setPreviewImage(null);
+              }}
+            >
+              <section
+                className="composer-image-viewer__dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-label={`查看图片 ${previewImage.name}`}
+              >
+                <div className="composer-image-viewer__head">
+                  <div className="composer-image-viewer__title" title={previewImage.path}>
+                    {previewImage.name}
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--icon composer-image-viewer__close"
+                    title="关闭图片预览"
+                    aria-label="关闭图片预览"
+                    autoFocus
+                    onClick={() => setPreviewImage(null)}
+                  >
+                    <IconClose size={16} />
+                  </button>
+                </div>
+                <div className="composer-image-viewer__body">
+                  <img
+                    className="composer-image-viewer__image"
+                    src={previewImage.previewUrl}
+                    alt={previewImage.name}
+                    title="右键复制图片"
+                    draggable={false}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      void copyImageSourceToClipboard(
+                        previewImage.previewUrl,
+                        previewImage.mimeType,
+                      ).then(
+                        () => emitToast("已复制图片"),
+                        (error) =>
+                          emitToast({
+                            message: `复制图片失败: ${String(error)}`,
+                            tone: "danger",
+                          }),
+                      );
+                    }}
+                  />
+                </div>
+              </section>
             </div>,
             document.body,
           )

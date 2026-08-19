@@ -8,27 +8,21 @@
 //! 2. a session-scoped "always allow" entry the user granted earlier,
 //! 3. the user, via `session_permission_respond`.
 //!
-//! Every request resolves exactly once. If nobody answers within
-//! [`REQUEST_TIMEOUT`] the request is denied, so a forgotten approval bar can
-//! never wedge an agent process forever.
+//! Every request resolves exactly once. In ask mode it waits for an explicit
+//! user answer or session abort; the Host does not auto-deny just because the
+//! user stepped away.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::host::events::HostEvent;
+use crate::host::tool_policy::{ToolPolicyAction, ToolPolicyDecision, ToolPolicyPipeline};
 use crate::runtime::PermissionMode;
-
-/// How long an unanswered request waits before it is denied.
-#[cfg(not(test))]
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
-#[cfg(test)]
-pub const REQUEST_TIMEOUT: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,7 +60,6 @@ pub enum DecisionSource {
     Mode,
     /// Matched a session-scoped "always allow" grant.
     Remembered,
-    Timeout,
     /// Session disconnected / process exited while pending.
     Aborted,
 }
@@ -139,55 +132,59 @@ impl PermissionBroker {
     }
 
     /// Ask the Host for a decision. Blocks the calling adapter task (not the
-    /// stdio reader) until resolved, remembered, or timed out.
+    /// stdio reader) until resolved, remembered, or aborted.
     pub async fn request(&self, req: PermissionRequest) -> PermissionDecision {
         let request_id = format!(
             "{}#{}",
             self.inner.session_id,
             self.inner.next_id.fetch_add(1, Ordering::SeqCst)
         );
+        let preliminary = ToolPolicyPipeline::evaluate(&req, self.mode(), false);
+        let remembered = self
+            .inner
+            .always_allowed
+            .lock()
+            .contains(&preliminary.decision.scope_key);
+        let evaluation = ToolPolicyPipeline::evaluate(&req, self.mode(), remembered);
+        let policy = evaluation.decision;
 
-        if let Some(source) = self.short_circuit(&req.tool_name) {
-            self.emit_request(&request_id, &req, true);
-            self.emit_resolved(&request_id, PermissionDecision::AllowOnce, source);
-            return PermissionDecision::AllowOnce;
+        match policy.action {
+            ToolPolicyAction::Allow => {
+                let source = evaluation.automatic_source.unwrap_or(DecisionSource::Mode);
+                self.emit_request(&request_id, &req, true, &policy);
+                self.emit_resolved(&request_id, PermissionDecision::AllowOnce, source);
+                return PermissionDecision::AllowOnce;
+            }
+            ToolPolicyAction::Deny => {
+                let source = evaluation.automatic_source.unwrap_or(DecisionSource::Mode);
+                self.emit_request(&request_id, &req, false, &policy);
+                self.emit_resolved(&request_id, PermissionDecision::Deny, source);
+                return PermissionDecision::Deny;
+            }
+            ToolPolicyAction::Ask => {}
         }
+
+        let scope_key = policy.scope_key.clone();
 
         let (tx, rx) = oneshot::channel();
         self.inner.pending.lock().insert(request_id.clone(), tx);
-        self.emit_request(&request_id, &req, false);
+        self.emit_request(&request_id, &req, false, &policy);
 
-        let decision = match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
-            Ok(Ok(decision)) => decision,
+        let decision = match rx.await {
+            Ok(decision) => decision,
             // Sender dropped: `abort_all` already emitted a resolution.
-            Ok(Err(_)) => return PermissionDecision::Deny,
-            Err(_) => {
-                self.inner.pending.lock().remove(&request_id);
-                tracing::warn!(
-                    "permission request {request_id} timed out after {}s; denying",
-                    REQUEST_TIMEOUT.as_secs()
-                );
-                self.emit_resolved(
-                    &request_id,
-                    PermissionDecision::Deny,
-                    DecisionSource::Timeout,
-                );
-                return PermissionDecision::Deny;
-            }
+            Err(_) => return PermissionDecision::Deny,
         };
 
         if decision == PermissionDecision::AllowAlways {
-            self.inner
-                .always_allowed
-                .lock()
-                .insert(req.tool_name.clone());
+            self.inner.always_allowed.lock().insert(scope_key);
         }
         self.emit_resolved(&request_id, decision, DecisionSource::User);
         decision
     }
 
     /// Answer a pending request. Errors when the id is unknown, which normally
-    /// means it already timed out or the session went away.
+    /// means it already resolved or the session went away.
     pub fn resolve(&self, request_id: &str, decision: PermissionDecision) -> Result<(), String> {
         let tx = self
             .inner
@@ -219,23 +216,20 @@ impl PermissionBroker {
         self.inner.always_allowed.lock().clear();
     }
 
-    fn short_circuit(&self, tool_name: &str) -> Option<DecisionSource> {
-        if self.mode().auto_allow() {
-            return Some(DecisionSource::Mode);
-        }
-        if self.inner.always_allowed.lock().contains(tool_name) {
-            return Some(DecisionSource::Remembered);
-        }
-        None
-    }
-
-    fn emit_request(&self, request_id: &str, req: &PermissionRequest, auto_allowed: bool) {
+    fn emit_request(
+        &self,
+        request_id: &str,
+        req: &PermissionRequest,
+        auto_allowed: bool,
+        policy: &ToolPolicyDecision,
+    ) {
         let _ = self.inner.events.send(HostEvent::PermissionRequest {
             request_id: request_id.to_string(),
             tool_name: req.tool_name.clone(),
             title: req.title.clone(),
             preview: req.preview.chars().take(2000).collect(),
             auto_allowed,
+            policy: policy.clone(),
         });
     }
 
@@ -277,10 +271,17 @@ mod tests {
         assert_eq!(decision, PermissionDecision::AllowOnce);
         assert!(!broker.has_pending());
 
-        let HostEvent::PermissionRequest { auto_allowed, .. } = rx.recv().await.unwrap() else {
+        let HostEvent::PermissionRequest {
+            auto_allowed,
+            policy,
+            ..
+        } = rx.recv().await.unwrap()
+        else {
             panic!("expected a request event");
         };
         assert!(auto_allowed);
+        assert_eq!(policy.action, ToolPolicyAction::Allow);
+        assert_eq!(policy.intent.kind.as_str(), "shell");
     }
 
     #[tokio::test]
@@ -343,9 +344,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unanswered_request_times_out_to_deny() {
+    async fn unanswered_request_waits_until_answered() {
         let (broker, mut rx) = broker(PermissionMode::Ask);
-        let waiting = {
+        let mut waiting = {
             let broker = broker.clone();
             tokio::spawn(async move { broker.request(req("slowTool")).await })
         };
@@ -355,7 +356,19 @@ mod tests {
         };
         assert!(broker.has_pending());
 
-        tokio::time::sleep(REQUEST_TIMEOUT + Duration::from_millis(20)).await;
+        let short_wait = tokio::time::sleep(std::time::Duration::from_millis(20));
+        tokio::pin!(short_wait);
+        tokio::select! {
+            result = &mut waiting => {
+                panic!("permission request resolved before user answer: {:?}", result);
+            }
+            _ = &mut short_wait => {}
+        }
+
+        assert!(broker.has_pending());
+        broker
+            .resolve(&request_id, PermissionDecision::Deny)
+            .unwrap();
 
         assert_eq!(waiting.await.unwrap(), PermissionDecision::Deny);
         assert!(!broker.has_pending());
@@ -370,7 +383,36 @@ mod tests {
         };
         assert_eq!(resolved_request_id, request_id);
         assert_eq!(decision, PermissionDecision::Deny);
-        assert_eq!(source, DecisionSource::Timeout);
+        assert_eq!(source, DecisionSource::User);
+    }
+
+    #[tokio::test]
+    async fn read_only_blocks_write_intents_without_waiting() {
+        let (broker, mut rx) = broker(PermissionMode::ReadOnly);
+        let decision = broker
+            .request(PermissionRequest {
+                tool_name: "fileChange".into(),
+                title: "Edit src/main.rs".into(),
+                preview: "apply_patch".into(),
+            })
+            .await;
+
+        assert_eq!(decision, PermissionDecision::Deny);
+        assert!(!broker.has_pending());
+
+        let HostEvent::PermissionRequest { policy, .. } = rx.recv().await.unwrap() else {
+            panic!("expected a request event");
+        };
+        assert_eq!(policy.action, ToolPolicyAction::Deny);
+
+        let HostEvent::PermissionResolved {
+            decision, source, ..
+        } = rx.recv().await.unwrap()
+        else {
+            panic!("expected a resolution event");
+        };
+        assert_eq!(decision, PermissionDecision::Deny);
+        assert_eq!(source, DecisionSource::Mode);
     }
 
     #[test]

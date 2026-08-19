@@ -13,9 +13,12 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::host::events::FileChangeStat;
+use crate::host::permissions::{DecisionSource, PermissionDecision};
+use crate::host::tool_policy::ToolPolicyDecision;
 use crate::paths;
 use crate::runtime::{PermissionMode, RuntimeId};
 
+const JOURNAL_SCHEMA_VERSION: u8 = 2;
 const TRACE_SCHEMA_VERSION: u8 = 1;
 static TRACE_IO_LOCK: Mutex<()> = Mutex::new(());
 
@@ -100,6 +103,59 @@ pub struct StoredChatMessage {
 pub struct StoredWorktreeChangeBlock {
     pub id: String,
     pub files: Vec<FileChangeStat>,
+}
+
+/// One append-only session fact.
+///
+/// New journal lines use this envelope so the journal can hold more than UI
+/// transcript rows. Old journals wrote bare `StoredChatMessage` records; replay
+/// still accepts those lines and treats them as transcript facts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredSessionJournalEvent {
+    pub schema_version: u8,
+    pub timestamp: String,
+    pub session_id: String,
+    pub event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<StoredChatMessage>,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub details: serde_json::Value,
+}
+
+impl StoredSessionJournalEvent {
+    pub fn from_message(session_id: &str, message: StoredChatMessage) -> Self {
+        Self {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            timestamp: Utc::now().to_rfc3339(),
+            session_id: session_id.to_string(),
+            event: journal_event_for_message(&message).to_string(),
+            message: Some(message),
+            details: serde_json::Value::Null,
+        }
+    }
+
+    pub fn permission_decision(
+        session_id: &str,
+        request_id: &str,
+        decision: PermissionDecision,
+        source: DecisionSource,
+        policy: Option<&ToolPolicyDecision>,
+    ) -> Self {
+        Self {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            timestamp: Utc::now().to_rfc3339(),
+            session_id: session_id.to_string(),
+            event: "permission_decision".to_string(),
+            message: None,
+            details: serde_json::json!({
+                "requestId": request_id,
+                "decision": decision.as_str(),
+                "source": source,
+                "policy": policy,
+            }),
+        }
+    }
 }
 
 /// A privacy-safe execution timeline record.
@@ -360,6 +416,18 @@ pub fn append_message(session_id: &str, message: &StoredChatMessage) -> std::io:
     append_messages(session_id, std::slice::from_ref(message))
 }
 
+pub fn append_permission_decision(
+    session_id: &str,
+    request_id: &str,
+    decision: PermissionDecision,
+    source: DecisionSource,
+    policy: Option<&ToolPolicyDecision>,
+) -> std::io::Result<()> {
+    append_journal_event(&StoredSessionJournalEvent::permission_decision(
+        session_id, request_id, decision, source, policy,
+    ))
+}
+
 /// Append records to the journal.
 ///
 /// No `fsync`: the journal exists to survive a crashing *process* (agent or
@@ -375,10 +443,20 @@ pub fn append_messages(session_id: &str, messages: &[StoredChatMessage]) -> std:
     let path = dir.join("journal.jsonl");
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     for message in messages {
-        serde_json::to_writer(&mut file, message)?;
+        let event = StoredSessionJournalEvent::from_message(session_id, message.clone());
+        serde_json::to_writer(&mut file, &event)?;
         file.write_all(b"\n")?;
     }
     Ok(())
+}
+
+pub fn append_journal_event(event: &StoredSessionJournalEvent) -> std::io::Result<()> {
+    let dir = session_dir(&event.session_id)?;
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("journal.jsonl");
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    serde_json::to_writer(&mut file, event)?;
+    file.write_all(b"\n")
 }
 
 pub fn append_trace_event(session_id: &str, event: &StoredTraceEvent) -> std::io::Result<()> {
@@ -463,18 +541,42 @@ fn collapse_journal(lines: impl Iterator<Item = String>) -> Vec<StoredChatMessag
         if line.trim().is_empty() {
             continue;
         }
-        match serde_json::from_str::<StoredChatMessage>(&line) {
-            Ok(message) => match positions.get(&message.id) {
+        match parse_journal_message(&line) {
+            Ok(Some(message)) => match positions.get(&message.id) {
                 Some(&index) => messages[index] = message,
                 None => {
                     positions.insert(message.id.clone(), messages.len());
                     messages.push(message);
                 }
             },
+            Ok(None) => {}
             Err(err) => tracing::warn!("invalid session journal line skipped: {err}"),
         }
     }
     messages
+}
+
+fn parse_journal_message(line: &str) -> Result<Option<StoredChatMessage>, serde_json::Error> {
+    match serde_json::from_str::<StoredSessionJournalEvent>(line) {
+        Ok(event) => return Ok(event.message),
+        Err(envelope_err) => match serde_json::from_str::<StoredChatMessage>(line) {
+            Ok(message) => Ok(Some(message)),
+            Err(_) => Err(envelope_err),
+        },
+    }
+}
+
+fn journal_event_for_message(message: &StoredChatMessage) -> &'static str {
+    match message.role.as_str() {
+        "user" => "user_message",
+        "assistant" if message.partial => "assistant_checkpoint",
+        "assistant" => "assistant_message",
+        "thought" if message.partial => "thought_checkpoint",
+        "thought" => "thought_message",
+        "tool" => "tool_status",
+        "system" => "system_notice",
+        _ => "transcript_message",
+    }
 }
 
 fn session_dir(session_id: &str) -> std::io::Result<PathBuf> {
@@ -758,6 +860,35 @@ mod tests {
         assert_eq!(replayed[0].content, "Read main.rs · completed");
         assert!(replayed[0].tool_call_id.is_none());
         assert!(!replayed[0].partial);
+    }
+
+    #[test]
+    fn journal_event_messages_replay_as_transcript_records() {
+        let message = StoredChatMessage::new("user", "hi", Some(RuntimeId::CODEX));
+        let event = StoredSessionJournalEvent::from_message("session-1", message);
+        let line = serde_json::to_string(&event).expect("serialize event");
+
+        let replayed = collapse_journal(std::iter::once(line));
+
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].role, "user");
+        assert_eq!(replayed[0].content, "hi");
+    }
+
+    #[test]
+    fn journal_facts_without_messages_do_not_render_in_transcript() {
+        let event = StoredSessionJournalEvent::permission_decision(
+            "session-1",
+            "permission-1",
+            PermissionDecision::AllowOnce,
+            DecisionSource::User,
+            None,
+        );
+        let line = serde_json::to_string(&event).expect("serialize fact");
+
+        let replayed = collapse_journal(std::iter::once(line));
+
+        assert!(replayed.is_empty());
     }
 
     #[test]

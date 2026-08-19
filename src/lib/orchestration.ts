@@ -1,7 +1,14 @@
 import type { RuntimeId } from "./types";
+import type { ChatMessage, SessionMeta } from "./types";
 
 export type OrchestrationNodeMode = "manual-gate" | "review" | "fix";
-export type OrchestrationNodeStatus = "draft" | "ready" | "blocked";
+export type OrchestrationNodeStatus =
+  | "draft"
+  | "ready"
+  | "blocked"
+  | "running"
+  | "done"
+  | "failed";
 
 export interface OrchestrationNode {
   id: string;
@@ -12,6 +19,9 @@ export interface OrchestrationNode {
   status: OrchestrationNodeStatus;
   x: number;
   y: number;
+  sessionId?: string | null;
+  lastRunAt?: string | null;
+  lastError?: string | null;
 }
 
 export interface OrchestrationEdge {
@@ -37,7 +47,12 @@ const validStatuses = new Set<OrchestrationNodeStatus>([
   "draft",
   "ready",
   "blocked",
+  "running",
+  "done",
+  "failed",
 ]);
+
+export const FIXED_WORKFLOW_NODE_IDS = ["implement", "review", "fix"] as const;
 
 export const orchestrationTemplates: OrchestrationTask[] = [
   {
@@ -210,13 +225,138 @@ export function createOrchestrationNode(
 export function createOrchestrationTask(index: number): OrchestrationTask {
   return {
     id: `task-${Date.now().toString(36)}-${index}`,
-    title: `新编排 ${index}`,
-    summary: "本地编排草稿，尚未接入真实执行。",
-    status: "draft",
+    title: `实现复审闭环 ${index}`,
+    summary: "固定链路：实现 -> Review -> 修复建议，每一步都会创建普通会话。",
+    status: "ready",
     updatedAt: formatOrchestrationUpdatedAt(),
-    nodes: [createOrchestrationNode(1)],
-    edges: [],
+    nodes: createFixedWorkflowNodes(),
+    edges: [
+      { from: "implement", to: "review", label: "实现结果" },
+      { from: "review", to: "fix", label: "审查意见" },
+    ],
   };
+}
+
+export function createFixedWorkflowNodes(): OrchestrationNode[] {
+  return [
+    {
+      id: "implement",
+      runtimeId: "codex",
+      title: "实现",
+      prompt: "在当前项目中完成这次用户指定的改动，保持最小范围，并在结尾列出验证结果。",
+      mode: "manual-gate",
+      status: "ready",
+      x: 70,
+      y: 120,
+    },
+    {
+      id: "review",
+      runtimeId: "claude",
+      title: "Review",
+      prompt: "审查上游实现的正确性、回归风险、测试证据和可维护性，按严重程度输出问题。",
+      mode: "review",
+      status: "blocked",
+      x: 360,
+      y: 120,
+    },
+    {
+      id: "fix",
+      runtimeId: "codex",
+      title: "修复建议",
+      prompt: "根据 Review 输出生成最小修复建议；若审查指出明确缺陷，按建议继续修复并说明验证结果。",
+      mode: "fix",
+      status: "blocked",
+      x: 650,
+      y: 120,
+    },
+  ];
+}
+
+export function fixedWorkflowNodes(task: OrchestrationTask): OrchestrationNode[] {
+  const nodesById = new Map(task.nodes.map((node) => [node.id, node]));
+  const nodes = FIXED_WORKFLOW_NODE_IDS.map((id) => nodesById.get(id));
+  return nodes.every((node): node is OrchestrationNode => Boolean(node))
+    ? nodes
+    : [];
+}
+
+export function canRunFixedWorkflow(task: OrchestrationTask): boolean {
+  return fixedWorkflowNodes(task).length === FIXED_WORKFLOW_NODE_IDS.length;
+}
+
+export function extractLastAssistantText(messages: ChatMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === "assistant" && message.content.trim()) {
+      return message.content.trim();
+    }
+  }
+  return "";
+}
+
+export interface WorkflowStepOutput {
+  node: OrchestrationNode;
+  session: Pick<SessionMeta, "id" | "runtimeId" | "title">;
+  output: string;
+}
+
+export function buildWorkflowNodePrompt(
+  task: OrchestrationTask,
+  node: OrchestrationNode,
+  upstream: WorkflowStepOutput[],
+): string {
+  if (upstream.length === 0) {
+    return node.prompt.trim();
+  }
+
+  const upstreamText = upstream
+    .map(
+      (item) =>
+        `## ${item.node.title}\nRuntime: ${item.session.runtimeId}\nSession: ${item.session.id}\n\n${item.output || "(无 assistant 输出)"}`,
+    )
+    .join("\n\n");
+
+  return [
+    `你正在执行 Workbench 编排任务「${task.title}」中的「${node.title}」节点。`,
+    "",
+    "本节点任务：",
+    node.prompt.trim(),
+    "",
+    "上游节点输出：",
+    upstreamText,
+    "",
+    "请只基于上游结果和当前仓库状态继续完成本节点职责，并在结尾给出简短结论。",
+  ].join("\n");
+}
+
+export function updateWorkflowNode(
+  task: OrchestrationTask,
+  nodeId: string,
+  patch: Partial<OrchestrationNode>,
+  updatedAt = formatOrchestrationUpdatedAt(),
+): OrchestrationTask {
+  const nodes = task.nodes.map((node) =>
+    node.id === nodeId ? { ...node, ...patch } : node,
+  );
+  return {
+    ...task,
+    nodes,
+    status: deriveTaskStatus(nodes),
+    updatedAt,
+  };
+}
+
+export function deriveTaskStatus(
+  nodes: Pick<OrchestrationNode, "status">[],
+): OrchestrationNodeStatus {
+  if (nodes.some((node) => node.status === "running")) return "running";
+  if (nodes.some((node) => node.status === "failed")) return "failed";
+  if (nodes.length > 0 && nodes.every((node) => node.status === "done")) {
+    return "done";
+  }
+  if (nodes.some((node) => node.status === "ready")) return "ready";
+  if (nodes.some((node) => node.status === "blocked")) return "blocked";
+  return "draft";
 }
 
 export function formatOrchestrationUpdatedAt(date = new Date()): string {
@@ -264,6 +404,18 @@ function normalizeNode(value: unknown, fallbackIndex: number): OrchestrationNode
     status: normalizeStatus(record.status),
     x: typeof record.x === "number" && Number.isFinite(record.x) ? record.x : 80,
     y: typeof record.y === "number" && Number.isFinite(record.y) ? record.y : 80,
+    sessionId:
+      typeof record.sessionId === "string" && record.sessionId.trim()
+        ? record.sessionId
+        : null,
+    lastRunAt:
+      typeof record.lastRunAt === "string" && record.lastRunAt.trim()
+        ? record.lastRunAt
+        : null,
+    lastError:
+      typeof record.lastError === "string" && record.lastError.trim()
+        ? record.lastError
+        : null,
   };
 }
 

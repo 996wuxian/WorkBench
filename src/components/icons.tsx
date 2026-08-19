@@ -9,6 +9,7 @@ import {
   IconAlertTriangle as TbAlertTriangle,
   IconArchive as TbArchive,
   IconArchiveOff as TbArchiveOff,
+  IconArrowsMaximize as TbArrowsMaximize,
   IconCheck as TbCheck,
   IconChevronDown as TbChevronDown,
   IconChevronsDown as TbChevronsDown,
@@ -38,6 +39,7 @@ import {
   IconPinned as TbPinned,
   IconPinnedFilled as TbPinnedFilled,
   IconPinnedOff as TbPinnedOff,
+  IconPhoto as TbPhoto,
   IconRefresh as TbRefresh,
   IconRobot as TbRobot,
   IconSearch as TbSearch,
@@ -162,6 +164,7 @@ export const IconMore = wrap(TbDots);
 export const IconFolder = wrap(TbFolder);
 export const IconArchive = wrap(TbArchive);
 export const IconArchiveOff = wrap(TbArchiveOff);
+export const IconExpand = wrap(TbArrowsMaximize);
 export const IconFileExport = wrap(TbFileExport);
 export const IconFileText = wrap(TbFileText);
 export const IconGitFork = wrap(TbGitFork);
@@ -170,6 +173,7 @@ export const IconPackageExport = wrap(TbPackageExport);
 export const IconPinned = wrap(TbPinned);
 export const IconPinnedFilled = wrap(TbPinnedFilled);
 export const IconPinnedOff = wrap(TbPinnedOff);
+export const IconPhoto = wrap(TbPhoto);
 export const IconTrash = wrap(TbTrash);
 export const IconClose = wrap(TbX);
 export const IconSend = wrap(TbSend);

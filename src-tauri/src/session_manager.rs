@@ -15,10 +15,11 @@ use uuid::Uuid;
 use crate::error::{AgentError, AgentErrorCode};
 use crate::host::events::{FileChangeStat, HostEvent, StreamKind};
 use crate::host::permissions::{DecisionSource, PermissionBroker, PermissionDecision};
+use crate::host::tool_policy::{ToolPolicyAction, ToolPolicyDecision};
 use crate::native_sessions::NativeSessionItem;
 use crate::runtime::{
-    self, ConnectOpts, LiveSession, NativeSessionSource, PermissionMode, PromptInput, RuntimeId,
-    SessionSettings,
+    self, ConnectOpts, LiveSession, NativeSessionSource, PermissionMode, PromptImageInput,
+    PromptInput, RuntimeId, SessionSettings,
 };
 use crate::session_fsm::{SessionFsm, SessionState};
 use crate::session_store::{
@@ -87,6 +88,7 @@ struct LiveSessionSlot {
     permission_pause_started_at: Option<DateTime<Utc>>,
     pending_permission_count: usize,
     pending_permission_titles: HashMap<String, String>,
+    pending_permission_policies: HashMap<String, ToolPolicyDecision>,
     persisted: bool,
 }
 
@@ -204,7 +206,10 @@ fn worktree_change_marker(id: &str) -> String {
     format!("[[workbench-file-change:{id}]]")
 }
 
-fn merge_file_changes(current: &[FileChangeStat], incoming: &[FileChangeStat]) -> Vec<FileChangeStat> {
+fn merge_file_changes(
+    current: &[FileChangeStat],
+    incoming: &[FileChangeStat],
+) -> Vec<FileChangeStat> {
     let mut merged = current.to_vec();
     let mut positions = HashMap::new();
     for (index, file) in merged.iter().enumerate() {
@@ -247,11 +252,24 @@ fn elapsed_ms_since(started_at: &str, now: DateTime<Utc>) -> u64 {
         .unwrap_or(0)
 }
 
-fn prompt_trace_details(text: &str) -> serde_json::Value {
+fn prompt_trace_details(text: &str, images: &[PromptImageInput]) -> serde_json::Value {
     serde_json::json!({
         "textChars": text.chars().count(),
         "textBytes": text.len(),
+        "imageCount": images.len(),
     })
+}
+
+fn prompt_display_text(text: &str, images: &[PromptImageInput]) -> String {
+    let mut out = text.trim_end().to_string();
+    for image in images {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("[image] ");
+        out.push_str(&image.path.display().to_string());
+    }
+    out
 }
 
 fn error_trace_details(error: &AgentError) -> serde_json::Value {
@@ -281,10 +299,15 @@ fn permission_request_trace_details(
     _private_title: &str,
     _private_preview: &str,
     auto_allowed: bool,
+    policy: &ToolPolicyDecision,
 ) -> serde_json::Value {
     serde_json::json!({
         "toolName": tool_name,
         "autoAllowed": auto_allowed,
+        "intentKind": policy.intent.kind.as_str(),
+        "risk": policy.risk.as_str(),
+        "policyAction": policy.action.as_str(),
+        "policyReason": policy.reason,
     })
 }
 
@@ -302,7 +325,6 @@ fn permission_source_label(source: DecisionSource) -> &'static str {
         DecisionSource::User => "你",
         DecisionSource::Mode => "会话权限模式",
         DecisionSource::Remembered => "本会话已记住的授权",
-        DecisionSource::Timeout => "超时策略",
         DecisionSource::Aborted => "进程退出",
     }
 }
@@ -453,6 +475,7 @@ impl SessionManager {
                     permission_pause_started_at: None,
                     pending_permission_count: 0,
                     pending_permission_titles: HashMap::new(),
+                    pending_permission_policies: HashMap::new(),
                     persisted: true,
                 },
             );
@@ -581,6 +604,7 @@ impl SessionManager {
                         permission_pause_started_at: None,
                         pending_permission_count: 0,
                         pending_permission_titles: HashMap::new(),
+                        pending_permission_policies: HashMap::new(),
                         persisted: true,
                     },
                 );
@@ -652,6 +676,7 @@ impl SessionManager {
             permission_pause_started_at: None,
             pending_permission_count: 0,
             pending_permission_titles: HashMap::new(),
+            pending_permission_policies: HashMap::new(),
             persisted: false,
         };
 
@@ -1188,6 +1213,7 @@ impl SessionManager {
                         title,
                         preview,
                         auto_allowed,
+                        policy,
                     } => {
                         mgr_events.record_trace(
                             &sid_events,
@@ -1197,22 +1223,34 @@ impl SessionManager {
                                 title,
                                 preview,
                                 *auto_allowed,
+                                policy,
                             ),
                         );
-                        // Auto-allowed requests are surfaced for the transcript but
-                        // must not park the FSM: nobody is going to answer them.
-                        if *auto_allowed {
+                        mgr_events.remember_pending_permission(
+                            &sid_events,
+                            request_id,
+                            title,
+                            policy.clone(),
+                        );
+                        // Automatically resolved requests are surfaced for the
+                        // transcript but must not park the FSM: nobody is going
+                        // to answer them.
+                        if policy.action != ToolPolicyAction::Ask {
                             mgr_events.append_tool_message(
                                 &sid_events,
                                 request_id,
                                 tool_name,
                                 title,
-                                "auto approved",
+                                match policy.action {
+                                    ToolPolicyAction::Allow => "auto approved",
+                                    ToolPolicyAction::Deny => "blocked by policy",
+                                    ToolPolicyAction::Ask => "pending",
+                                },
                             );
-                        } else {
-                            mgr_events.remember_permission_title(&sid_events, request_id, title);
                         }
-                        if !*auto_allowed && mgr_events.mark_awaiting_permission(&sid_events) {
+                        if policy.action == ToolPolicyAction::Ask
+                            && mgr_events.mark_awaiting_permission(&sid_events)
+                        {
                             mgr_events.emit_state(&app_events, &sid_events);
                         }
                         let _ = app_events.emit(
@@ -1224,6 +1262,7 @@ impl SessionManager {
                                 "title": title,
                                 "preview": preview,
                                 "autoAllowed": auto_allowed,
+                                "policy": policy,
                             }),
                         );
                     }
@@ -1232,8 +1271,14 @@ impl SessionManager {
                         decision,
                         source,
                     } => {
-                        let resolved_title =
-                            mgr_events.take_permission_title(&sid_events, request_id);
+                        let resolved = mgr_events.take_pending_permission(&sid_events, request_id);
+                        mgr_events.record_permission_decision(
+                            &sid_events,
+                            request_id,
+                            *decision,
+                            *source,
+                            resolved.as_ref().map(|(_, policy)| policy),
+                        );
                         mgr_events.record_trace(
                             &sid_events,
                             "permission_resolved",
@@ -1245,8 +1290,14 @@ impl SessionManager {
                         if mgr_events.mark_permission_resolved(&sid_events) {
                             mgr_events.emit_state(&app_events, &sid_events);
                         }
-                        if !matches!(*source, DecisionSource::User | DecisionSource::Mode) {
-                            let title = resolved_title.as_deref().unwrap_or("工具调用");
+                        if !matches!(
+                            *source,
+                            DecisionSource::User | DecisionSource::Mode | DecisionSource::Aborted
+                        ) {
+                            let title = resolved
+                                .as_ref()
+                                .map(|(title, _)| title.as_str())
+                                .unwrap_or("工具调用");
                             mgr_events.append_system_message(
                                 &sid_events,
                                 format!(
@@ -1668,23 +1719,25 @@ impl SessionManager {
                 None
             }
             .or_else(|| {
-            let block_id = Uuid::new_v4().to_string();
-            let marker = worktree_change_marker(&block_id);
-            if buffer.text.trim().is_empty() {
-                buffer.text.push_str(&marker);
-                buffer.text.push_str("\n\n");
-            } else if buffer.text.ends_with('\n') {
-                buffer.text.push_str(&marker);
-                buffer.text.push_str("\n\n");
-            } else {
+                let block_id = Uuid::new_v4().to_string();
+                let marker = worktree_change_marker(&block_id);
+                if buffer.text.trim().is_empty() {
+                    buffer.text.push_str(&marker);
+                    buffer.text.push_str("\n\n");
+                } else if buffer.text.ends_with('\n') {
+                    buffer.text.push_str(&marker);
+                    buffer.text.push_str("\n\n");
+                } else {
                     buffer.text.push_str("\n\n");
                     buffer.text.push_str(&marker);
                     buffer.text.push_str("\n\n");
                 }
-                buffer.worktree_change_blocks.push(StoredWorktreeChangeBlock {
-                    id: block_id,
-                    files,
-                });
+                buffer
+                    .worktree_change_blocks
+                    .push(StoredWorktreeChangeBlock {
+                        id: block_id,
+                        files,
+                    });
                 buffer.checkpointed = buffer.text.len();
                 let mut checkpoint = StoredChatMessage::checkpoint(
                     id,
@@ -1844,19 +1897,48 @@ impl SessionManager {
         self.append_message(session_id, &message);
     }
 
-    fn remember_permission_title(&self, session_id: &str, request_id: &str, title: &str) {
+    fn record_permission_decision(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        decision: PermissionDecision,
+        source: DecisionSource,
+        policy: Option<&ToolPolicyDecision>,
+    ) {
+        if let Err(err) = session_store::append_permission_decision(
+            session_id, request_id, decision, source, policy,
+        ) {
+            tracing::warn!("failed to append permission decision {session_id}: {err}");
+        }
+    }
+
+    fn remember_pending_permission(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        title: &str,
+        policy: ToolPolicyDecision,
+    ) {
         let mut guard = self.inner.lock();
         let Some(slot) = guard.sessions.get_mut(session_id) else {
             return;
         };
         slot.pending_permission_titles
             .insert(request_id.to_string(), title.to_string());
+        slot.pending_permission_policies
+            .insert(request_id.to_string(), policy);
     }
 
-    fn take_permission_title(&self, session_id: &str, request_id: &str) -> Option<String> {
+    fn take_pending_permission(
+        &self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Option<(String, ToolPolicyDecision)> {
         let mut guard = self.inner.lock();
         let slot = guard.sessions.get_mut(session_id)?;
-        slot.pending_permission_titles.remove(request_id)
+        let title = slot.pending_permission_titles.remove(request_id)?;
+        let policy = slot.pending_permission_policies.remove(request_id)?;
+        Some((title, policy))
     }
 
     fn record_trace(&self, session_id: &str, event: &str, details: serde_json::Value) {
@@ -1968,8 +2050,9 @@ impl SessionManager {
         app: AppHandle,
         session_id: String,
         text: String,
+        images: Vec<PromptImageInput>,
     ) -> Result<(), String> {
-        let initial_summary = prompt_summary(&text);
+        let initial_summary = prompt_summary_with_images(&text, &images);
         let needs_connect = {
             let guard = self.inner.lock();
             let slot = guard
@@ -1978,6 +2061,36 @@ impl SessionManager {
                 .ok_or_else(|| "session not found".to_string())?;
             if slot.meta.archived {
                 return Err("restore the archived session before sending".to_string());
+            }
+            if !images.is_empty() && slot.meta.runtime_id != RuntimeId::CODEX {
+                return Err("图片输入目前仅支持 Codex 会话".into());
+            }
+            let attachment_root = if images.is_empty() {
+                None
+            } else {
+                Some(
+                    fs::canonicalize(
+                        session_store::session_dir_path(&session_id)
+                            .map_err(|err| err.to_string())?
+                            .join("attachments"),
+                    )
+                    .map_err(|err| err.to_string())?,
+                )
+            };
+            for image in &images {
+                if !image.path.is_file() {
+                    return Err(format!("image not found: {}", image.path.display()));
+                }
+                if let Some(root) = &attachment_root {
+                    let image_path =
+                        fs::canonicalize(&image.path).map_err(|err| err.to_string())?;
+                    if !image_path.starts_with(root) {
+                        return Err(format!(
+                            "image is outside session attachments: {}",
+                            image.path.display()
+                        ));
+                    }
+                }
             }
             slot.live.is_none()
         };
@@ -2004,10 +2117,14 @@ impl SessionManager {
             slot.mirror = StreamMirror::default();
         }
         let runtime_id = self.runtime_id_for_session(&session_id);
-        self.record_trace(&session_id, "prompt_submitted", prompt_trace_details(&text));
+        self.record_trace(
+            &session_id,
+            "prompt_submitted",
+            prompt_trace_details(&text, &images),
+        );
         self.append_message(
             &session_id,
-            &StoredChatMessage::new("user", text.clone(), runtime_id),
+            &StoredChatMessage::new("user", prompt_display_text(&text, &images), runtime_id),
         );
         self.emit_state(&app, &session_id);
 
@@ -2026,7 +2143,9 @@ impl SessionManager {
 
         let mgr = std::sync::Arc::clone(&self);
         tokio::spawn(async move {
-            let result = live.prompt(PromptInput { text }).await;
+            let result = live
+                .prompt(PromptInput { text, images })
+                .await;
             if let Err(error) = &result {
                 mgr.record_error(&session_id, error);
                 mgr.record_trace(&session_id, "prompt_failed", error_trace_details(error));
@@ -2207,6 +2326,18 @@ fn prompt_summary(text: &str) -> Option<String> {
     Some(compact.chars().take(120).collect())
 }
 
+fn prompt_summary_with_images(text: &str, images: &[PromptImageInput]) -> Option<String> {
+    let text = prompt_summary(text);
+    if text.is_some() {
+        return text;
+    }
+    if images.is_empty() {
+        None
+    } else {
+        Some(format!("{} image{}", images.len(), if images.len() == 1 { "" } else { "s" }))
+    }
+}
+
 fn process_exit_error(code: Option<i32>) -> AgentError {
     let message = match code {
         Some(code) => format!("Agent process exited unexpectedly with code {code}"),
@@ -2329,8 +2460,19 @@ mod tests {
             .to_string();
         let stream = first_delta_trace_details(StreamKind::Assistant, secret, 42).to_string();
         let tool = tool_trace_details("commandExecution", "pending", secret).to_string();
+        let policy = crate::host::tool_policy::ToolPolicyPipeline::evaluate(
+            &crate::host::permissions::PermissionRequest {
+                tool_name: "commandExecution".into(),
+                title: secret.into(),
+                preview: secret.into(),
+            },
+            PermissionMode::Ask,
+            false,
+        )
+        .decision;
         let permission =
-            permission_request_trace_details("commandExecution", secret, secret, false).to_string();
+            permission_request_trace_details("commandExecution", secret, secret, false, &policy)
+                .to_string();
 
         assert!(!prompt.contains(secret));
         assert!(prompt.contains("textChars"));
@@ -2409,6 +2551,7 @@ mod tests {
             permission_pause_started_at: None,
             pending_permission_count: 0,
             pending_permission_titles: HashMap::new(),
+            pending_permission_policies: HashMap::new(),
             persisted: false,
         };
 

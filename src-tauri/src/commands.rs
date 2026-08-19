@@ -14,7 +14,9 @@ use crate::host::permissions::PermissionDecision;
 use crate::native_sessions;
 use crate::paths;
 use crate::route_diagnostics::{self, CodexRouteStatus};
-use crate::runtime::{self, NativeSessionSource, RuntimeId, SessionSelectionCatalog};
+use crate::runtime::{
+    self, NativeSessionSource, PromptImageInput, RuntimeId, SessionSelectionCatalog,
+};
 use crate::session_manager::{SessionManager, SessionMeta, SessionSettingsPatch, SessionSnapshot};
 use crate::session_store::{self, StoredChatMessage};
 use crate::settings::{self, AppSettings, RuntimeOverride};
@@ -58,6 +60,25 @@ pub struct SessionTraceExportResult {
     pub path: String,
     pub event_count: usize,
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionImageAttachment {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub size_bytes: usize,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionImageAttachmentData {
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+}
+
+const MAX_IMAGE_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 
 /// Sync native window fill with UI theme so rounded corners don't show a dark halo.
 #[tauri::command]
@@ -802,6 +823,89 @@ pub async fn session_get_messages(
 }
 
 #[tauri::command]
+pub fn session_save_image_attachment(
+    mgr: tauri::State<'_, Arc<SessionManager>>,
+    session_id: String,
+    name: String,
+    mime_type: String,
+    bytes: Vec<u8>,
+) -> Result<SessionImageAttachment, String> {
+    let meta = mgr.session_meta(&session_id)?;
+    if meta.runtime_id != RuntimeId::CODEX {
+        return Err("图片粘贴目前仅支持 Codex 会话".into());
+    }
+    if bytes.is_empty() {
+        return Err("image is empty".into());
+    }
+    if bytes.len() > MAX_IMAGE_ATTACHMENT_BYTES {
+        return Err("图片不能超过 10MB".into());
+    }
+
+    let mime_type = mime_type.trim().to_ascii_lowercase();
+    let extension = image_extension(&mime_type)
+        .ok_or_else(|| format!("unsupported image type: {mime_type}"))?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let file_name = format!("{id}.{extension}");
+    let dir = session_store::session_dir_path(&session_id)
+        .map_err(|err| err.to_string())?
+        .join("attachments");
+    fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    let path = dir.join(file_name);
+    fs::write(&path, &bytes).map_err(|err| err.to_string())?;
+
+    Ok(SessionImageAttachment {
+        id,
+        name: clean_attachment_name(&name),
+        mime_type,
+        size_bytes: bytes.len(),
+        path: path.display().to_string(),
+    })
+}
+
+#[tauri::command]
+pub fn session_load_image_attachment(
+    mgr: tauri::State<'_, Arc<SessionManager>>,
+    session_id: String,
+    path: String,
+) -> Result<SessionImageAttachmentData, String> {
+    let meta = mgr.session_meta(&session_id)?;
+    if meta.runtime_id != RuntimeId::CODEX {
+        return Err("图片读取目前仅支持 Codex 会话".into());
+    }
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("image path is empty".into());
+    }
+
+    let attachment_root = fs::canonicalize(
+        session_store::session_dir_path(&session_id)
+            .map_err(|err| err.to_string())?
+            .join("attachments"),
+    )
+    .map_err(|err| err.to_string())?;
+    let image_path = fs::canonicalize(PathBuf::from(path)).map_err(|err| err.to_string())?;
+    if !image_path.starts_with(&attachment_root) {
+        return Err("image is outside session attachments".into());
+    }
+    if !image_path.is_file() {
+        return Err(format!("image not found: {}", image_path.display()));
+    }
+
+    let bytes = fs::read(&image_path).map_err(|err| err.to_string())?;
+    if bytes.is_empty() {
+        return Err("image is empty".into());
+    }
+    if bytes.len() > MAX_IMAGE_ATTACHMENT_BYTES {
+        return Err("图片不能超过 10MB".into());
+    }
+    let mime_type = image_mime_type_from_path(&image_path)
+        .ok_or_else(|| format!("unsupported image type: {}", image_path.display()))?
+        .to_string();
+
+    Ok(SessionImageAttachmentData { mime_type, bytes })
+}
+
+#[tauri::command]
 pub async fn session_export_markdown(
     mgr: tauri::State<'_, Arc<SessionManager>>,
     session_id: String,
@@ -1108,6 +1212,46 @@ fn single_line_markdown(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn image_extension(mime_type: &str) -> Option<&'static str> {
+    match mime_type {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/webp" => Some("webp"),
+        "image/gif" => Some("gif"),
+        _ => None,
+    }
+}
+
+fn image_mime_type_from_path(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg") | Some("jpeg") => Some("image/jpeg"),
+        Some("webp") => Some("image/webp"),
+        Some("gif") => Some("image/gif"),
+        _ => None,
+    }
+}
+
+fn clean_attachment_name(name: &str) -> String {
+    let cleaned = name
+        .split(['/', '\\'])
+        .next_back()
+        .unwrap_or(name)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if cleaned.is_empty() {
+        "pasted-image".into()
+    } else {
+        cleaned.chars().take(120).collect()
+    }
+}
+
 fn open_in_file_manager(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -1156,9 +1300,18 @@ pub async fn session_send(
     mgr: tauri::State<'_, Arc<SessionManager>>,
     session_id: String,
     text: String,
+    image_paths: Option<Vec<String>>,
 ) -> Result<(), String> {
     let mgr = mgr.inner().clone();
-    mgr.send(app, session_id, text).await
+    let images = image_paths
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| PromptImageInput {
+            path: PathBuf::from(path),
+        })
+        .collect();
+    mgr.send(app, session_id, text, images).await
 }
 
 #[tauri::command]

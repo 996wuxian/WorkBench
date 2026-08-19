@@ -1,8 +1,13 @@
 import { useState } from "react";
 
 import { formatSessionTime } from "../lib/format";
+import {
+  capabilityDescriptors,
+  INSPECTOR_CAPABILITIES,
+  protocolLabel,
+} from "../lib/capabilities";
 import { toolMessageLabel } from "../lib/messages";
-import { runtimeLabel } from "../lib/runtimes";
+import { runtimeInfo, runtimeLabel } from "../lib/runtimes";
 import { sessionDisplaySummary, sessionDisplayTitle, stateDotClass } from "../lib/sessions";
 import type {
   ChatMessage,
@@ -77,6 +82,13 @@ export function SessionInspector({
   const userCount = messages.filter((message) => message.role === "user").length;
   const sessionPath = active && appDataDir ? `${appDataDir}\\sessions\\${active.id}` : null;
   const summary = active ? sessionDisplaySummary(active) : null;
+  const activeRuntime = runtimeInfo(activeRuntimeId);
+  const runtimeCapabilities = activeRuntime
+    ? capabilityDescriptors(activeRuntime.capabilities, INSPECTOR_CAPABILITIES)
+    : [];
+  const unavailableRuntimeCapabilities = runtimeCapabilities.filter(
+    (capability) => !capability.enabled,
+  );
 
   return (
     <aside className={"aside inspector" + (hidden ? " aside--hidden" : "")} aria-hidden={hidden}>
@@ -216,6 +228,38 @@ export function SessionInspector({
                     <strong>{permissionLabel(activePermissionMode)}</strong>
                   </div>
                 </section>
+
+                {activeRuntime ? (
+                  <section className="inspector-section">
+                    <div className="inspector-section__head">
+                      <span>能力矩阵</span>
+                      <span>{protocolLabel(activeRuntime.capabilities.protocol)}</span>
+                    </div>
+                    <div className="inspector-capability-list">
+                      {runtimeCapabilities.map((capability) => (
+                        <span
+                          key={capability.key}
+                          className={
+                            "inspector-capability" +
+                            (capability.enabled ? " inspector-capability--on" : "")
+                          }
+                          title={
+                            capability.enabled
+                              ? capability.label
+                              : capability.unavailableReason
+                          }
+                        >
+                          {capability.label}
+                        </span>
+                      ))}
+                    </div>
+                    {unavailableRuntimeCapabilities.length > 0 ? (
+                      <div className="inspector-muted inspector-capability-note">
+                        {unavailableRuntimeCapabilities[0].unavailableReason}
+                      </div>
+                    ) : null}
+                  </section>
+                ) : null}
 
                 {snapshot.lastError ? (
                   <section className="inspector-section inspector-section--danger">

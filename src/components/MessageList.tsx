@@ -6,9 +6,15 @@
  * runtime ids). Everything with a side effect — copying, quoting, status text —
  * is a callback, so this file stays a view.
  */
-import { useState, type RefObject, type UIEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type RefObject,
+  type UIEvent,
+} from "react";
 
-import { MarkdownMessage } from "./Markdown";
+import { MarkdownMessage, renderInlineMarkdown } from "./Markdown";
 import {
   AssistantTiming,
   AssistantWorktreeChanges,
@@ -19,9 +25,13 @@ import {
   IconChat,
   IconChevronDown,
   IconChevronUp,
+  IconClose,
   IconCopy,
+  IconExpand,
   IconQuote,
 } from "./icons";
+import { api, isTauri } from "../lib/api";
+import { copyImageSourceToClipboard } from "../lib/clipboardImages";
 import { MessageNodeRail } from "./MessageNodeRail";
 import { copyTextToClipboard } from "../lib/format";
 import { useMessageNodeNavigation } from "../hooks/useMessageNodeNavigation";
@@ -63,7 +73,231 @@ export interface MessageListProps {
   onQuote: (target: QuoteTarget) => void;
 }
 
-const COLLAPSED_META_LINE_COUNT = 3;
+type MessageImageRef = {
+  id: string;
+  path: string;
+  src: string;
+  name: string;
+};
+
+function parseMessageImages(content: string): {
+  text: string;
+  images: MessageImageRef[];
+} {
+  const images: MessageImageRef[] = [];
+  const textLines: string[] = [];
+
+  for (const [index, line] of content.split(/\r?\n/).entries()) {
+    const match = line.match(/^\[image\]\s+(.+?)\s*$/);
+    if (!match) {
+      textLines.push(line);
+      continue;
+    }
+    const path = match[1].trim();
+    if (!path) continue;
+    const normalized = path.replaceAll("/", "\\");
+    const slashIndex = normalized.lastIndexOf("\\");
+    images.push({
+      id: `${index}:${path}`,
+      path,
+      src: path,
+      name: slashIndex >= 0 ? normalized.slice(slashIndex + 1) : normalized,
+    });
+  }
+
+  return {
+    text: textLines.join("\n").trim(),
+    images,
+  };
+}
+
+function MessageImageViewer({
+  image,
+  onClose,
+}: {
+  image: MessageImageRef;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [onClose]);
+
+  return (
+    <div
+      className="composer-image-viewer"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        className="composer-image-viewer__dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`查看图片 ${image.name}`}
+      >
+        <div className="composer-image-viewer__head">
+          <div className="composer-image-viewer__title" title={image.path}>
+            {image.name}
+          </div>
+          <button
+            type="button"
+            className="btn btn--ghost btn--icon composer-image-viewer__close"
+            title="关闭图片预览"
+            aria-label="关闭图片预览"
+            autoFocus
+            onClick={onClose}
+          >
+            <IconClose size={16} />
+          </button>
+        </div>
+        <div className="composer-image-viewer__body">
+          <img
+            className="composer-image-viewer__image"
+            src={image.src}
+            alt={image.name}
+            title="右键复制图片"
+            draggable={false}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              void copyImageSourceToClipboard(image.src).then(
+                () => emitToast("已复制图片"),
+                (error) =>
+                  emitToast({
+                    message: `复制图片失败: ${String(error)}`,
+                    tone: "danger",
+                  }),
+              );
+            }}
+          />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function MessageContentWithImages({
+  sessionId,
+  content,
+  skills,
+}: {
+  sessionId: string;
+  content: string;
+  skills: SkillInfo[];
+}) {
+  const [previewImage, setPreviewImage] = useState<MessageImageRef | null>(null);
+  const { text, images } = useMemo(() => parseMessageImages(content), [content]);
+  const imagePathsKey = useMemo(
+    () => images.map((image) => image.path).join("\n"),
+    [images],
+  );
+  const [imageSources, setImageSources] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (images.length === 0) {
+      setImageSources({});
+      return;
+    }
+
+    let cancelled = false;
+    const objectUrls: string[] = [];
+    setImageSources({});
+
+    void Promise.all(
+      images.map(async (image) => {
+        if (!isTauri()) return [image.path, image.path] as const;
+        const data = await api.loadImageAttachment(sessionId, image.path);
+        if (cancelled) return null;
+        const blob = new Blob([new Uint8Array(data.bytes)], {
+          type: data.mimeType,
+        });
+        const url = URL.createObjectURL(blob);
+        objectUrls.push(url);
+        return [image.path, url] as const;
+      }),
+    )
+      .then((entries) => {
+        if (cancelled) return;
+        setImageSources(
+          Object.fromEntries(entries.filter((entry): entry is [string, string] =>
+            Boolean(entry),
+          )),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setImageSources({});
+      });
+
+    return () => {
+      cancelled = true;
+      for (const url of objectUrls) {
+        URL.revokeObjectURL(url);
+      }
+    };
+  }, [images, imagePathsKey, sessionId]);
+
+  if (images.length === 0) {
+    return (
+      <MarkdownMessage
+        content={content}
+        skills={skills}
+        formatLongParagraphs={false}
+      />
+    );
+  }
+
+  return (
+    <>
+      <div className="message-attachments-inline">
+        <span className="message-attachments-inline__images" aria-label="消息图片">
+          {images.map((image) => (
+            <button
+              key={image.id}
+              type="button"
+              className={
+                "message-attachment-thumb" +
+                (imageSources[image.path] ? "" : " is-loading")
+              }
+              title={`查看图片 ${image.name}`}
+              aria-label={`查看图片 ${image.name}`}
+              disabled={!imageSources[image.path]}
+              onClick={() =>
+                setPreviewImage({ ...image, src: imageSources[image.path] })
+              }
+            >
+              {imageSources[image.path] ? (
+                <img src={imageSources[image.path]} alt="" draggable={false} />
+              ) : (
+                <span className="message-attachment-thumb__placeholder">
+                  图片
+                </span>
+              )}
+              <span className="message-attachment-thumb__zoom" aria-hidden>
+                <IconExpand size={16} />
+              </span>
+            </button>
+          ))}
+        </span>
+        {text ? (
+          <span className="message-attachments-inline__text">
+            {renderInlineMarkdown(text, skills)}
+          </span>
+        ) : null}
+      </div>
+      {previewImage ? (
+        <MessageImageViewer
+          image={previewImage}
+          onClose={() => setPreviewImage(null)}
+        />
+      ) : null}
+    </>
+  );
+}
 
 function MessageMetaStack({
   lines,
@@ -73,35 +307,88 @@ function MessageMetaStack({
   const [expanded, setExpanded] = useState(false);
   if (lines.length === 0) return null;
 
-  const hiddenCount = Math.max(0, lines.length - COLLAPSED_META_LINE_COUNT);
-  const visibleLines =
-    expanded || hiddenCount === 0
-      ? lines
-      : lines.slice(lines.length - COLLAPSED_META_LINE_COUNT);
+  return (
+    <div className="message__meta-stack message__meta-stack--collapsed">
+      <button
+        type="button"
+        className="message__meta-toggle"
+        aria-expanded={expanded}
+        title={expanded ? "收起工具过程" : "展开工具过程"}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <span className="message__meta-toggle-head">
+          {expanded ? <IconChevronUp size={13} /> : <IconChevronDown size={13} />}
+          <span>工具过程</span>
+        </span>
+        <span className="message__meta-toggle-state">
+          {expanded ? "收起" : `${lines.length} 条 · 查看`}
+        </span>
+      </button>
+      {expanded ? (
+        <div className="message__meta-lines">
+          {lines.map((line) => (
+            <div key={line.id} className="message__meta-line" title={line.label}>
+              <span className="message__meta-icon" aria-hidden="true">
+                ⚙
+              </span>
+              <span className="message__meta-text">{line.label}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ThoughtBubbleContent({
+  message,
+  skills,
+  revealImmediately,
+  onTypingProgress,
+}: {
+  message: ChatMessage;
+  skills: SkillInfo[];
+  revealImmediately?: boolean;
+  onTypingProgress: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const content = stripWorktreeChangeMarkers(message.content || "").trim();
+  const hasContent = content.length > 0;
 
   return (
-    <div className="message__meta-stack">
-      {hiddenCount > 0 ? (
-        <button
-          type="button"
-          className="message__meta-toggle"
-          aria-expanded={expanded}
-          onClick={() => setExpanded((current) => !current)}
-        >
-          {expanded ? <IconChevronUp size={13} /> : <IconChevronDown size={13} />}
-          <span>{expanded ? "收起过程" : `展开 ${hiddenCount} 条较早记录`}</span>
-        </button>
+    <div className="message__thought">
+      <button
+        type="button"
+        className="message__thought-toggle"
+        aria-expanded={expanded}
+        title={expanded ? "收起思考内容" : "展开思考内容"}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <span className="message__thought-toggle-head">
+          <span className="message__thought-title">{message.streaming ? "思考中" : "思考内容"}</span>
+          {message.streaming ? <ThinkingIndicator /> : null}
+        </span>
+        <span className="message__thought-toggle-state">
+          {expanded ? "收起" : hasContent ? "查看" : "已隐藏"}
+        </span>
+      </button>
+      {expanded && hasContent ? (
+        <div className="message__thought-body">
+          {message.streaming ? (
+            <StreamingText
+              content={content}
+              revealImmediately={revealImmediately}
+              onProgress={onTypingProgress}
+            />
+          ) : (
+            <MarkdownMessage
+              content={content}
+              skills={skills}
+              formatLongParagraphs
+            />
+          )}
+        </div>
       ) : null}
-      <div className="message__meta-lines">
-        {visibleLines.map((line) => (
-          <div key={line.id} className="message__meta-line">
-            <span className="message__meta-icon" aria-hidden="true">
-              ⚙
-            </span>
-            <span className="message__meta-text">{line.label}</span>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
@@ -142,27 +429,39 @@ function AssistantBubbleContent({
     );
   }
 
+  const parts = splitWorktreeChangeMarkers(message.content || "");
+  let lastTextPartIndex = -1;
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    const part = parts[index];
+    if (part.kind === "text" && part.text) {
+      lastTextPartIndex = index;
+      break;
+    }
+  }
+
   return (
     <>
-      {splitWorktreeChangeMarkers(message.content || "").map((part, index) => {
+      {parts.map((part, index) => {
         if (part.kind === "marker") {
           const files = blocks.get(part.id);
           return files?.length ? (
             <AssistantWorktreeChanges key={`${part.id}:${index}`} files={files} />
           ) : null;
         }
-        if (!part.text) return null;
+        const text = normalizeTextAroundWorktreeMarker(parts, index, part.text);
+        if (!text) return null;
         return (
           <div key={`text:${index}`} className="message__content-segment">
             {typing ? (
               <StreamingText
-                content={part.text}
+                content={text}
                 revealImmediately={revealImmediately}
+                showCursor={index === lastTextPartIndex}
                 onProgress={onTypingProgress}
               />
             ) : (
               <MarkdownMessage
-                content={part.text}
+                content={text}
                 skills={skills}
                 formatLongParagraphs
               />
@@ -172,6 +471,21 @@ function AssistantBubbleContent({
       })}
     </>
   );
+}
+
+function normalizeTextAroundWorktreeMarker(
+  parts: ReturnType<typeof splitWorktreeChangeMarkers>,
+  index: number,
+  text: string,
+) {
+  let normalized = text;
+  if (parts[index - 1]?.kind === "marker") {
+    normalized = normalized.replace(/^(?:[ \t]*\n)+/, "");
+  }
+  if (parts[index + 1]?.kind === "marker") {
+    normalized = normalized.replace(/(?:\n[ \t]*)+$/, "");
+  }
+  return normalized;
 }
 
 export function MessageList({
@@ -337,11 +651,18 @@ export function MessageList({
                     revealImmediately={m.revealImmediately}
                     onTypingProgress={onTypingProgress}
                   />
+                ) : isThought ? (
+                  <ThoughtBubbleContent
+                    message={m}
+                    skills={[]}
+                    revealImmediately={m.revealImmediately}
+                    onTypingProgress={onTypingProgress}
+                  />
                 ) : (
-                  <MarkdownMessage
+                  <MessageContentWithImages
+                    sessionId={sessionKey}
                     content={m.content || ""}
                     skills={m.role === "user" ? skills : []}
-                    formatLongParagraphs={false}
                   />
                 )}
                 {m.partial && !m.streaming && !m.pending ? (

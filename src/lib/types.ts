@@ -250,6 +250,44 @@ export interface ChatMessage {
   worktreeChangeBlocks?: WorktreeChangeBlock[];
 }
 
+export interface SessionImageAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  path: string;
+}
+
+export interface SessionImageAttachmentData {
+  mimeType: string;
+  bytes: number[];
+}
+
+export type ToolIntentKind =
+  | "read_file"
+  | "write_file"
+  | "edit_file"
+  | "shell"
+  | "network"
+  | "unknown";
+
+export type ToolRiskLevel = "low" | "medium" | "high" | "critical";
+
+export type ToolPolicyAction = "allow" | "ask" | "deny";
+
+export interface ToolIntent {
+  kind: ToolIntentKind;
+  toolName: string;
+}
+
+export interface ToolPolicyDecision {
+  intent: ToolIntent;
+  risk: ToolRiskLevel;
+  scopeKey: string;
+  action: ToolPolicyAction;
+  reason: string;
+}
+
 /** A pending tool approval waiting on the user. */
 export interface PermissionRequestEvent {
   sessionId: string;
@@ -259,6 +297,8 @@ export interface PermissionRequestEvent {
   preview: string;
   /** True when the session mode already answered it — display only. */
   autoAllowed: boolean;
+  /** Host-normalized intent/risk/action for this tool request. */
+  policy?: ToolPolicyDecision;
 }
 
 export type PermissionDecision =
@@ -271,7 +311,6 @@ export type PermissionDecisionSource =
   | "user"
   | "mode"
   | "remembered"
-  | "timeout"
   | "aborted";
 
 export interface PermissionResolvedEvent {

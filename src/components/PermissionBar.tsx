@@ -6,6 +6,7 @@
  * decide. `aria-live="assertive"` covers the announcement the modal would give.
  */
 import type { PermissionDecision, PermissionRequestEvent } from "../lib/types";
+import { TOOL_INTENT_LABEL, TOOL_RISK_LABEL } from "../lib/permissions";
 
 export interface PermissionBarProps {
   request: PermissionRequestEvent;
@@ -23,6 +24,11 @@ export function PermissionBar({
 }: PermissionBarProps) {
   const title = request.title || request.toolName || "工具调用";
   const preview = request.preview.trim();
+  const policy = request.policy;
+  const intentLabel = policy
+    ? (TOOL_INTENT_LABEL[policy.intent.kind] ?? policy.intent.kind)
+    : null;
+  const riskLabel = policy ? (TOOL_RISK_LABEL[policy.risk] ?? policy.risk) : null;
 
   return (
     <div
@@ -42,6 +48,13 @@ export function PermissionBar({
             </span>
           ) : null}
         </div>
+        {policy ? (
+          <div className="permission-bar__meta">
+            <span>{intentLabel}</span>
+            <span>{riskLabel}</span>
+            <span>{policy.scopeKey}</span>
+          </div>
+        ) : null}
         {preview ? (
           <code className="permission-bar__preview">{preview}</code>
         ) : null}

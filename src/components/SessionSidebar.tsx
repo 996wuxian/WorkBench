@@ -95,7 +95,12 @@ type Props = {
     sessionId: string,
     options: { shiftKey: boolean; visibleSessionIds: string[] },
   ) => void;
-  onSessionContextMenu: (sessionId: string, left: number, top: number) => void;
+  onSessionContextMenu: (
+    sessionId: string,
+    left: number,
+    top: number,
+    targetIds: string[],
+  ) => void;
   onProjectContextMenu: (project: ProjectContextTarget, left: number, top: number) => void;
   onProjectReorder: (
     sourceKey: string,
@@ -214,9 +219,13 @@ export function SessionSidebar({
     () => projectGroups.map((group) => group.key),
     [projectGroups],
   );
-  const filteredSessionIds = useMemo(
-    () => filteredSessions.map((session) => session.id),
-    [filteredSessions],
+  const visibleSessionIds = useMemo(
+    () =>
+      projectGroups.flatMap((group) => {
+        const collapsed = !sessionFilter.trim() && collapsedProjects.has(group.key);
+        return collapsed ? [] : group.sessions.map((session) => session.id);
+      }),
+    [collapsedProjects, projectGroups, sessionFilter],
   );
   const selectedSessionIdSet = useMemo(
     () => new Set(selectedSessionIds),
@@ -251,12 +260,16 @@ export function SessionSidebar({
   useEffect(() => {
     if (!activeProjectKey) return;
     setCollapsedProjects((current) => {
-      if (!current.has(activeProjectKey)) return current;
-      const next = new Set(current);
-      next.delete(activeProjectKey);
+      const next = new Set(projectKeys.filter((key) => key !== activeProjectKey));
+      if (
+        next.size === current.size &&
+        [...next].every((key) => current.has(key))
+      ) {
+        return current;
+      }
       return next;
     });
-  }, [activeProjectKey]);
+  }, [activeProjectKey, projectKeys]);
 
   const handleScroll = () => {
     const el = sessionScrollRef.current;
@@ -354,10 +367,10 @@ export function SessionSidebar({
       return;
     }
     setCollapsedProjects((current) => {
-      const next = new Set(current);
-      if (next.has(groupKey)) next.delete(groupKey);
-      else next.add(groupKey);
-      return next;
+      if (!current.has(groupKey)) {
+        return new Set(projectKeys);
+      }
+      return new Set(projectKeys.filter((key) => key !== groupKey));
     });
   };
 
@@ -380,16 +393,20 @@ export function SessionSidebar({
         onContextMenu={(ev) => {
           ev.preventDefault();
           ev.stopPropagation();
+          const targetIds = selectedSessionIdSet.has(session.id)
+            ? visibleSessionIds.filter((id) => selectedSessionIdSet.has(id))
+            : [session.id];
           onSessionContextMenu(
             session.id,
             Math.max(8, Math.min(ev.clientX, window.innerWidth - 252)),
             Math.max(8, Math.min(ev.clientY, window.innerHeight - 440)),
+            targetIds,
           );
         }}
         onClick={(ev) =>
           onSelectSession(session.id, {
             shiftKey: ev.shiftKey,
-            visibleSessionIds: filteredSessionIds,
+            visibleSessionIds,
           })
         }
       >
@@ -431,23 +448,11 @@ export function SessionSidebar({
   return (
     <aside className={"sidebar" + (hidden ? " sidebar--hidden" : "")} aria-hidden={hidden}>
       <div
-        className="sidebar-chrome"
+        className="sidebar-brand-row"
         data-tauri-drag-region
         onDoubleClick={onToggleMaximize}
       >
-        <button
-          type="button"
-          className="chrome-btn chrome-btn--traffic is-on"
-          title="隐藏侧栏"
-          onClick={onHideSidebar}
-        >
-          <IconPanel size={16} />
-        </button>
-        <div className="sidebar-chrome__drag" data-tauri-drag-region />
-      </div>
-
-      <div className="sidebar-brand-row">
-        <div className="sidebar-brand-row__left">
+        <div className="sidebar-brand-row__left" data-tauri-drag-region>
           <img
             className="app-logo"
             src="/logo.png"
@@ -456,8 +461,17 @@ export function SessionSidebar({
             height={28}
             draggable={false}
           />
-          <span>Workbench</span>
+          <span data-tauri-drag-region>Workbench</span>
         </div>
+        <button
+          type="button"
+          className="chrome-btn chrome-btn--traffic is-on"
+          title="隐藏侧栏"
+          aria-label="隐藏侧栏"
+          onClick={onHideSidebar}
+        >
+          <IconPanel size={16} />
+        </button>
       </div>
 
       <div className="sidebar-nav">
@@ -553,21 +567,19 @@ export function SessionSidebar({
                   sessionFilter.trim()
                     ? "搜索时项目组保持展开"
                     : allProjectGroupsCollapsed
-                      ? "展开全部项目"
-                      : "折叠全部项目"
+                      ? "展开第一个项目"
+                      : "折叠当前项目"
                 }
                 aria-label={
-                  allProjectGroupsCollapsed ? "展开全部项目" : "折叠全部项目"
+                  allProjectGroupsCollapsed ? "展开第一个项目" : "折叠当前项目"
                 }
                 disabled={projectGroups.length === 0 || Boolean(sessionFilter.trim())}
                 onClick={() =>
                   setCollapsedProjects((current) => {
-                    const next = new Set(current);
-                    for (const group of projectGroups) {
-                      if (allProjectGroupsCollapsed) next.delete(group.key);
-                      else next.add(group.key);
-                    }
-                    return next;
+                    if (!allProjectGroupsCollapsed) return new Set(projectKeys);
+                    const firstProjectKey = projectGroups[0]?.key;
+                    if (!firstProjectKey) return current;
+                    return new Set(projectKeys.filter((key) => key !== firstProjectKey));
                   })
                 }
               >

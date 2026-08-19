@@ -17,6 +17,8 @@ import type {
   RuntimeInfo,
   SessionMeta,
   SessionSnapshot,
+  SessionImageAttachment,
+  SessionImageAttachmentData,
   SkillsListResult,
   WorktreeChangeSnapshot,
 } from "./types";
@@ -115,8 +117,25 @@ export const api = {
     }),
   connect: (sessionId: string) =>
     call<SessionSnapshot>("session_connect", { sessionId }),
-  send: (sessionId: string, text: string) =>
-    call<void>("session_send", { sessionId, text }),
+  saveImageAttachment: (
+    sessionId: string,
+    name: string,
+    mimeType: string,
+    bytes: number[],
+  ) =>
+    call<SessionImageAttachment>("session_save_image_attachment", {
+      sessionId,
+      name,
+      mimeType,
+      bytes,
+    }),
+  loadImageAttachment: (sessionId: string, path: string) =>
+    call<SessionImageAttachmentData>("session_load_image_attachment", {
+      sessionId,
+      path,
+    }),
+  send: (sessionId: string, text: string, imagePaths: string[] = []) =>
+    call<void>("session_send", { sessionId, text, imagePaths }),
   stop: (sessionId: string) => call<void>("session_stop", { sessionId }),
   disconnect: (sessionId: string) =>
     call<void>("session_disconnect", { sessionId }),

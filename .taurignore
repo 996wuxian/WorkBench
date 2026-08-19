@@ -1,0 +1,9 @@
+# Keep Tauri's Rust-side dev watcher from restarting the desktop shell for files
+# that Vite can handle through HMR, or for non-runtime project metadata.
+/src/**
+/public/**
+/docs/**
+/dist/**
+/node_modules/**
+/vite-dev*.log
+/*.md

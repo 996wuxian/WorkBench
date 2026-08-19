@@ -109,6 +109,12 @@ pub struct ConnectOpts {
 #[derive(Debug, Clone)]
 pub struct PromptInput {
     pub text: String,
+    pub images: Vec<PromptImageInput>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PromptImageInput {
+    pub path: PathBuf,
 }
 
 /// Descriptor-level runtime (probe + capabilities). Live sessions are separate.

@@ -6,6 +6,8 @@ import type {
   PermissionRequestEvent,
   RuntimeId,
   SessionSelectionCatalog,
+  ToolIntentKind,
+  ToolRiskLevel,
 } from "./types";
 
 export type PermissionQueue = Record<string, PermissionRequestEvent[]>;
@@ -49,8 +51,23 @@ export const PERMISSION_SOURCE_LABEL: Record<string, string> = {
   user: "你",
   mode: "会话权限模式",
   remembered: "本会话已记住的授权",
-  timeout: "超时策略",
   aborted: "进程退出",
+};
+
+export const TOOL_INTENT_LABEL: Record<ToolIntentKind, string> = {
+  read_file: "读取文件",
+  write_file: "写入文件",
+  edit_file: "编辑文件",
+  shell: "执行命令",
+  network: "网络访问",
+  unknown: "未知工具",
+};
+
+export const TOOL_RISK_LABEL: Record<ToolRiskLevel, string> = {
+  low: "低风险",
+  medium: "中风险",
+  high: "高风险",
+  critical: "关键风险",
 };
 
 export function enqueuePermissionRequest(

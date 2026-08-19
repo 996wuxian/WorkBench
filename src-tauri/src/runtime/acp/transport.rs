@@ -313,19 +313,28 @@ impl AcpClient {
             self.pending.lock().remove(&id);
             return Err(format!("write {method} failed: {e}"));
         }
-        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await {
-            Ok(Ok(Ok(v))) => {
-                info!("acp ← {method} id={id} ok");
-                Ok(v)
-            }
-            Ok(Ok(Err(e))) => {
-                warn!("acp ← {method} id={id} error: {e}");
-                Err(e)
-            }
-            Ok(Err(_)) => Err(format!("rpc channel closed waiting for {method}")),
-            Err(_) => {
-                self.pending.lock().remove(&id);
-                Err(format!("rpc timeout on {method} after {timeout_secs}s"))
+        let mut rx = rx;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), &mut rx).await
+            {
+                Ok(Ok(Ok(v))) => {
+                    info!("acp ← {method} id={id} ok");
+                    return Ok(v);
+                }
+                Ok(Ok(Err(e))) => {
+                    warn!("acp ← {method} id={id} error: {e}");
+                    return Err(e);
+                }
+                Ok(Err(_)) => return Err(format!("rpc channel closed waiting for {method}")),
+                Err(_) if self.permissions.has_pending() => {
+                    info!(
+                        "acp rpc {method} id={id} reached {timeout_secs}s while permission is pending; continuing to wait"
+                    );
+                }
+                Err(_) => {
+                    self.pending.lock().remove(&id);
+                    return Err(format!("rpc timeout on {method} after {timeout_secs}s"));
+                }
             }
         }
     }

@@ -24,6 +24,6 @@ pub use registry::{
 };
 pub use traits::PermissionMode;
 pub use traits::{
-    AgentRuntime, ConnectOpts, LiveSession, ProbeResult, PromptInput, SessionSettings,
-    SessionSettingsPatch,
+    AgentRuntime, ConnectOpts, LiveSession, ProbeResult, PromptImageInput, PromptInput,
+    SessionSettings, SessionSettingsPatch,
 };

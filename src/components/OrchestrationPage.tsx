@@ -13,7 +13,9 @@ import {
   IconTrash,
 } from "./icons";
 import {
+  canRunFixedWorkflow,
   createOrchestrationNode,
+  deriveTaskStatus,
   formatOrchestrationUpdatedAt,
   type OrchestrationEdge,
   type OrchestrationNode,
@@ -51,6 +53,9 @@ function nodeModeLabel(mode: OrchestrationNodeMode): string {
 }
 
 function nodeStatusLabel(status: OrchestrationNodeStatus): string {
+  if (status === "running") return "运行中";
+  if (status === "done") return "完成";
+  if (status === "failed") return "失败";
   if (status === "ready") return "就绪";
   if (status === "blocked") return "等待上游";
   return "草稿";
@@ -85,10 +90,16 @@ export function OrchestrationPage({
   task,
   onBackToChat,
   onTaskChange,
+  onRunWorkflow,
+  onOpenSession,
+  runningWorkflowId,
 }: {
   task: OrchestrationTask;
   onBackToChat: () => void;
   onTaskChange: (task: OrchestrationTask) => void;
+  onRunWorkflow: (task: OrchestrationTask) => void;
+  onOpenSession: (sessionId: string) => void;
+  runningWorkflowId: string | null;
 }) {
   const [nodes, setNodes] = useState<OrchestrationNode[]>(() => cloneNodes(task.nodes));
   const [edges, setEdges] = useState<OrchestrationEdge[]>(() => cloneEdges(task.edges));
@@ -133,6 +144,8 @@ export function OrchestrationPage({
     () => edges.find((edge) => edgeKey(edge) === selectedEdgeKey) ?? null,
     [edges, selectedEdgeKey],
   );
+  const runnable = canRunFixedWorkflow(task);
+  const hasRunningWorkflow = runningWorkflowId !== null;
   const canvasSize = useMemo(
     () => ({
       width:
@@ -150,7 +163,7 @@ export function OrchestrationPage({
       ...task,
       nodes: nextNodes,
       edges: nextEdges,
-      status: nextNodes.some((node) => node.status === "ready") ? "ready" : "draft",
+      status: deriveTaskStatus(nextNodes),
       updatedAt: formatOrchestrationUpdatedAt(),
     });
   };
@@ -483,8 +496,14 @@ export function OrchestrationPage({
             <IconPlus size={15} />
             新建节点
           </button>
-          <button type="button" className="btn btn--primary" disabled>
-            执行链路待接入
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={!runnable || hasRunningWorkflow}
+            title={runnable ? "运行固定链路" : "需要 implement/review/fix 三个固定节点"}
+            onClick={() => onRunWorkflow(task)}
+          >
+            {hasRunningWorkflow ? "链路运行中" : "运行链路"}
             <IconChevronRight size={15} />
           </button>
         </div>
@@ -644,6 +663,11 @@ export function OrchestrationPage({
                   <IconChevronRight size={13} />
                   {nodeStatusLabel(node.status)}
                 </span>
+                {node.sessionId ? (
+                  <span className="orchestration-node__session">
+                    session {node.sessionId.slice(0, 8)}
+                  </span>
+                ) : null}
               </button>
             ))}
           </div>
@@ -748,7 +772,30 @@ export function OrchestrationPage({
                   <dt>状态</dt>
                   <dd>{nodeStatusLabel(selected.status)}</dd>
                 </div>
+                <div>
+                  <dt>会话</dt>
+                  <dd>{selected.sessionId ? selected.sessionId.slice(0, 8) : "未运行"}</dd>
+                </div>
+                <div>
+                  <dt>最近执行</dt>
+                  <dd>{selected.lastRunAt ?? "无"}</dd>
+                </div>
               </dl>
+              {selected.lastError ? (
+                <section className="orchestration-inspector__section orchestration-inspector__section--danger">
+                  <h4>失败原因</h4>
+                  <p>{selected.lastError}</p>
+                </section>
+              ) : null}
+              {selected.sessionId ? (
+                <button
+                  type="button"
+                  className="btn btn--ghost orchestration-inspector__session"
+                  onClick={() => onOpenSession(selected.sessionId as string)}
+                >
+                  打开会话
+                </button>
+              ) : null}
               <section className="orchestration-inspector__section">
                 <h4>输入</h4>
                 <p>{selected.prompt}</p>
@@ -756,7 +803,7 @@ export function OrchestrationPage({
               <section className="orchestration-inspector__section">
                 <h4>执行边界</h4>
                 <p>
-                  第一版只展示链路结构；真实 CLI 调用、权限审批、循环停止条件和文件改动归属会在后续阶段接入。
+                  最小闭环会为每个节点创建普通 Workbench 会话，并通过现有会话发送 API 串行执行；权限审批仍走 Host 统一管线。
                 </p>
               </section>
               <section className="orchestration-inspector__section">

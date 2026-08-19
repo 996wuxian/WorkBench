@@ -24,7 +24,8 @@ use crate::runtime::catalog::{ChoiceOption, SessionSelectionCatalog};
 use crate::runtime::id::RuntimeId;
 use crate::runtime::manifest::RuntimeManifest;
 use crate::runtime::traits::{
-    AgentRuntime, ConnectOpts, LiveSession, PermissionMode, ProbeResult, PromptInput,
+    AgentRuntime, ConnectOpts, LiveSession, PermissionMode, ProbeResult, PromptImageInput,
+    PromptInput,
     SessionSettings, SessionSettingsPatch,
 };
 
@@ -287,7 +288,7 @@ impl LiveSession for CodexLiveSession {
         let mut last_error: Option<AgentError> = None;
         for attempt in 1..=PROMPT_MAX_ATTEMPTS {
             let client = { self.client.lock().await.clone() };
-            match client.prompt_once(&input.text).await {
+            match client.prompt_once(&input.text, &input.images).await {
                 Ok(()) => return Ok(()),
                 Err(err) => {
                     let retryable = is_retryable_prompt_error(&err.message);
@@ -664,19 +665,28 @@ impl CodexAppServerClient {
             self.pending.lock().remove(&id);
             return Err(format!("write {method} failed: {e}"));
         }
-        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx).await {
-            Ok(Ok(Ok(v))) => {
-                tracing::info!("codex ← {method} id={id} ok");
-                Ok(v)
-            }
-            Ok(Ok(Err(e))) => {
-                tracing::warn!("codex ← {method} id={id} error: {e}");
-                Err(e)
-            }
-            Ok(Err(_)) => Err(format!("rpc channel closed waiting for {method}")),
-            Err(_) => {
-                self.pending.lock().remove(&id);
-                Err(format!("rpc timeout on {method} after {timeout_secs}s"))
+        let mut rx = rx;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), &mut rx).await
+            {
+                Ok(Ok(Ok(v))) => {
+                    tracing::info!("codex ← {method} id={id} ok");
+                    return Ok(v);
+                }
+                Ok(Ok(Err(e))) => {
+                    tracing::warn!("codex ← {method} id={id} error: {e}");
+                    return Err(e);
+                }
+                Ok(Err(_)) => return Err(format!("rpc channel closed waiting for {method}")),
+                Err(_) if self.permissions.has_pending() => {
+                    tracing::info!(
+                        "codex rpc {method} id={id} reached {timeout_secs}s while permission is pending; continuing to wait"
+                    );
+                }
+                Err(_) => {
+                    self.pending.lock().remove(&id);
+                    return Err(format!("rpc timeout on {method} after {timeout_secs}s"));
+                }
             }
         }
     }
@@ -910,7 +920,11 @@ impl CodexAppServerClient {
         classify_codex_error(&detail)
     }
 
-    async fn prompt_once(&self, text: &str) -> Result<(), AgentError> {
+    async fn prompt_once(
+        &self,
+        text: &str,
+        images: &[PromptImageInput],
+    ) -> Result<(), AgentError> {
         let thread_id = self
             .thread_id
             .lock()
@@ -920,11 +934,18 @@ impl CodexAppServerClient {
         self.stopped.store(false, Ordering::SeqCst);
         self.emitted_agent_message_items.lock().clear();
         self.file_change_deltas.lock().clear();
+        let mut input = Vec::with_capacity(1 + images.len());
+        input.push(json!({ "type": "text", "text": text, "text_elements": [] }));
+        input.extend(images.iter().map(|image| {
+            json!({
+                "type": "localImage",
+                "path": image.path.to_string_lossy().to_string(),
+            })
+        }));
+
         let mut params = json!({
             "threadId": thread_id,
-            "input": [
-                { "type": "text", "text": text, "text_elements": [] }
-            ],
+            "input": input,
             "cwd": self.cwd.to_string_lossy().to_string(),
             "runtimeWorkspaceRoots": [self.cwd.to_string_lossy().to_string()],
             "approvalPolicy": self.permission_mode.codex_approval_policy(),
@@ -966,24 +987,35 @@ impl CodexAppServerClient {
         } else {
             let (tx, rx) = oneshot::channel();
             self.turn_waiters.lock().insert(turn_id.clone(), tx);
-            match tokio::time::timeout(std::time::Duration::from_secs(PROMPT_TIMEOUT_SECS), rx)
+            let mut rx = rx;
+            loop {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(PROMPT_TIMEOUT_SECS),
+                    &mut rx,
+                )
                 .await
-            {
-                Ok(Ok(done)) => done,
-                Ok(Err(_)) => Err("turn waiter closed".to_string()),
-                Err(_) => {
-                    self.stopped.store(true, Ordering::SeqCst);
-                    let _ = self
-                        .request_timeout(
-                            "turn/interrupt",
-                            json!({ "threadId": thread_id, "turnId": turn_id }),
-                            INTERRUPT_TIMEOUT_SECS,
-                        )
-                        .await;
-                    self.turn_waiters.lock().remove(&turn_id);
-                    Err(format!(
-                        "turn timeout after {PROMPT_TIMEOUT_SECS}s (turnId={turn_id})"
-                    ))
+                {
+                    Ok(Ok(done)) => break done,
+                    Ok(Err(_)) => break Err("turn waiter closed".to_string()),
+                    Err(_) if self.permissions.has_pending() => {
+                        tracing::info!(
+                            "codex turn {turn_id} reached {PROMPT_TIMEOUT_SECS}s while permission is pending; continuing to wait"
+                        );
+                    }
+                    Err(_) => {
+                        self.stopped.store(true, Ordering::SeqCst);
+                        let _ = self
+                            .request_timeout(
+                                "turn/interrupt",
+                                json!({ "threadId": thread_id, "turnId": turn_id }),
+                                INTERRUPT_TIMEOUT_SECS,
+                            )
+                            .await;
+                        self.turn_waiters.lock().remove(&turn_id);
+                        break Err(format!(
+                            "turn timeout after {PROMPT_TIMEOUT_SECS}s (turnId={turn_id})"
+                        ));
+                    }
                 }
             }
         };

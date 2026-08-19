@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   WindowControls,
   toggleMaximizeFromTitlebar,
@@ -20,6 +21,7 @@ import {
 } from "./components/OrchestrationPage";
 import { OrchestrationSidebar } from "./components/OrchestrationSidebar";
 import { ComposerPanel } from "./components/ComposerPanel";
+import type { ComposerImageAttachment } from "./components/ComposerPanel";
 import { SessionInspector } from "./components/SessionInspector";
 import { AppOverlays } from "./components/AppOverlays";
 import { ToastViewport } from "./components/Toast";
@@ -67,6 +69,7 @@ import {
   defaultPermissionMode,
   fallbackPermissionOptions,
 } from "./lib/permissions";
+import { protocolLabel } from "./lib/capabilities";
 import {
   SESSION_PAGE_SIZE,
   canChangeSessionSettings,
@@ -92,6 +95,7 @@ import type {
   RuntimeId,
   RuntimeInfo,
   SessionMeta,
+  SessionImageAttachment,
   SessionSelectionCatalog,
   SessionSnapshot,
   SessionState,
@@ -108,9 +112,16 @@ import {
   sortRuntimes,
 } from "./lib/runtimes";
 import {
+  buildWorkflowNodePrompt,
+  extractLastAssistantText,
+  fixedWorkflowNodes,
   createOrchestrationTask,
+  formatOrchestrationUpdatedAt,
   loadOrchestrationTasks,
   saveOrchestrationTasks,
+  updateWorkflowNode,
+  type WorkflowStepOutput,
+  type OrchestrationNode,
   type OrchestrationTask,
 } from "./lib/orchestration";
 
@@ -149,10 +160,7 @@ function saveStringList(key: string, values: string[]): void {
 
 function runtimeRouteMode(runtime: RuntimeInfo): string {
   if (!runtime.enabled) return "disabled";
-  if (runtime.id === "claude") return "stream-json";
-  if (runtime.id === "grok") return "native ACP";
-  if (runtime.id === "kimi") return "ACP";
-  return runtime.capabilities.protocol;
+  return protocolLabel(runtime.capabilities.protocol);
 }
 
 function runtimeConnectHint(runtimeId: RuntimeId): string {
@@ -249,6 +257,7 @@ export default function App() {
   const [sessionUnread, setSessionUnread] = useState<
     Record<string, SessionUnreadKind>
   >({});
+  const [sessionTurnBusy, setSessionTurnBusy] = useState<Record<string, boolean>>({});
   const [probes, setProbes] = useState<ProbeResult[]>([]);
   const [runtimes, setRuntimes] = useState<RuntimeInfo[]>([]);
   /** Approvals still waiting on the user, keyed by session. */
@@ -272,10 +281,12 @@ export default function App() {
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [selectedSkillNames, setSelectedSkillNames] = useState<string[]>([]);
   const [quoteTarget, setQuoteTarget] = useState<QuoteTarget | null>(null);
+  const [imageAttachments, setImageAttachments] = useState<ComposerImageAttachment[]>([]);
   const [runtimePick, setRuntimePick] = useState<RuntimeId>(() =>
     loadRuntimePick(),
   );
   const [busy, setBusy] = useState(false);
+  const [runningWorkflowId, setRunningWorkflowId] = useState<string | null>(null);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [projectPathBusy, setProjectPathBusy] = useState(false);
   const [controlCatalog, setControlCatalog] =
@@ -296,6 +307,7 @@ export default function App() {
     sessionId: string;
     left: number;
     top: number;
+    targetIds: string[];
   } | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<
     (ProjectContextTarget & { left: number; top: number }) | null
@@ -446,6 +458,7 @@ export default function App() {
   }, [visibleMessages]);
   const hiddenMessageCount = Math.max(0, messages.length - visibleMessages.length);
   const lastMessage = messages[messages.length - 1];
+  const activeRuntimeCapabilities = runtimeInfo(activeRuntimeId)?.capabilities;
   const activeCodexModelFallback =
     active?.runtimeId === "codex"
       ? normalizeCodexModelId(
@@ -456,12 +469,14 @@ export default function App() {
     active?.runtimeId === "codex"
       ? activeSessionModelValue || activeCodexModelFallback || "default"
       : activeSessionModelValue;
-  const activeModelReasoningEffort = active?.runtimeId === "codex"
-    ? (active?.modelReasoningEffort ??
-        snapshot.modelReasoningEffort ??
-        codexRoute?.modelReasoningEffort ??
-        codexReasoningEffortFromModel(active?.modelId ?? snapshot.modelId) ??
-        "high")
+  const activeModelReasoningEffort = activeRuntimeCapabilities?.reasoningEffort
+    ? active?.modelReasoningEffort ??
+      snapshot.modelReasoningEffort ??
+      (active?.runtimeId === "codex" ? codexRoute?.modelReasoningEffort : null) ??
+      (active?.runtimeId === "codex"
+        ? codexReasoningEffortFromModel(active?.modelId ?? snapshot.modelId)
+        : null) ??
+      null
     : null;
   const activePermissionMode =
     active?.permissionMode ??
@@ -480,16 +495,16 @@ export default function App() {
     ? (controlModelOptions.find((option) => option.value === activeModelValue)?.label ??
         (activeModelValue || "default"))
     : "default";
+  const controlReasoningOptions = useMemo(
+    () => CODEX_REASONING_OPTIONS,
+    [],
+  );
   const controlPermissionOptions = useMemo(
     () =>
       activeControlCatalog?.permissionOptions.length
         ? activeControlCatalog.permissionOptions
         : fallbackPermissionOptions(activeRuntimeId),
     [activeRuntimeId, activeControlCatalog],
-  );
-  const controlReasoningOptions = useMemo(
-    () => CODEX_REASONING_OPTIONS,
-    [],
   );
   const settingsChangeDisabled =
     !active || active.archived || settingsBusy || !canChangeSessionSettings(snapshot.state);
@@ -526,7 +541,7 @@ export default function App() {
     );
   }, [runtimePick, sessionFilter, sessions, showArchived]);
   const activeSupportsReasoningEffort =
-    runtimeInfo(activeRuntimeId)?.capabilities.reasoningEffort ?? false;
+    activeRuntimeCapabilities?.reasoningEffort ?? false;
   const activePermissionQueue = activeId
     ? (permissionQueue[activeId] ?? [])
     : [];
@@ -555,11 +570,38 @@ export default function App() {
   const assistantTypingTimersRef = useRef<Record<string, number>>({});
   const assistantTypingQueueRef = useRef<Record<string, string>>({});
   const assistantTypingSessionRef = useRef<Record<string, string>>({});
+  const imageAttachmentsRef = useRef<ComposerImageAttachment[]>([]);
   const sessionUnreadRef = useRef<Record<string, SessionUnreadKind>>({});
   const notifiedSessionResultRef = useRef<Record<string, SessionUnreadKind>>({});
   const turnWorktreeBaselineRef = useRef<
     Record<string, WorktreeChangeSnapshot | null>
   >({});
+
+  useEffect(() => {
+    imageAttachmentsRef.current = imageAttachments;
+  }, [imageAttachments]);
+
+  const clearImageAttachments = useCallback(() => {
+    for (const image of imageAttachmentsRef.current) {
+      URL.revokeObjectURL(image.previewUrl);
+    }
+    imageAttachmentsRef.current = [];
+    setImageAttachments([]);
+  }, []);
+
+  useEffect(
+    () => () => {
+      for (const image of imageAttachmentsRef.current) {
+        URL.revokeObjectURL(image.previewUrl);
+      }
+      imageAttachmentsRef.current = [];
+    },
+    [],
+  );
+
+  useEffect(() => {
+    clearImageAttachments();
+  }, [active?.id, clearImageAttachments]);
 
   const beginSessionActivation = useCallback((sessionId: string | null) => {
     const requestId = activationRequestRef.current + 1;
@@ -662,6 +704,12 @@ export default function App() {
   const markSessionResult = useCallback(
     (sessionId: string, kind: SessionUnreadKind, meta?: SessionMeta) => {
       const isBackgroundSession = activeIdRef.current !== sessionId;
+      setSessionTurnBusy((prev) => {
+        if (!prev[sessionId]) return prev;
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
       const isWindowBackground =
         !document.hasFocus() || document.visibilityState !== "visible";
       if (isBackgroundSession && sessionUnreadRef.current[sessionId] !== kind) {
@@ -1722,12 +1770,7 @@ export default function App() {
       (pendingSession?.id === sessionContextMenu.sessionId ? pendingSession : null)
     );
   }, [pendingSession, sessionContextMenu, sessions]);
-  const sessionContextTargetIds = useMemo(() => {
-    if (!sessionContextMenu) return [];
-    return selectedSessionIds.includes(sessionContextMenu.sessionId)
-      ? selectedSessionIds
-      : [sessionContextMenu.sessionId];
-  }, [selectedSessionIds, sessionContextMenu]);
+  const sessionContextTargetIds = sessionContextMenu?.targetIds ?? [];
   const sessionContextTargetTitle =
     sessionContextTargetIds.length > 1
       ? `已选择 ${sessionContextTargetIds.length} 个会话`
@@ -1944,7 +1987,7 @@ export default function App() {
       setQuoteTarget(null);
       const projectPath = projectPathOverride?.trim() || null;
       if (!isTauri()) {
-        const meta: SessionMeta = {
+        const baseMeta: SessionMeta = {
           id: uid("sess"),
           title: `${runtimeLabel(runtimePick)} · 新会话`,
           pinned: false,
@@ -1957,11 +2000,12 @@ export default function App() {
           createdAt: nowIso(),
           updatedAt: nowIso(),
         };
-        setPendingSession(meta);
-        beginSessionActivation(meta.id);
-        setSnapshot(idleSnapshot(meta));
-        resetChatViewport(meta.id, 0);
-        updateSessionMessages(meta.id, () => []);
+        setPendingSession(baseMeta);
+        beginSessionActivation(baseMeta.id);
+        setSnapshot(idleSnapshot(baseMeta));
+        resetChatViewport(baseMeta.id, 0);
+        updateSessionMessages(baseMeta.id, () => []);
+        setStatusLine(`${runtimeLabel(baseMeta.runtimeId)} 新会话已创建`);
         return;
       }
       const meta = await api.createSession(runtimePick, projectPath);
@@ -1972,6 +2016,7 @@ export default function App() {
       setSnapshot(snap);
       resetChatViewport(meta.id, 0);
       updateSessionMessages(meta.id, () => []);
+      setStatusLine(`${runtimeLabel(meta.runtimeId)} 新会话已创建`);
     } catch (e) {
       setStatusLine(String(e));
     } finally {
@@ -2084,14 +2129,88 @@ export default function App() {
     });
   }
 
+  async function fileToBytes(file: File): Promise<number[]> {
+    return Array.from(new Uint8Array(await file.arrayBuffer()));
+  }
+
+  function imageAttachmentFromSaved(
+    saved: SessionImageAttachment,
+    previewUrl: string,
+  ): ComposerImageAttachment {
+    return {
+      id: saved.id,
+      name: saved.name,
+      mimeType: saved.mimeType,
+      sizeBytes: saved.sizeBytes,
+      path: saved.path,
+      previewUrl,
+    };
+  }
+
+  async function pasteImageAttachments(files: File[]) {
+    const session = active;
+    if (!session || files.length === 0) return;
+    if (session.runtimeId !== "codex") {
+      emitToast({ message: "图片粘贴目前仅支持 Codex 会话", tone: "danger" });
+      return;
+    }
+    if (!isTauri()) {
+      emitToast({ message: "图片粘贴需要在桌面版中使用", tone: "danger" });
+      return;
+    }
+
+    const sessionId = session.id;
+    const savedAttachments: ComposerImageAttachment[] = [];
+    for (const file of files) {
+      const previewUrl = URL.createObjectURL(file);
+      try {
+        const saved = await api.saveImageAttachment(
+          sessionId,
+          file.name || "pasted-image",
+          file.type || "image/png",
+          await fileToBytes(file),
+        );
+        if (activeIdRef.current !== sessionId) {
+          URL.revokeObjectURL(previewUrl);
+          continue;
+        }
+        savedAttachments.push(imageAttachmentFromSaved(saved, previewUrl));
+      } catch (error) {
+        URL.revokeObjectURL(previewUrl);
+        emitToast({ message: `图片粘贴失败: ${String(error)}`, tone: "danger" });
+      }
+    }
+    if (savedAttachments.length === 0) return;
+    setImageAttachments((current) => [...current, ...savedAttachments]);
+    setStatusLine(`已添加 ${savedAttachments.length} 张图片`);
+  }
+
+  function removeImageAttachment(id: string) {
+    setImageAttachments((current) => {
+      const removed = current.find((image) => image.id === id);
+      if (removed) URL.revokeObjectURL(removed.previewUrl);
+      return current.filter((image) => image.id !== id);
+    });
+    requestAnimationFrame(() => composerInputRef.current?.focus());
+  }
+
   async function sendMessage() {
     const body = draft.trim();
     const selectedSkillTokens = selectedSkillNames
       .filter((name) => Boolean(findSkillByName(skills, name)))
       .map((name) => skillInvocationToken(name, activeRuntimeId));
-    if ((!body && selectedSkillTokens.length === 0) || !active) return;
+    if (
+      (!body && selectedSkillTokens.length === 0 && imageAttachments.length === 0) ||
+      !active
+    ) {
+      return;
+    }
     if (active.archived) {
       setStatusLine("请先恢复归档会话再继续发送");
+      return;
+    }
+    if (imageAttachments.length > 0 && active.runtimeId !== "codex") {
+      setStatusLine("图片输入目前仅支持 Codex 会话");
       return;
     }
     const bodyWithSkills = [selectedSkillTokens.join(" "), body]
@@ -2099,14 +2218,24 @@ export default function App() {
       .join(body ? "\n\n" : "");
     const text = composeMessageText(quoteTarget, bodyWithSkills);
     const session = active;
+    const outgoingImages = imageAttachments;
+    const imagePaths = outgoingImages.map((image) => image.path);
+    const displayText = [
+      text,
+      ...outgoingImages.map((image) => `[image] ${image.path}`),
+    ]
+      .filter(Boolean)
+      .join("\n");
+    setSessionTurnBusy((prev) => ({ ...prev, [session.id]: true }));
     setDraft("");
     setSelectedSkillNames([]);
+    clearImageAttachments();
     stickToBottomRef.current = true;
     scrollChatToBottom("smooth");
     const userMsg: ChatMessage = {
       id: uid("u"),
       role: "user",
-      content: text,
+      content: displayText,
       runtimeId: session.runtimeId,
     };
     updateSessionMessages(session.id, (m) => [...m, userMsg]);
@@ -2129,7 +2258,7 @@ export default function App() {
       mockReplyTimerRef.current = window.setTimeout(() => {
         updateSessionMessages(session.id, (m) => {
           const replyId = uid("a");
-          const replyContent = `[${runtimeLabel(session.runtimeId)} stub]\n收到：${text}\n\n下一步会接入真实 Adapter（Grok ACP / Codex App Server）。`;
+          const replyContent = `[${runtimeLabel(session.runtimeId)} stub]\n收到：${displayText}\n\n下一步会接入真实 Adapter（Grok ACP / Codex App Server）。`;
           queueAssistantTyping(session.id, replyId, replyContent);
           const last = m[m.length - 1];
           const reply: ChatMessage = {
@@ -2154,8 +2283,13 @@ export default function App() {
           ? prev
           : [{ ...session, updatedAt: nowIso() }, ...prev],
       );
-      setQuoteTarget(null);
-      mockReplyTimerRef.current = null;
+        setQuoteTarget(null);
+        mockReplyTimerRef.current = null;
+        setSessionTurnBusy((prev) => {
+          const next = { ...prev };
+          delete next[session.id];
+          return next;
+        });
       }, 400);
       return;
     }
@@ -2180,12 +2314,17 @@ export default function App() {
       turnWorktreeBaselineRef.current[session.id] = projectPath
         ? await api.projectWorktreeChanges(projectPath).catch(() => null)
         : null;
-      await api.send(session.id, text);
+      await api.send(session.id, text, imagePaths);
       const list = await api.listSessions();
-      setSessions(list);
+      setSessions((prev) => mergeSessions(prev, list));
       setPendingSession((prev) => (prev?.id === session.id ? null : prev));
       setQuoteTarget(null);
     } catch (e) {
+      setSessionTurnBusy((prev) => {
+        const next = { ...prev };
+        delete next[session.id];
+        return next;
+      });
       delete turnWorktreeBaselineRef.current[session.id];
       updateSessionMessages(session.id, (m) => [
         ...m.filter(
@@ -2229,6 +2368,11 @@ export default function App() {
         : s,
     );
     setBusy(false);
+    setSessionTurnBusy((prev) => {
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
 
     if (!isTauri()) return;
 
@@ -2293,7 +2437,14 @@ export default function App() {
     ],
   );
 
-  const streaming = snapshot.state === "streaming";
+  const activeTurnBusy = activeId ? Boolean(sessionTurnBusy[activeId]) : false;
+  const streaming =
+    activeTurnBusy ||
+    snapshot.state === "connecting" ||
+    snapshot.state === "streaming" ||
+    snapshot.state === "awaiting_permission";
+  const composerInputDisabled =
+    Boolean(active?.archived) || streaming || runningWorkflowId !== null;
   const nonCodexRouteRuntimes = sortRuntimes(runtimes).filter(
     (runtime) => runtime.id !== "codex" && runtime.id !== "claude",
   );
@@ -2322,7 +2473,7 @@ export default function App() {
         </div>
         <div className="route-kv">
           <span>protocol</span>
-          <strong>{claudeRuntime?.capabilities.protocol ?? "claude_code"}</strong>
+          <strong>{protocolLabel(claudeRuntime?.capabilities.protocol ?? "claude_code")}</strong>
         </div>
         <div className="route-kv">
           <span>permission</span>
@@ -2352,7 +2503,7 @@ export default function App() {
         </div>
         <div className="route-kv">
           <span>protocol</span>
-          <strong>{codexRuntime?.capabilities.protocol ?? "codex_app_server"}</strong>
+          <strong>{protocolLabel(codexRuntime?.capabilities.protocol ?? "codex_app_server")}</strong>
         </div>
         <div className="route-kv">
           <span>permission</span>
@@ -2386,7 +2537,7 @@ export default function App() {
           </div>
           <div className="route-kv">
             <span>protocol</span>
-            <strong>{runtime.capabilities.protocol}</strong>
+            <strong>{protocolLabel(runtime.capabilities.protocol)}</strong>
           </div>
           <div className="route-kv">
             <span>permission</span>
@@ -2401,15 +2552,241 @@ export default function App() {
   const activeOrchestrationTask = orchestrationTasks.find(
     (task) => task.id === activeOrchestrationId,
   ) ?? orchestrationTasks[0];
+  const updateOrchestrationTask = (nextTask: OrchestrationTask) => {
+    setOrchestrationTasks((current) =>
+      current.map((task) => (task.id === nextTask.id ? nextTask : task)),
+    );
+  };
   const createOrchestration = () => {
     const nextTask = createOrchestrationTask(orchestrationTasks.length + 1);
     setOrchestrationTasks((current) => [nextTask, ...current]);
     setActiveOrchestrationId(nextTask.id);
   };
-  const updateOrchestrationTask = (nextTask: OrchestrationTask) => {
+  const updateWorkflowTask = (
+    taskId: string,
+    updater: (task: OrchestrationTask) => OrchestrationTask,
+  ): OrchestrationTask | null => {
+    let nextTask: OrchestrationTask | null = null;
     setOrchestrationTasks((current) =>
-      current.map((task) => (task.id === nextTask.id ? nextTask : task)),
+      current.map((task) => {
+        if (task.id !== taskId) return task;
+        nextTask = updater(task);
+        return nextTask;
+      }),
     );
+    return nextTask;
+  };
+  const createWorkflowTurnWaiter = async (sessionId: string) => {
+    let settled = false;
+    let resolveWaiter: () => void = () => {};
+    let rejectWaiter: (error: Error) => void = () => {};
+    const promise = new Promise<void>((resolve, reject) => {
+      resolveWaiter = resolve;
+      rejectWaiter = reject;
+    });
+    const cleanup: Array<() => void> = [];
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      for (const unlisten of cleanup) unlisten();
+      if (error) {
+        rejectWaiter(error);
+      } else {
+        resolveWaiter();
+      }
+    };
+    const settledUnlisten = await listen<TurnSettledEvent>(
+      "session://turn_settled",
+      (event) => {
+        if (event.payload.sessionId === sessionId) finish();
+      },
+    );
+    cleanup.push(settledUnlisten);
+    const errorUnlisten = await listen<{
+      sessionId: string;
+      code?: string | null;
+      message: string;
+    }>("session://error", (event) => {
+      if (event.payload.sessionId !== sessionId) return;
+      const code = event.payload.code ? `${event.payload.code}: ` : "";
+      finish(new Error(`${code}${event.payload.message}`));
+    });
+    cleanup.push(errorUnlisten);
+    return {
+      promise,
+      cancel: () => finish(),
+    };
+  };
+  const createWorkflowSession = async (
+    node: OrchestrationNode,
+    projectPath: string | null,
+  ): Promise<SessionMeta> => {
+    if (isTauri()) {
+      const meta = await api.createSession(node.runtimeId, projectPath);
+      setSessions((prev) => mergeSessions(prev, [meta]));
+      return meta;
+    }
+
+    const meta: SessionMeta = {
+      id: uid("wf"),
+      title: `${runtimeLabel(node.runtimeId)} · ${node.title}`,
+      pinned: false,
+      archived: false,
+      runtimeId: node.runtimeId,
+      projectPath,
+      modelId: node.runtimeId === "grok" ? "grok-4.5" : "default",
+      modelReasoningEffort: node.runtimeId === "codex" ? "high" : null,
+      permissionMode: defaultPermissionMode(node.runtimeId),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    setSessions((prev) => mergeSessions(prev, [meta]));
+    return meta;
+  };
+  const sendWorkflowStep = async (
+    task: OrchestrationTask,
+    node: OrchestrationNode,
+    upstream: WorkflowStepOutput[],
+    projectPath: string | null,
+    onSessionCreated: (session: SessionMeta) => void,
+  ): Promise<WorkflowStepOutput> => {
+    const prompt = buildWorkflowNodePrompt(task, node, upstream);
+    const session = await createWorkflowSession(node, projectPath);
+    onSessionCreated(session);
+    updateSessionMessages(session.id, () => [
+      {
+        id: uid("u"),
+        role: "user",
+        content: prompt,
+        runtimeId: session.runtimeId,
+      },
+      {
+        id: uid("a"),
+        role: "assistant",
+        content: ASSISTANT_LOADING_TEXT,
+        runtimeId: session.runtimeId,
+        streaming: true,
+        pending: true,
+        createdAt: nowIso(),
+        completedAt: null,
+      },
+    ]);
+    setVisibleMessageCounts((prev) => ({
+      ...prev,
+      [session.id]: INITIAL_VISIBLE_MESSAGES,
+    }));
+
+    if (!isTauri()) {
+      const output = `[${runtimeLabel(session.runtimeId)} workflow stub]\n${node.title} 已接收上游输入。`;
+      updateSessionMessages(session.id, (messages) => [
+        ...messages.slice(0, -1),
+        {
+          id: uid("a"),
+          role: "assistant",
+          content: output,
+          runtimeId: session.runtimeId,
+          createdAt: nowIso(),
+          completedAt: nowIso(),
+        },
+      ]);
+      return { node, session, output };
+    }
+
+    const waiter = await createWorkflowTurnWaiter(session.id);
+    try {
+      const baseline = projectPath
+        ? await api.projectWorktreeChanges(projectPath).catch(() => null)
+        : null;
+      turnWorktreeBaselineRef.current[session.id] = baseline;
+      await api.send(session.id, prompt);
+      await waiter.promise;
+      const storedMessages = await api.getMessages(session.id);
+      const snap = await api.getSnapshot(session.id).catch(() => undefined);
+      const normalized = normalizeLoadedMessages(storedMessages, snap);
+      updateSessionMessages(session.id, () => normalized);
+      const list = await api.listSessions();
+      setSessions((prev) => mergeSessions(prev, list));
+      return {
+        node,
+        session,
+        output: extractLastAssistantText(normalized),
+      };
+    } finally {
+      waiter.cancel();
+    }
+  };
+  const runWorkflow = async (task: OrchestrationTask) => {
+    if (runningWorkflowId) return;
+    const nodes = fixedWorkflowNodes(task);
+    if (nodes.length === 0) {
+      setStatusLine("编排运行失败：需要 implement/review/fix 三个固定节点");
+      return;
+    }
+
+    setRunningWorkflowId(task.id);
+    setStatusLine(`开始运行编排：${task.title}`);
+    const projectPath = active?.projectPath?.trim() || snapshot.projectPath?.trim() || null;
+    const upstream: WorkflowStepOutput[] = [];
+    let currentTask = task;
+
+    try {
+      for (const node of nodes) {
+        const startedAt = formatOrchestrationUpdatedAt();
+        const runningTask = updateWorkflowNode(currentTask, node.id, {
+          status: "running",
+          lastRunAt: startedAt,
+          lastError: null,
+        });
+        currentTask =
+          updateWorkflowTask(task.id, () => runningTask) ?? runningTask;
+        const latestNode =
+          currentTask.nodes.find((item) => item.id === node.id) ?? node;
+        let stepSessionId = latestNode.sessionId ?? null;
+
+        try {
+          const output = await sendWorkflowStep(
+            currentTask,
+            latestNode,
+            upstream,
+            projectPath,
+            (session) => {
+              stepSessionId = session.id;
+              const linkedTask = updateWorkflowNode(currentTask, node.id, {
+                sessionId: session.id,
+              });
+              currentTask =
+                updateWorkflowTask(task.id, () => linkedTask) ?? linkedTask;
+            },
+          );
+          upstream.push(output);
+          const doneTask = updateWorkflowNode(currentTask, node.id, {
+            status: "done",
+            sessionId: output.session.id,
+            lastRunAt: formatOrchestrationUpdatedAt(),
+            lastError: null,
+          });
+          currentTask = updateWorkflowTask(task.id, () => doneTask) ?? doneTask;
+        } catch (error) {
+          const failedTask = updateWorkflowNode(currentTask, node.id, {
+            status: "failed",
+            sessionId: stepSessionId,
+            lastRunAt: formatOrchestrationUpdatedAt(),
+            lastError: String(error),
+          });
+          updateWorkflowTask(task.id, () => failedTask);
+          setStatusLine(`编排暂停：${latestNode.title} 失败，${String(error)}`);
+          return;
+        }
+      }
+
+      setStatusLine(`编排完成：${task.title}`);
+    } finally {
+      setRunningWorkflowId(null);
+    }
+  };
+  const openWorkflowSession = (sessionId: string) => {
+    setActiveView("chat");
+    selectSession(sessionId);
   };
   return (
     <div className="app-shell platform-win has-custom-chrome" data-theme={theme}>
@@ -2466,10 +2843,10 @@ export default function App() {
               setActiveView("chat");
               selectSession(id, options);
             }}
-            onSessionContextMenu={(sessionId, left, top) =>
+            onSessionContextMenu={(sessionId, left, top, targetIds) =>
               {
                 setProjectContextMenu(null);
-                setSessionContextMenu({ sessionId, left, top });
+                setSessionContextMenu({ sessionId, left, top, targetIds });
               }
             }
             onProjectContextMenu={(project, left, top) => {
@@ -2565,6 +2942,9 @@ export default function App() {
                 task={activeOrchestrationTask}
                 onBackToChat={() => setActiveView("chat")}
                 onTaskChange={updateOrchestrationTask}
+                onRunWorkflow={(task) => void runWorkflow(task)}
+                onOpenSession={openWorkflowSession}
+                runningWorkflowId={runningWorkflowId}
               />
             ) : (
               <div className="empty-state">暂无编排任务</div>
@@ -2628,6 +3008,7 @@ export default function App() {
                 busy={busy}
                 streaming={streaming}
                 readOnly={active.archived}
+                inputDisabled={composerInputDisabled}
                 settingsChangeDisabled={settingsChangeDisabled}
                 activeModelValue={activeModelValue}
                 activeModelLabel={activeModelLabel}
@@ -2635,8 +3016,8 @@ export default function App() {
                 activePermissionMode={activePermissionMode}
                 activeSupportsReasoningEffort={activeSupportsReasoningEffort}
                 controlModelOptions={controlModelOptions}
-                controlPermissionOptions={controlPermissionOptions}
                 controlReasoningOptions={controlReasoningOptions}
+                controlPermissionOptions={controlPermissionOptions}
                 skills={skills}
                 skillsLoading={skillsLoading}
                 skillsError={skillsError}
@@ -2645,11 +3026,15 @@ export default function App() {
                 projectPathEditable={projectPathEditable}
                 projectPathBusy={projectPathBusy}
                 quoteTarget={quoteTarget}
+                imageAttachments={imageAttachments}
+                imagePasteEnabled={active.runtimeId === "codex"}
                 composerInputRef={composerInputRef}
                 onDraftChange={setDraft}
                 onSend={() => void sendMessage()}
                 onStop={() => void stopActive()}
                 onClearQuote={() => setQuoteTarget(null)}
+                onPasteImages={(files) => void pasteImageAttachments(files)}
+                onRemoveImageAttachment={removeImageAttachment}
                 onModelChange={(value) =>
                   void updateActiveSessionSettings({ modelId: value })
                 }

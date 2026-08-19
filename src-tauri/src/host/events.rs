@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AgentError;
 use crate::host::permissions::{DecisionSource, PermissionDecision};
+use crate::host::tool_policy::ToolPolicyDecision;
 use crate::runtime::RuntimeId;
 use crate::session_fsm::SessionState;
 
@@ -40,6 +41,9 @@ pub enum HostEvent {
         /// Already decided by the session's permission mode or a remembered
         /// grant; emitted for visibility, no answer is expected.
         auto_allowed: bool,
+        /// Host-normalized intent, risk and approval action. UI queues only
+        /// requests whose policy action is `ask`.
+        policy: ToolPolicyDecision,
     },
     /// Terminal state for a `PermissionRequest`. The UI uses this to retire the
     /// approval card, including when the Host decided on the user's behalf.

@@ -76,6 +76,8 @@ pub fn run() {
             commands::session_update_settings,
             commands::session_permission_respond,
             commands::session_get_messages,
+            commands::session_save_image_attachment,
+            commands::session_load_image_attachment,
             commands::session_export_markdown,
             commands::session_export_trace,
             commands::session_delete,

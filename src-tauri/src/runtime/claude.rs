@@ -211,11 +211,25 @@ impl LiveSession for ClaudeLiveSession {
         };
 
         let mut stream = ClaudePromptStream::new(self.event_tx.clone());
-        let read_result = tokio::time::timeout(
-            std::time::Duration::from_secs(PROMPT_TIMEOUT_SECS),
-            read_stdout(stdout, &mut stream),
-        )
-        .await;
+        let read_result = {
+            let mut read_task = Box::pin(read_stdout(stdout, &mut stream));
+            loop {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(PROMPT_TIMEOUT_SECS),
+                    &mut read_task,
+                )
+                .await
+                {
+                    Ok(result) => break Ok(result),
+                    Err(_) if self.permissions.has_pending() => {
+                        tracing::info!(
+                            "Claude stdout read reached {PROMPT_TIMEOUT_SECS}s while permission is pending; continuing to wait"
+                        );
+                    }
+                    Err(err) => break Err(err),
+                }
+            }
+        };
 
         if read_result.is_err() {
             let _ = self.cancel().await;
@@ -1433,6 +1447,7 @@ mod tests {
             title,
             preview,
             auto_allowed,
+            policy: _,
         } = rx.recv().await.unwrap()
         else {
             panic!("expected permission request");

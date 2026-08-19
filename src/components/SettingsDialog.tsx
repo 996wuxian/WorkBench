@@ -1,6 +1,11 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 
 import { IconClose, IconDoctor, IconRefresh, IconSettings } from "./icons";
+import {
+  capabilityDescriptors,
+  protocolLabel,
+  runtimeCapabilitySummary,
+} from "../lib/capabilities";
 import { UI_FONT_SIZE_OPTIONS, type UiFontSize } from "../lib/fontSize";
 import {
   runtimeAvatarLabel,
@@ -83,6 +88,9 @@ export function SettingsDialog({
     const probe = probeForRuntime(probes, runtime.id);
     return runtime.enabled && probe && !probe.found;
   }).length;
+  const gatedCount = visibleRuntimes.filter(
+    (runtime) => runtime.enabled && runtime.capabilities.permissionGate,
+  ).length;
   const unknownCount = visibleRuntimes.filter(
     (runtime) => runtime.enabled && !probeForRuntime(probes, runtime.id),
   ).length;
@@ -208,10 +216,13 @@ export function SettingsDialog({
                   <strong>{missingCount}</strong>
                 </span>
                 <span>
-                  <span>未探测</span>
-                  <strong>{unknownCount}</strong>
+                  <span>Host 权限</span>
+                  <strong>{gatedCount}</strong>
                 </span>
               </div>
+              {unknownCount > 0 ? (
+                <div className="settings-cli-hint">还有 {unknownCount} 个 runtime 未探测。</div>
+              ) : null}
 
               <div className="settings-runtime-list">
                 {visibleRuntimes.map((runtime) => {
@@ -247,7 +258,7 @@ export function SettingsDialog({
                       </div>
                       <div className="settings-kv">
                         <span>protocol</span>
-                        <strong>{runtime.capabilities.protocol}</strong>
+                        <strong>{protocolLabel(runtime.capabilities.protocol)}</strong>
                       </div>
                       <div className="settings-kv">
                         <span>path</span>
@@ -256,6 +267,28 @@ export function SettingsDialog({
                       <div className="settings-kv">
                         <span>version</span>
                         <strong>{probe?.version ?? probe?.detail ?? "-"}</strong>
+                      </div>
+                      <div className="settings-kv">
+                        <span>能力</span>
+                        <strong>{runtimeCapabilitySummary(runtime)}</strong>
+                      </div>
+                      <div className="settings-capability-grid" aria-label={`${runtime.displayName} 能力矩阵`}>
+                        {capabilityDescriptors(runtime.capabilities).map((capability) => (
+                          <span
+                            key={capability.key}
+                            className={
+                              "settings-capability" +
+                              (capability.enabled ? " settings-capability--on" : "")
+                            }
+                            title={
+                              capability.enabled
+                                ? capability.label
+                                : capability.unavailableReason
+                            }
+                          >
+                            {capability.label}
+                          </span>
+                        ))}
                       </div>
                       {probe?.detail && probe.detail !== probe.version ? (
                         <div className="settings-kv">

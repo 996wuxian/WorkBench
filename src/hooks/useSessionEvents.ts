@@ -312,8 +312,9 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
         (ev) => {
           if (cancelled) return;
           const request = ev.payload;
-          // Auto-allowed requests are informational: the Host already answered.
-          if (request.autoAllowed) {
+          const policyAction = request.policy?.action ?? (request.autoAllowed ? "allow" : "ask");
+          // Automatically resolved requests are informational: the Host already answered.
+          if (policyAction !== "ask") {
             ref.current.updateSessionMessages(request.sessionId, (m) => [
               ...m,
               {
@@ -322,7 +323,8 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
                 content: "",
                 toolName: request.toolName,
                 toolTitle: request.title,
-                toolStatus: "auto approved",
+                toolStatus:
+                  policyAction === "deny" ? "blocked by policy" : "auto approved",
               },
             ]);
             return;
@@ -362,9 +364,9 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
           if (resolution.resolved && resolution.remainingCount === 0) {
             updateSessionMessages(sessionId, (m) => finishAssistantElapsedPause(m));
           }
-          // The user already saw their own click; only surface decisions they
-          // did not make, so a timeout or an abort is never silent.
-          if (source === "user" || source === "mode") return;
+          // User/mode decisions are already visible in context. Aborted
+          // approvals are covered by the process-exited notice for the turn.
+          if (source === "user" || source === "mode" || source === "aborted") return;
           const title =
             resolution.resolved?.title ??
             resolution.resolved?.toolName ??

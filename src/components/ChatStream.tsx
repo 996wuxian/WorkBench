@@ -249,10 +249,12 @@ function splitFileDisplayPath(path: string) {
 export function StreamingText({
   content,
   revealImmediately = false,
+  showCursor = true,
   onProgress,
 }: {
   content: string;
   revealImmediately?: boolean;
+  showCursor?: boolean;
   onProgress?: () => void;
 }) {
   const characters = useMemo(() => Array.from(content), [content]);
@@ -302,7 +304,9 @@ export function StreamingText({
       <span className="typing-stream__text" aria-live="polite">
         {characters.slice(0, visibleCount).join("")}
       </span>
-      <span className="typing-stream__cursor" aria-hidden="true" />
+      {showCursor ? (
+        <span className="typing-stream__cursor" aria-hidden="true" />
+      ) : null}
     </span>
   );
 }

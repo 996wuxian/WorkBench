@@ -62,7 +62,7 @@
       "modelsList": false,
       "planMode": false,
       "slashCommands": false,
-      "imagesIn": false,
+      "imagesIn": true,
       "imagesOut": false,
       "protocol": "claude_code"
     },
