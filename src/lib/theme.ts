@@ -15,7 +15,7 @@ export function loadTheme(): ThemeMode {
   } catch {
     /* ignore */
   }
-  return "dark";
+  return "light";
 }
 
 /** CSS theme + native window fill (avoids dark corners under border-radius). */
