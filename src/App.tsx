@@ -21,7 +21,10 @@ import {
 } from "./components/OrchestrationPage";
 import { OrchestrationSidebar } from "./components/OrchestrationSidebar";
 import { ComposerPanel } from "./components/ComposerPanel";
-import type { ComposerImageAttachment } from "./components/ComposerPanel";
+import type {
+  ComposerFileAttachment,
+  ComposerImageAttachment,
+} from "./components/ComposerPanel";
 import { SessionInspector } from "./components/SessionInspector";
 import { AppOverlays } from "./components/AppOverlays";
 import { ToastViewport } from "./components/Toast";
@@ -89,6 +92,7 @@ import type {
   NativeDeleteMode,
   PermissionDecision,
   PermissionMode,
+  PickedFile,
   PermissionRequestEvent,
   ProbeResult,
   RuntimeId,
@@ -285,6 +289,7 @@ export default function App() {
   const [selectedSkillNames, setSelectedSkillNames] = useState<string[]>([]);
   const [quoteTarget, setQuoteTarget] = useState<QuoteTarget | null>(null);
   const [imageAttachments, setImageAttachments] = useState<ComposerImageAttachment[]>([]);
+  const [fileAttachments, setFileAttachments] = useState<ComposerFileAttachment[]>([]);
   const [runtimePick, setRuntimePick] = useState<RuntimeId>(() =>
     loadRuntimePick(),
   );
@@ -598,6 +603,7 @@ export default function App() {
 
   useEffect(() => {
     clearImageAttachments();
+    setFileAttachments([]);
   }, [active?.id, clearImageAttachments]);
 
   const beginSessionActivation = useCallback((sessionId: string | null) => {
@@ -870,6 +876,17 @@ export default function App() {
   const handleTypingProgress = useCallback(() => {
     if (!stickToBottomRef.current) return;
     scrollChatToBottom();
+  }, [scrollChatToBottom]);
+
+  const handleComposerInputFocus = useCallback(() => {
+    const el = messageScrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom <= CHAT_BOTTOM_THRESHOLD) return;
+    pendingHistoryRestoreRef.current = null;
+    stickToBottomRef.current = true;
+    userScrolledUpRef.current = false;
+    scrollChatToBottom("smooth");
   }, [scrollChatToBottom]);
 
   const markAssistantTyping = useCallback((messageId: string, content: string) => {
@@ -2155,6 +2172,12 @@ export default function App() {
     return Array.from(new Uint8Array(await file.arrayBuffer()));
   }
 
+  function imageBytesToPreviewUrl(bytes: number[], mimeType: string): string {
+    const array = new Uint8Array(bytes);
+    const buffer = array.buffer.slice(array.byteOffset, array.byteOffset + array.byteLength);
+    return URL.createObjectURL(new Blob([buffer], { type: mimeType }));
+  }
+
   function imageAttachmentFromSaved(
     saved: SessionImageAttachment,
     previewUrl: string,
@@ -2167,6 +2190,36 @@ export default function App() {
       path: saved.path,
       previewUrl,
     };
+  }
+
+  async function savePickedImageAttachment(
+    sessionId: string,
+    picked: PickedFile,
+  ): Promise<ComposerImageAttachment | null> {
+    const imageBytes = picked.imageBytes ?? [];
+    if (imageBytes.length === 0) {
+      emitToast({ message: `${picked.name} 不是支持的图片或超过 10MB`, tone: "danger" });
+      return null;
+    }
+    const mimeType = picked.mimeType || "image/png";
+    const previewUrl = imageBytesToPreviewUrl(imageBytes, mimeType);
+    try {
+      const saved = await api.saveImageAttachment(
+        sessionId,
+        picked.name || "selected-image",
+        mimeType,
+        imageBytes,
+      );
+      if (activeIdRef.current !== sessionId) {
+        URL.revokeObjectURL(previewUrl);
+        return null;
+      }
+      return imageAttachmentFromSaved(saved, previewUrl);
+    } catch (error) {
+      URL.revokeObjectURL(previewUrl);
+      emitToast({ message: `图片添加失败: ${String(error)}`, tone: "danger" });
+      return null;
+    }
   }
 
   async function pasteImageAttachments(files: File[]) {
@@ -2216,13 +2269,88 @@ export default function App() {
     requestAnimationFrame(() => composerInputRef.current?.focus());
   }
 
+  async function pickComposerFiles() {
+    const session = active;
+    if (!session) return;
+    if (!isTauri()) {
+      emitToast({ message: "添加文件需要在桌面版中使用", tone: "danger" });
+      return;
+    }
+
+    try {
+      const pickedFiles = await api.pickProjectFiles(session.projectPath ?? null);
+      if (!pickedFiles || pickedFiles.length === 0) return;
+
+      const sessionId = session.id;
+      const nextImages: ComposerImageAttachment[] = [];
+      const nextFiles: ComposerFileAttachment[] = [];
+      let skippedImages = 0;
+
+      for (const picked of pickedFiles) {
+        if (picked.isImage) {
+          if (session.runtimeId !== "codex") {
+            skippedImages += 1;
+            continue;
+          }
+          const image = await savePickedImageAttachment(sessionId, picked);
+          if (image) nextImages.push(image);
+          continue;
+        }
+
+        nextFiles.push({
+          id: uid("file"),
+          name: picked.name,
+          path: picked.path,
+          extension: picked.extension,
+          mimeType: picked.mimeType,
+          sizeBytes: picked.sizeBytes,
+        });
+      }
+
+      if (activeIdRef.current !== sessionId) return;
+
+      if (nextFiles.length > 0) {
+        setFileAttachments((current) => {
+          const seen = new Set(current.map((file) => file.path.toLowerCase()));
+          const unique = nextFiles.filter((file) => {
+            const key = file.path.toLowerCase();
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+          return unique.length > 0 ? [...current, ...unique] : current;
+        });
+      }
+      if (nextImages.length > 0) {
+        setImageAttachments((current) => [...current, ...nextImages]);
+      }
+      if (skippedImages > 0) {
+        emitToast({ message: "图片添加目前仅支持 Codex 会话", tone: "danger" });
+      }
+      const totalAdded = nextFiles.length + nextImages.length;
+      if (totalAdded > 0) setStatusLine(`已添加 ${totalAdded} 个附件`);
+    } catch (error) {
+      emitToast({ message: `添加文件失败: ${String(error)}`, tone: "danger" });
+    } finally {
+      requestAnimationFrame(() => composerInputRef.current?.focus());
+    }
+  }
+
+  function removeFileAttachment(id: string) {
+    setFileAttachments((current) => current.filter((file) => file.id !== id));
+    requestAnimationFrame(() => composerInputRef.current?.focus());
+  }
+
   async function sendMessage() {
     const body = draft.trim();
     const selectedSkillTokens = selectedSkillNames
       .filter((name) => Boolean(findSkillByName(skills, name)))
       .map((name) => skillInvocationToken(name, activeRuntimeId));
     if (
-      (!body && selectedSkillTokens.length === 0 && imageAttachments.length === 0) ||
+      (!body &&
+        selectedSkillTokens.length === 0 &&
+        imageAttachments.length === 0 &&
+        fileAttachments.length === 0) ||
       !active
     ) {
       return;
@@ -2235,9 +2363,10 @@ export default function App() {
       setStatusLine("图片输入目前仅支持 Codex 会话");
       return;
     }
-    const bodyWithSkills = [selectedSkillTokens.join(" "), body]
+    const fileContextLines = fileAttachments.map((file) => `[file] ${file.path}`);
+    const bodyWithSkills = [selectedSkillTokens.join(" "), fileContextLines.join("\n"), body]
       .filter(Boolean)
-      .join(body ? "\n\n" : "");
+      .join("\n\n");
     const text = composeMessageText(quoteTarget, bodyWithSkills);
     const session = active;
     const outgoingImages = imageAttachments;
@@ -2252,6 +2381,7 @@ export default function App() {
     setDraft("");
     setSelectedSkillNames([]);
     clearImageAttachments();
+    setFileAttachments([]);
     stickToBottomRef.current = true;
     scrollChatToBottom("smooth");
     const userMsg: ChatMessage = {
@@ -3059,6 +3189,7 @@ export default function App() {
                 projectPathBusy={projectPathBusy}
                 quoteTarget={quoteTarget}
                 imageAttachments={imageAttachments}
+                fileAttachments={fileAttachments}
                 imagePasteEnabled={active.runtimeId === "codex"}
                 composerInputRef={composerInputRef}
                 onDraftChange={setDraft}
@@ -3067,6 +3198,9 @@ export default function App() {
                 onClearQuote={() => setQuoteTarget(null)}
                 onPasteImages={(files) => void pasteImageAttachments(files)}
                 onRemoveImageAttachment={removeImageAttachment}
+                onPickFiles={() => void pickComposerFiles()}
+                onRemoveFileAttachment={removeFileAttachment}
+                onInputFocus={handleComposerInputFocus}
                 onModelChange={(value) =>
                   void updateActiveSessionSettings({ modelId: value })
                 }

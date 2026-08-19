@@ -14,6 +14,7 @@ import type {
   SessionTraceExportResult,
   SessionSelectionCatalog,
   PermissionMode,
+  PickedFile,
   RuntimeInfo,
   SessionMeta,
   SessionSnapshot,
@@ -45,6 +46,8 @@ export const api = {
   openCcSwitch: () => call<string>("open_cc_switch"),
   pickProjectDirectory: (initialPath?: string | null) =>
     call<string | null>("project_pick_directory", { initialPath }),
+  pickProjectFiles: (initialPath?: string | null) =>
+    call<PickedFile[] | null>("project_pick_files", { initialPath }),
   skillsList: (runtimeId: string, projectPath?: string | null) =>
     call<SkillsListResult>("skills_list", { runtimeId, projectPath }),
   projectWorktreeChanges: (projectPath: string) =>

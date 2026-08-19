@@ -63,6 +63,18 @@ pub struct SessionTraceExportResult {
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PickedFile {
+    pub name: String,
+    pub path: String,
+    pub extension: Option<String>,
+    pub mime_type: Option<String>,
+    pub size_bytes: u64,
+    pub is_image: bool,
+    pub image_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionImageAttachment {
     pub id: String,
     pub name: String,
@@ -701,6 +713,25 @@ pub async fn project_pick_directory(
         .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+pub async fn project_pick_files(
+    initial_path: Option<String>,
+) -> Result<Option<Vec<PickedFile>>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = pick_project_files(initial_path.as_deref())?;
+        if paths.is_empty() {
+            return Ok(None);
+        }
+        paths
+            .into_iter()
+            .map(picked_file_info)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn pick_project_directory(initial_path: Option<&str>) -> Result<Option<String>, String> {
     #[cfg(target_os = "windows")]
     {
@@ -779,6 +810,160 @@ try {
 
     #[allow(unreachable_code)]
     Err("folder picker is not supported on this platform".into())
+}
+
+fn pick_project_files(initial_path: Option<&str>) -> Result<Vec<PathBuf>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = '添加文件'
+$dialog.Multiselect = $true
+$dialog.CheckFileExists = $true
+$dialog.Filter = '所有文件 (*.*)|*.*'
+if ($env:WORKBENCH_PICKER_DIR -and (Test-Path -LiteralPath $env:WORKBENCH_PICKER_DIR -PathType Container)) {
+  $dialog.InitialDirectory = $env:WORKBENCH_PICKER_DIR
+}
+try {
+  if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::Write((ConvertTo-Json -Compress -InputObject @($dialog.FileNames)))
+  }
+} finally {
+  $dialog.Dispose()
+}
+"#;
+        let mut command = Command::new("powershell.exe");
+        command.args(["-NoProfile", "-NonInteractive", "-STA", "-Command", script]);
+        if let Some(path) = picker_initial_dir(initial_path) {
+            command.env("WORKBENCH_PICKER_DIR", path);
+        }
+        crate::process_util::apply_no_window_std(&mut command);
+        let output = command.output().map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        return parse_json_file_list(&output.stdout);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let script = r#"
+set selectedFiles to choose file with prompt "添加文件" with multiple selections allowed
+set output to ""
+repeat with selectedFile in selectedFiles
+  set output to output & POSIX path of selectedFile & linefeed
+end repeat
+return output
+"#;
+        let output = Command::new("osascript")
+            .args(["-e", script])
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+        return Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .collect());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("zenity");
+        command.args([
+            "--file-selection",
+            "--multiple",
+            "--separator=\n",
+            "--title=添加文件",
+        ]);
+        if let Some(path) = picker_initial_dir(initial_path) {
+            command.arg(format!("--filename={}/", path.display()));
+        }
+        let output = command.output().map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+        return Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .collect());
+    }
+
+    #[allow(unreachable_code)]
+    Err("file picker is not supported on this platform".into())
+}
+
+fn parse_json_file_list(output: &[u8]) -> Result<Vec<PathBuf>, String> {
+    let raw = String::from_utf8_lossy(output).trim().to_string();
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let values: Vec<String> = serde_json::from_str(&raw)
+        .map_err(|error| format!("failed to parse selected files: {error}"))?;
+    Ok(values
+        .into_iter()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .collect())
+}
+
+fn picker_initial_dir(initial_path: Option<&str>) -> Option<PathBuf> {
+    let raw = initial_path?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    if path.is_dir() {
+        return Some(path);
+    }
+    path.parent()
+        .filter(|parent| parent.is_dir())
+        .map(Path::to_path_buf)
+}
+
+fn picked_file_info(path: PathBuf) -> Result<PickedFile, String> {
+    let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err(format!("selected path is not a file: {}", path.display()));
+    }
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(clean_attachment_name)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "file".into());
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    let image_mime = image_mime_type_from_path(&path).map(str::to_string);
+    let mime_type = image_mime
+        .clone()
+        .or_else(|| file_mime_type_from_extension(extension.as_deref()).map(str::to_string));
+    let is_image = image_mime.is_some();
+    let image_bytes = if is_image && metadata.len() <= MAX_IMAGE_ATTACHMENT_BYTES as u64 {
+        Some(fs::read(&path).map_err(|error| error.to_string())?)
+    } else {
+        None
+    };
+
+    Ok(PickedFile {
+        name,
+        path: path.display().to_string(),
+        extension,
+        mime_type,
+        size_bytes: metadata.len(),
+        is_image,
+        image_bytes,
+    })
 }
 
 #[tauri::command]
@@ -1233,6 +1418,25 @@ fn image_mime_type_from_path(path: &Path) -> Option<&'static str> {
         Some("jpg") | Some("jpeg") => Some("image/jpeg"),
         Some("webp") => Some("image/webp"),
         Some("gif") => Some("image/gif"),
+        _ => None,
+    }
+}
+
+fn file_mime_type_from_extension(extension: Option<&str>) -> Option<&'static str> {
+    match extension {
+        Some("css") => Some("text/css"),
+        Some("csv") => Some("text/csv"),
+        Some("html") | Some("htm") => Some("text/html"),
+        Some("js") | Some("cjs") | Some("mjs") => Some("text/javascript"),
+        Some("json") => Some("application/json"),
+        Some("jsonl") => Some("application/x-jsonlines"),
+        Some("md") | Some("mdx") => Some("text/markdown"),
+        Some("rs") => Some("text/x-rust"),
+        Some("ts") | Some("tsx") => Some("text/typescript"),
+        Some("txt") | Some("log") => Some("text/plain"),
+        Some("vue") => Some("text/x-vue"),
+        Some("xml") => Some("application/xml"),
+        Some("yaml") | Some("yml") => Some("application/yaml"),
         _ => None,
     }
 }

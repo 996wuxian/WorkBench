@@ -25,8 +25,7 @@ use crate::runtime::id::RuntimeId;
 use crate::runtime::manifest::RuntimeManifest;
 use crate::runtime::traits::{
     AgentRuntime, ConnectOpts, LiveSession, PermissionMode, ProbeResult, PromptImageInput,
-    PromptInput,
-    SessionSettings, SessionSettingsPatch,
+    PromptInput, SessionSettings, SessionSettingsPatch,
 };
 
 const HANDSHAKE_TIMEOUT_SECS: u64 = 45;
@@ -920,11 +919,7 @@ impl CodexAppServerClient {
         classify_codex_error(&detail)
     }
 
-    async fn prompt_once(
-        &self,
-        text: &str,
-        images: &[PromptImageInput],
-    ) -> Result<(), AgentError> {
+    async fn prompt_once(&self, text: &str, images: &[PromptImageInput]) -> Result<(), AgentError> {
         let thread_id = self
             .thread_id
             .lock()

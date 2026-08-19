@@ -179,6 +179,16 @@ export interface WorktreeChangeSnapshot {
   files: WorktreeChangeStat[];
 }
 
+export interface PickedFile {
+  name: string;
+  path: string;
+  extension?: string | null;
+  mimeType?: string | null;
+  sizeBytes: number;
+  isImage: boolean;
+  imageBytes?: number[] | null;
+}
+
 export interface SessionDeleteResult {
   deletedSessionId: string;
   deletedPath: string;

@@ -118,7 +118,6 @@ export function SessionSidebar({
   runtimePickOptions,
   sessions,
   sessionSnapshots,
-  sessionUnread,
   activeId,
   busy,
   showSearch,
@@ -378,11 +377,13 @@ export function SessionSidebar({
 
   const renderSession = (session: SessionMeta) => {
     const displayTitle = sessionDisplayTitle(session);
-    const displaySummary = sessionDisplaySummary(session);
     const sessionSnapshot = sessionSnapshots[session.id];
     const state = sessionSnapshot?.state ?? "idle";
     const stateLabel = sessionStateLabel(sessionSnapshot);
-    const unread = sessionUnread[session.id];
+    const statusClass =
+      state === "disconnected" && !sessionSnapshot?.lastError
+        ? "status-dot--idle"
+        : stateDotClass(state);
     return (
       <button
         type="button"
@@ -412,35 +413,19 @@ export function SessionSidebar({
           })
         }
       >
-        <span className={`runtime-dot runtime-dot--${session.runtimeId}`} />
+        <span
+          className={`status-dot session-item__status-dot ${statusClass}`}
+          title={`Host 状态：${stateLabel}`}
+          aria-label={`Host 状态：${stateLabel}`}
+        />
         <span className="session-item__body">
           <span className="session-item__topline">
-            <span className="session-item__title">{displayTitle}</span>
-            {session.pinned ? (
-              <span className="session-item__pin">
-                <IconPinnedFilled size={14} title="已置顶" />
-              </span>
-            ) : null}
-            <span className="session-item__time">
-              {formatSessionTime(session.nativeUpdatedAt ?? session.updatedAt)}
+            <span className="session-item__title" title={displayTitle}>
+              {displayTitle}
             </span>
           </span>
-          {displaySummary ? (
-            <span className="session-item__summary">{displaySummary}</span>
-          ) : null}
-          <span className="session-item__status-row">
-            <span className="session-item__state" title={`Host 状态：${stateLabel}`}>
-              <span className={`status-dot ${stateDotClass(state)}`} aria-hidden="true" />
-              {stateLabel}
-            </span>
-            {unread ? (
-              <span
-                className={`session-item__unread session-item__unread--${unread}`}
-                aria-label={unread === "completed" ? "后台会话已完成" : "后台会话发生错误"}
-              >
-                {unread === "completed" ? "完成" : "异常"}
-              </span>
-            ) : null}
+          <span className="session-item__time">
+            {formatSessionTime(session.nativeUpdatedAt ?? session.updatedAt)}
           </span>
         </span>
       </button>

@@ -65,6 +65,7 @@ pub fn run() {
             commands::skills_list,
             commands::project_worktree_changes,
             commands::project_pick_directory,
+            commands::project_pick_files,
             commands::session_list,
             commands::session_create,
             commands::session_update_presentation,

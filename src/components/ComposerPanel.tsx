@@ -13,8 +13,11 @@ import {
   IconClipboard,
   IconClose,
   IconExpand,
+  IconFileAdd,
+  IconFileText,
   IconFolder,
   IconPhoto,
+  IconPlus,
   IconQuote,
   IconPuzzle,
   IconRiskAsk,
@@ -41,6 +44,15 @@ export type ComposerImageAttachment = {
   previewUrl: string;
 };
 
+export type ComposerFileAttachment = {
+  id: string;
+  name: string;
+  path: string;
+  extension?: string | null;
+  mimeType?: string | null;
+  sizeBytes: number;
+};
+
 type Props = {
   draft: string;
   busy: boolean;
@@ -65,6 +77,7 @@ type Props = {
   projectPathBusy: boolean;
   quoteTarget: QuoteTarget | null;
   imageAttachments: ComposerImageAttachment[];
+  fileAttachments: ComposerFileAttachment[];
   imagePasteEnabled: boolean;
   composerInputRef: RefObject<HTMLTextAreaElement | null>;
   onDraftChange: (value: string) => void;
@@ -73,6 +86,9 @@ type Props = {
   onClearQuote: () => void;
   onPasteImages: (files: File[]) => void;
   onRemoveImageAttachment: (id: string) => void;
+  onPickFiles: () => void;
+  onRemoveFileAttachment: (id: string) => void;
+  onInputFocus: () => void;
   onModelChange: (value: string) => void;
   onReasoningEffortChange: (value: string) => void;
   onPermissionChange: (value: string) => void;
@@ -112,6 +128,7 @@ export function ComposerPanel({
   projectPathBusy,
   quoteTarget,
   imageAttachments,
+  fileAttachments,
   imagePasteEnabled,
   composerInputRef,
   onDraftChange,
@@ -120,6 +137,9 @@ export function ComposerPanel({
   onClearQuote,
   onPasteImages,
   onRemoveImageAttachment,
+  onPickFiles,
+  onRemoveFileAttachment,
+  onInputFocus,
   onModelChange,
   onReasoningEffortChange,
   onPermissionChange,
@@ -128,9 +148,11 @@ export function ComposerPanel({
   onPickProjectPath,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<ComposerContextMenu>(null);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [skillQuery, setSkillQuery] = useState("");
   const [previewImage, setPreviewImage] = useState<ComposerImageAttachment | null>(null);
+  const addMenuRef = useRef<HTMLDivElement | null>(null);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const skillsRef = useRef<HTMLDivElement | null>(null);
 
@@ -174,9 +196,37 @@ export function ComposerPanel({
   }, [skillsOpen]);
 
   useEffect(() => {
+    if (!addMenuOpen) return;
+    const close = () => setAddMenuOpen(false);
+    const handleMouseDown = (event: globalThis.MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Node && addMenuRef.current?.contains(target)) return;
+      close();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+
+    window.addEventListener("mousedown", handleMouseDown);
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("blur", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+
+    return () => {
+      window.removeEventListener("mousedown", handleMouseDown);
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [addMenuOpen]);
+
+  useEffect(() => {
     if (!inputDisabled) return;
     setContextMenu(null);
     setSkillsOpen(false);
+    setAddMenuOpen(false);
   }, [inputDisabled]);
 
   useEffect(() => {
@@ -206,7 +256,8 @@ export function ComposerPanel({
   const canSend =
     draft.trim().length > 0 ||
     selectedSkills.length > 0 ||
-    imageAttachments.length > 0;
+    imageAttachments.length > 0 ||
+    fileAttachments.length > 0;
 
   const insertTextAtSelection = (text: string, input: HTMLTextAreaElement | null) => {
     if (!text) return;
@@ -498,6 +549,36 @@ export function ComposerPanel({
             ))}
           </div>
         ) : null}
+        {fileAttachments.length > 0 ? (
+          <div className="composer-file-chips" aria-label="已添加的文件">
+            <span className="composer-file-chips__label">Files</span>
+            {fileAttachments.map((file) => (
+              <button
+                type="button"
+                key={file.id}
+                className="skill-chip skill-chip--composer file-chip"
+                title={`${file.path} · 左键或中键移除`}
+                disabled={inputDisabled}
+                onMouseDown={(event) => {
+                  if (event.button !== 1) return;
+                  event.preventDefault();
+                  if (inputDisabled) return;
+                  onRemoveFileAttachment(file.id);
+                  requestAnimationFrame(() => composerInputRef.current?.focus());
+                }}
+                onClick={() => {
+                  if (inputDisabled) return;
+                  onRemoveFileAttachment(file.id);
+                  requestAnimationFrame(() => composerInputRef.current?.focus());
+                }}
+              >
+                <IconFileText size={12} />
+                <span className="file-chip__name">{file.name}</span>
+                <IconClose size={12} />
+              </button>
+            ))}
+          </div>
+        ) : null}
         <textarea
           ref={composerInputRef}
           className="composer__input"
@@ -511,6 +592,7 @@ export function ComposerPanel({
           value={draft}
           disabled={inputDisabled}
           onChange={(e) => onDraftChange(e.target.value)}
+          onFocus={onInputFocus}
           onPaste={handlePaste}
           onContextMenu={openContextMenu}
           onKeyDown={(e) => {
@@ -522,29 +604,62 @@ export function ComposerPanel({
           }}
         />
         <div className="composer__footer">
-          {projectPathEditable ? (
-            <button
-              type="button"
-              className="composer-project-path__button"
-              title={
-                projectPath ??
-                "未选择工作目录；发送时将优先使用 D:\\workbench，其次 X:\\workbench"
-              }
-              disabled={projectPathBusy || inputDisabled}
-              onClick={onPickProjectPath}
-            >
-              <IconFolder size={15} />
-              <span>{projectPath ?? "未选择工作目录"}</span>
-            </button>
-          ) : (
-            <div
-              className="composer-project-path__display"
-              title={projectPath ?? "该旧会话没有记录工作目录"}
-            >
-              <IconFolder size={15} />
-              <span>{projectPath ?? "未记录工作目录"}</span>
+          <div className="composer__footer-left">
+            <div className="composer-add" ref={addMenuRef}>
+              <button
+                type="button"
+                className={"composer-add__trigger" + (addMenuOpen ? " is-open" : "")}
+                title="添加"
+                aria-label="添加"
+                aria-haspopup="menu"
+                aria-expanded={addMenuOpen}
+                disabled={inputDisabled}
+                onClick={() => setAddMenuOpen((open) => !open)}
+              >
+                <IconPlus size={16} />
+              </button>
+              {addMenuOpen ? (
+                <div className="composer-add__menu" role="menu" aria-label="添加">
+                  <button
+                    type="button"
+                    className="composer-add__item"
+                    role="menuitem"
+                    onClick={() => {
+                      setAddMenuOpen(false);
+                      onPickFiles();
+                      requestAnimationFrame(() => composerInputRef.current?.focus());
+                    }}
+                  >
+                    <IconFileAdd size={14} />
+                    <span>添加文件</span>
+                  </button>
+                </div>
+              ) : null}
             </div>
-          )}
+            {projectPathEditable ? (
+              <button
+                type="button"
+                className="composer-project-path__button"
+                title={
+                  projectPath ??
+                  "未选择工作目录；发送时将优先使用 D:\\workbench，其次 X:\\workbench"
+                }
+                disabled={projectPathBusy || inputDisabled}
+                onClick={onPickProjectPath}
+              >
+                <IconFolder size={15} />
+                <span>{projectPath ?? "未选择工作目录"}</span>
+              </button>
+            ) : (
+              <div
+                className="composer-project-path__display"
+                title={projectPath ?? "该旧会话没有记录工作目录"}
+              >
+                <IconFolder size={15} />
+                <span>{projectPath ?? "未记录工作目录"}</span>
+              </div>
+            )}
+          </div>
           {streaming ? (
             <button
               type="button"

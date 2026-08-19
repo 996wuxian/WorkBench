@@ -22,6 +22,7 @@ import {
   IconCopy as TbCopy,
   IconFileExport as TbFileExport,
   IconFileText as TbFileText,
+  IconFileUpload as TbFileUpload,
   IconFirstAidKit as TbFirstAidKit,
   IconFolder as TbFolder,
   IconGitFork as TbGitFork,
@@ -167,6 +168,7 @@ export const IconArchiveOff = wrap(TbArchiveOff);
 export const IconExpand = wrap(TbArrowsMaximize);
 export const IconFileExport = wrap(TbFileExport);
 export const IconFileText = wrap(TbFileText);
+export const IconFileAdd = wrap(TbFileUpload);
 export const IconGitFork = wrap(TbGitFork);
 export const IconHistory = wrap(TbHistory);
 export const IconPackageExport = wrap(TbPackageExport);

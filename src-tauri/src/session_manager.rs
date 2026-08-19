@@ -2143,9 +2143,7 @@ impl SessionManager {
 
         let mgr = std::sync::Arc::clone(&self);
         tokio::spawn(async move {
-            let result = live
-                .prompt(PromptInput { text, images })
-                .await;
+            let result = live.prompt(PromptInput { text, images }).await;
             if let Err(error) = &result {
                 mgr.record_error(&session_id, error);
                 mgr.record_trace(&session_id, "prompt_failed", error_trace_details(error));
@@ -2334,7 +2332,11 @@ fn prompt_summary_with_images(text: &str, images: &[PromptImageInput]) -> Option
     if images.is_empty() {
         None
     } else {
-        Some(format!("{} image{}", images.len(), if images.len() == 1 { "" } else { "s" }))
+        Some(format!(
+            "{} image{}",
+            images.len(),
+            if images.len() == 1 { "" } else { "s" }
+        ))
     }
 }
 
