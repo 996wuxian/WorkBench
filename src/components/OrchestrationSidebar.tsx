@@ -25,6 +25,7 @@ export function OrchestrationSidebar({
   onBackToChat,
   onHideSidebar,
   onToggleMaximize,
+  onOpenAbout,
 }: {
   hidden: boolean;
   tasks: OrchestrationTask[];
@@ -34,6 +35,7 @@ export function OrchestrationSidebar({
   onBackToChat: () => void;
   onHideSidebar: () => void;
   onToggleMaximize: () => void;
+  onOpenAbout: () => void;
 }) {
   return (
     <aside
@@ -52,6 +54,15 @@ export function OrchestrationSidebar({
           onClick={onHideSidebar}
         >
           <IconPanel size={16} />
+        </button>
+        <button
+          type="button"
+          className="sidebar-brand-row__title-button sidebar-brand-row__title-button--compact"
+          onClick={onOpenAbout}
+          aria-label="查看 Workbench 应用信息"
+          title="关于 Workbench"
+        >
+          Workbench
         </button>
         <div className="sidebar-chrome__drag" data-tauri-drag-region />
       </div>

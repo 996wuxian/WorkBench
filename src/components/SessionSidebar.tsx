@@ -109,6 +109,7 @@ type Props = {
   ) => void;
   onSyncNativeSessions: (mode: "reset" | "more") => void;
   onOpenSettings: () => void;
+  onOpenAbout: () => void;
 };
 
 export function SessionSidebar({
@@ -145,6 +146,7 @@ export function SessionSidebar({
   onProjectReorder,
   onSyncNativeSessions,
   onOpenSettings,
+  onOpenAbout,
 }: Props) {
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(
     () => new Set(),
@@ -461,7 +463,15 @@ export function SessionSidebar({
             height={28}
             draggable={false}
           />
-          <span data-tauri-drag-region>Workbench</span>
+          <button
+            type="button"
+            className="sidebar-brand-row__title-button"
+            onClick={onOpenAbout}
+            aria-label="查看 Workbench 应用信息"
+            title="关于 Workbench"
+          >
+            Workbench
+          </button>
         </div>
         <button
           type="button"

@@ -52,6 +52,14 @@ type DeleteTargetItem = {
 };
 
 type Props = {
+  aboutOpen: boolean;
+  appVersion: string;
+  appDevelopmentDate: string;
+  appRepositoryUrl: string;
+  appDownloadUrl: string;
+  appDataDir: string | null;
+  onCloseAbout: () => void;
+  onCopyAboutLink: (label: string, value: string) => void;
   settingsOpen: boolean;
   settingsSection: SettingsSection;
   uiFontSize: UiFontSize;
@@ -109,6 +117,14 @@ type Props = {
 };
 
 export function AppOverlays({
+  aboutOpen,
+  appVersion,
+  appDevelopmentDate,
+  appRepositoryUrl,
+  appDownloadUrl,
+  appDataDir,
+  onCloseAbout,
+  onCopyAboutLink,
   settingsOpen,
   settingsSection,
   uiFontSize,
@@ -213,6 +229,15 @@ export function AppOverlays({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onCloseRename, renameSessionBusy, renameSessionId]);
 
+  useEffect(() => {
+    if (!aboutOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onCloseAbout();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [aboutOpen, onCloseAbout]);
+
   const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
     const items = Array.from(
@@ -257,6 +282,120 @@ export function AppOverlays({
 
   return (
     <>
+      {aboutOpen
+        ? createPortal(
+            <div
+              className="settings-overlay"
+              role="presentation"
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget) onCloseAbout();
+              }}
+            >
+              <section
+                className="settings-dialog about-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="about-dialog-title"
+                onKeyDown={trapDialogFocus}
+              >
+                <div className="settings-dialog__head about-dialog__head">
+                  <div className="about-dialog__identity">
+                    <img
+                      className="about-dialog__logo"
+                      src="/logo.png"
+                      alt=""
+                      width={40}
+                      height={40}
+                      draggable={false}
+                    />
+                    <div>
+                      <div className="settings-dialog__title" id="about-dialog-title">
+                        Workbench
+                      </div>
+                      <div className="settings-dialog__sub">
+                        本机多 Agent 桌面指挥台
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--icon settings-dialog__close"
+                    aria-label="关闭 Workbench 应用信息"
+                    title="关闭 Workbench 应用信息"
+                    onClick={onCloseAbout}
+                    autoFocus
+                  >
+                    <IconClose size={16} />
+                  </button>
+                </div>
+                <div className="settings-dialog__body about-dialog__body">
+                  <dl className="about-dialog__list">
+                    <div>
+                      <dt>版本号</dt>
+                      <dd>v{appVersion}</dd>
+                    </div>
+                    <div>
+                      <dt>开发日期</dt>
+                      <dd>{appDevelopmentDate}</dd>
+                    </div>
+                    <div>
+                      <dt>作者</dt>
+                      <dd>996wuxian</dd>
+                    </div>
+                    <div>
+                      <dt>仓库地址</dt>
+                      <dd>
+                        <button
+                          type="button"
+                          className="about-dialog__link"
+                          onClick={() => onCopyAboutLink("仓库地址", appRepositoryUrl)}
+                          title="复制仓库地址"
+                        >
+                          {appRepositoryUrl}
+                        </button>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>下载地址</dt>
+                      <dd>
+                        <button
+                          type="button"
+                          className="about-dialog__link"
+                          onClick={() => onCopyAboutLink("下载地址", appDownloadUrl)}
+                          title="复制下载地址"
+                        >
+                          {appDownloadUrl}
+                        </button>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>数据目录</dt>
+                      <dd>{appDataDir ?? "浏览器预览模式未连接 Host"}</dd>
+                    </div>
+                  </dl>
+                  <div className="session-delete-dialog__actions about-dialog__actions">
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      onClick={() => onCopyAboutLink("仓库地址", appRepositoryUrl)}
+                    >
+                      复制仓库
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--primary"
+                      onClick={() => onCopyAboutLink("下载地址", appDownloadUrl)}
+                    >
+                      复制 Release
+                    </button>
+                  </div>
+                </div>
+              </section>
+            </div>,
+            overlayHost,
+          )
+        : null}
+
       {settingsOpen
         ? createPortal(
             <div

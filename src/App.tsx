@@ -132,6 +132,10 @@ const CHAT_BOTTOM_THRESHOLD = 80;
 const CHAT_TOP_THRESHOLD = 48;
 const PROJECT_ORDER_STORAGE_KEY = "workbench.projectOrder";
 const PINNED_PROJECTS_STORAGE_KEY = "workbench.pinnedProjects";
+const APP_VERSION = __APP_VERSION__;
+const APP_DEVELOPMENT_DATE = "2026-08-19";
+const APP_REPOSITORY_URL = "https://github.com/996wuxian/WorkBench";
+const APP_DOWNLOAD_URL = "https://github.com/996wuxian/WorkBench/releases";
 
 type DeleteSessionScope =
   | { kind: "sessions" }
@@ -240,6 +244,7 @@ function runtimeRouteDescription(runtime: RuntimeInfo): string {
 
 
 export default function App() {
+  const [aboutOpen, setAboutOpen] = useState(false);
   const [activeView, setActiveView] = useState<AppView>("chat");
   const [orchestrationTasks, setOrchestrationTasks] = useState<
     OrchestrationTask[]
@@ -1243,6 +1248,17 @@ export default function App() {
     refreshCodexRoute,
     refreshRuntimes,
   ]);
+
+  const copyAboutLink = useCallback(async (label: string, value: string) => {
+    try {
+      await copyTextToClipboard(value);
+      setStatusLine(`已复制${label} · ${value}`);
+      emitToast({ message: `已复制${label}`, tone: "success" });
+    } catch (error) {
+      setStatusLine(`复制${label}失败：${String(error)}`);
+      emitToast({ message: `复制${label}失败`, tone: "danger" });
+    }
+  }, []);
 
   // A stored engine pick can point at a runtime that was since disabled or
   // removed from the manifests; fall back to the first enabled one.
@@ -2803,6 +2819,7 @@ export default function App() {
             onBackToChat={() => setActiveView("chat")}
             onHideSidebar={() => setSidebarHidden(true)}
             onToggleMaximize={() => void toggleMaximizeFromTitlebar()}
+            onOpenAbout={() => setAboutOpen(true)}
           />
         ) : (
           <SessionSidebar
@@ -2862,6 +2879,7 @@ export default function App() {
               refreshSettingsDiagnostics();
               void refreshAppSettings();
             }}
+            onOpenAbout={() => setAboutOpen(true)}
           />
         )}
 
@@ -2905,7 +2923,15 @@ export default function App() {
               ) : (
                 <>
                   <IconChat size={16} />
-                  <h1 className="main__title">Workbench</h1>
+                  <button
+                    type="button"
+                    className="main__title main__title-button"
+                    onClick={() => setAboutOpen(true)}
+                    aria-label="查看 Workbench 应用信息"
+                    title="关于 Workbench"
+                  >
+                    Workbench
+                  </button>
                   <span className="main__sub">{statusLine}</span>
                 </>
               )}
@@ -3079,6 +3105,14 @@ export default function App() {
       </div>
 
       <AppOverlays
+        aboutOpen={aboutOpen}
+        appVersion={APP_VERSION}
+        appDevelopmentDate={APP_DEVELOPMENT_DATE}
+        appRepositoryUrl={APP_REPOSITORY_URL}
+        appDownloadUrl={APP_DOWNLOAD_URL}
+        appDataDir={appDataDir}
+        onCloseAbout={() => setAboutOpen(false)}
+        onCopyAboutLink={(label, value) => void copyAboutLink(label, value)}
         settingsOpen={settingsOpen}
         settingsSection={settingsSection}
         uiFontSize={uiFontSize}
