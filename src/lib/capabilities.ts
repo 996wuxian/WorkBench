@@ -104,6 +104,8 @@ export function protocolLabel(protocol: string): string {
       return "Codex App Server";
     case "claude_code":
       return "Claude Code";
+    case "dsh_headless":
+      return "DSH Headless";
     case "stream_json":
       return "stream-json";
     case "stub":

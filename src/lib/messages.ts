@@ -165,6 +165,9 @@ export function normalizeLoadedMessages(
   snapshot?: SessionSnapshot,
 ): ChatMessage[] {
   const normalized = messages.map((message) => {
+    if (message.completedAt && (message.streaming || message.pending)) {
+      return { ...message, streaming: false, pending: false };
+    }
     if (
       message.role === "assistant" &&
       !message.streaming &&

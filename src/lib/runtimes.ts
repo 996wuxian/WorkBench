@@ -10,7 +10,7 @@ import type { PermissionMode, RuntimeId, RuntimeInfo } from "./types";
 
 let registry: RuntimeInfo[] = [];
 
-const RUNTIME_DISPLAY_ORDER = ["claude", "codex", "kimi", "grok"];
+const RUNTIME_DISPLAY_ORDER = ["claude", "codex", "deepseek-harness", "kimi", "grok"];
 
 /** Replace the cached registry. Returns the list for convenient chaining. */
 export function hydrateRuntimes(runtimes: RuntimeInfo[]): RuntimeInfo[] {
@@ -64,6 +64,7 @@ export function runtimeHasPermissionGate(
 export const runtimeAvatarSrc: Partial<Record<RuntimeId, string>> = {
   grok: "/runtime-icons/grok.webp",
   codex: "/runtime-icons/codex.png",
+  "deepseek-harness": "/runtime-icons/deepseek.png",
   claude: "/runtime-icons/claude.png",
   kimi: "/runtime-icons/kimi.png",
 };

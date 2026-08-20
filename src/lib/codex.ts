@@ -71,6 +71,10 @@ export function fallbackModelOptions(
     add("gpt-5.5", "fallback");
     add("gpt-5.4", "fallback");
   }
+  if (runtimeId === "deepseek-harness") {
+    add("deepseek-v4-flash", "fallback");
+    add("deepseek-v4-pro", "fallback");
+  }
   add("default", "fallback");
 
   return Array.from(values.values()).map((item) => ({

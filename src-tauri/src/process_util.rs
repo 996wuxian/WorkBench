@@ -79,6 +79,13 @@ pub fn enriched_path_env() -> Option<String> {
         push(&format!(r"{home_s}\.codex\bin"));
         push(&format!(r"{home_s}\.local\bin"));
         push(&format!(r"{home_s}\AppData\Roaming\npm"));
+        if let Ok(nvm_symlink) = std::env::var("NVM_SYMLINK") {
+            push(&nvm_symlink);
+            push(&format!(r"{nvm_symlink}\node_global"));
+        }
+        if let Ok(nvm_home) = std::env::var("NVM_HOME") {
+            push(&nvm_home);
+        }
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
             push(&format!(r"{local}\Microsoft\WinGet\Links"));
         }

@@ -36,7 +36,7 @@ Workbench 是一款基于 **Tauri 2 + React 19 + TypeScript + Vite** 的本机�
 
 ## 功能亮点
 
-- 多 runtime：已启用 Claude Code、Codex、Kimi Code 和 Grok Build。
+- 多 runtime：已启用 Claude Code、Codex、DeepSeek Harness、Kimi Code 和 Grok Build。
 - 统一会话：Workbench 维护本地会话镜像、消息 journal、snapshot 和 trace。
 - 项目分组：会话按工作目录分组展示，打开一个项目时其它项目自动收起。
 - 聊天输入：会话运行或对方正在回复时会禁用输入，避免重复提交。
@@ -53,6 +53,7 @@ Workbench 是一款基于 **Tauri 2 + React 19 + TypeScript + Vite** 的本机�
 | --- | --- | --- | --- |
 | Claude Code | `claude -p --output-format stream-json` | 已启用 | 支持本机 Claude 配置、会话恢复、MCP 权限审批桥 |
 | Codex | `codex app-server --stdio` | 已启用 | 支持模型/推理档位、会话恢复、权限审批和图片输入 |
+| DeepSeek Harness | `dsh --profile headless "task"` | 已启用 | 第一阶段接一次性 headless 任务；复用 DSH profile 配置，不自动运行 npx，不接完整 Web/事件桥 |
 | Kimi Code | ACP | 已启用 | 依赖本机 CLI 与 ACP 可用性 |
 | Grok Build | ACP: `grok agent stdio` | 已启用 | 支持流式消息、工具事件和 Host 权限门 |
 
@@ -66,6 +67,7 @@ React UI
         -> ACP adapters
         -> Codex App Server adapter
         -> Claude stream-json adapter
+        -> DeepSeek Harness headless adapter
 ```
 
 | 路径 | 职责 |

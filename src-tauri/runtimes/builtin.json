@@ -1,5 +1,63 @@
 [
   {
+    "id": "deepseek-harness",
+    "displayName": "DeepSeek Harness",
+    "protocol": "dsh_headless",
+    "enabled": true,
+    "command": "dsh",
+    "preStdioArgs": [],
+    "stdioArgs": [],
+    "versionArgs": [
+      "--version"
+    ],
+    "probePaths": [
+      "%NVM_SYMLINK%\\node_global\\dsh.cmd",
+      "%NVM_SYMLINK%\\node_global\\dsh.ps1",
+      "%APPDATA%\\npm\\dsh.cmd",
+      "%APPDATA%\\npm\\dsh.ps1",
+      "~/.local/bin/dsh"
+    ],
+    "homeEnv": "DSH_HOME",
+    "homeCandidates": [
+      "~/.dsh"
+    ],
+    "homeMarkers": [],
+    "defaultPermissionMode": "ask",
+    "permissionModes": [
+      "ask",
+      "read_only",
+      "full_access"
+    ],
+    "models": [
+      {
+        "value": "deepseek-v4-flash",
+        "label": "DeepSeek V4 Flash",
+        "hint": "DeepSeek Harness 官方默认 catalog"
+      },
+      {
+        "value": "deepseek-v4-pro",
+        "label": "DeepSeek V4 Pro",
+        "hint": "DeepSeek Harness 官方默认 catalog"
+      }
+    ],
+    "capabilities": {
+      "streaming": false,
+      "thoughts": false,
+      "tools": false,
+      "permissionGate": false,
+      "sessionResume": false,
+      "multiTurn": false,
+      "modelsList": false,
+      "reasoningEffort": true,
+      "planMode": false,
+      "slashCommands": false,
+      "imagesIn": false,
+      "imagesOut": false,
+      "protocol": "dsh_headless"
+    },
+    "notes": "第一阶段接入 `dsh --profile headless` 一次性任务；不会自动运行 npx 下载包。完整 Web/事件桥后续单独接。"
+  },
+  {
     "id": "claude",
     "displayName": "Claude Code",
     "protocol": "claude_code",

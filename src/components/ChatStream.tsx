@@ -43,6 +43,63 @@ export function AssistantTiming({ message }: { message: ChatMessage }) {
   );
 }
 
+const loadingPixelIndexes = Array.from({ length: 9 }, (_, index) => index);
+
+export function LoadingState({
+  kind,
+  label,
+  detail,
+  startedAt,
+}: {
+  kind: "base" | "thinking" | "tool";
+  label: string;
+  detail?: string | null;
+  startedAt?: string | null;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNow(Date.now());
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const elapsed = formatLoadingElapsed(startedAt, now);
+  const detailText = detail?.trim();
+
+  return (
+    <div
+      className={`loading-state loading-state--${kind}`}
+      role="status"
+      aria-live="polite"
+      title={[label, detailText, elapsed].filter(Boolean).join(" · ")}
+    >
+      <span className="loading-state__pixels" aria-hidden="true">
+        {loadingPixelIndexes.map((index) => (
+          <span key={index} />
+        ))}
+      </span>
+      <span className="loading-state__label">{label}</span>
+      {detailText ? (
+        <span className="loading-state__detail">{detailText}</span>
+      ) : null}
+      {elapsed ? (
+        <span className="loading-state__elapsed">{elapsed}</span>
+      ) : null}
+    </div>
+  );
+}
+
+function formatLoadingElapsed(startedAt: string | null | undefined, now: number) {
+  if (!startedAt) return null;
+  const started = new Date(startedAt).getTime();
+  if (!Number.isFinite(started)) return null;
+  const seconds = Math.max(0, (now - started) / 1000);
+  if (seconds < 100) return `${seconds.toFixed(1)}s`;
+  return `${Math.round(seconds)}s`;
+}
+
 export function AssistantWorktreeChanges({
   files,
 }: {
@@ -297,15 +354,15 @@ export function StreamingText({
   return (
     <span
       className={
-        "typing-stream" +
-        (visibleCount >= characters.length ? " typing-stream--done" : "")
+        "streaming-text" +
+        (visibleCount >= characters.length ? " streaming-text--done" : "")
       }
     >
-      <span className="typing-stream__text" aria-live="polite">
+      <span className="streaming-text__text" aria-live="polite" aria-atomic="true">
         {characters.slice(0, visibleCount).join("")}
       </span>
-      {showCursor ? (
-        <span className="typing-stream__cursor" aria-hidden="true" />
+      {showCursor && visibleCount < characters.length ? (
+        <span className="streaming-text__cursor" aria-hidden="true" />
       ) : null}
     </span>
   );

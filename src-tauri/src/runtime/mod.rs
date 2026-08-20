@@ -9,6 +9,7 @@ mod capabilities;
 pub mod catalog;
 mod claude;
 mod codex;
+mod dsh;
 mod id;
 pub mod manifest;
 mod registry;

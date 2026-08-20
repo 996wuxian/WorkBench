@@ -31,6 +31,8 @@ pub enum RuntimeProtocol {
     CodexAppServer,
     /// `claude -p --output-format stream-json`. Bespoke Claude Code CLI adapter.
     ClaudeCode,
+    /// `dsh --profile headless "task"`. One-shot DeepSeek Harness runner.
+    DshHeadless,
 }
 
 /// Where the runtime's own session history lives, for read-only import.
@@ -219,7 +221,13 @@ pub fn expand_path(raw: &str) -> String {
     }
     out = out.replace("%USERPROFILE%", &home_str);
     out = out.replace("$HOME", &home_str);
-    for key in ["LOCALAPPDATA", "APPDATA", "PROGRAMFILES"] {
+    for key in [
+        "LOCALAPPDATA",
+        "APPDATA",
+        "PROGRAMFILES",
+        "NVM_HOME",
+        "NVM_SYMLINK",
+    ] {
         if let Ok(value) = std::env::var(key) {
             out = out.replace(&format!("%{key}%"), &value);
         }

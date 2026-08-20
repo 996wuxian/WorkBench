@@ -11,6 +11,7 @@ use crate::runtime::acp::AcpRuntime;
 use crate::runtime::capabilities::RuntimeCapabilities;
 use crate::runtime::claude::ClaudeRuntime;
 use crate::runtime::codex::CodexRuntime;
+use crate::runtime::dsh::DshRuntime;
 use crate::runtime::id::RuntimeId;
 use crate::runtime::manifest::{self, RuntimeProtocol};
 use crate::runtime::traits::{AgentRuntime, PermissionMode, ProbeResult};
@@ -43,6 +44,7 @@ pub fn registry() -> &'static [Arc<dyn AgentRuntime>] {
                     RuntimeProtocol::Acp => Arc::new(AcpRuntime::new(m)),
                     RuntimeProtocol::CodexAppServer => Arc::new(CodexRuntime::new(m)),
                     RuntimeProtocol::ClaudeCode => Arc::new(ClaudeRuntime::new(m)),
+                    RuntimeProtocol::DshHeadless => Arc::new(DshRuntime::new(m)),
                 }
             })
             .collect()

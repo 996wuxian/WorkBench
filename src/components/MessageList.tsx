@@ -19,11 +19,13 @@ import { MarkdownMessage, renderInlineMarkdown } from "./Markdown";
 import {
   AssistantTiming,
   AssistantWorktreeChanges,
+  LoadingState,
   StreamingText,
 } from "./ChatStream";
 import {
   IconChat,
   IconChevronDown,
+  IconChevronRight,
   IconChevronUp,
   IconClose,
   IconCopy,
@@ -58,6 +60,15 @@ function isAgentTurnRole(role: ChatMessage["role"]): boolean {
   return role === "assistant" || role === "thought" || role === "tool";
 }
 
+function isInternalProcessMessage(message: ChatMessage): boolean {
+  return (
+    message.role === "tool" &&
+    (message.toolName === "dsh_headless" ||
+      message.toolCallId?.startsWith("dsh_headless:") ||
+      message.toolTitle === "DeepSeek Harness headless")
+  );
+}
+
 function isFirstAgentTurnItem(
   groups: readonly MessageGroup[],
   index: number,
@@ -71,6 +82,35 @@ function isFirstAgentTurnItem(
     if (role && isAgentTurnRole(role)) return false;
   }
   return true;
+}
+
+function isThinkingShell(message: ChatMessage): boolean {
+  return Boolean(
+    message.role === "assistant" &&
+      message.pending &&
+      message.streaming &&
+      !message.content,
+  );
+}
+
+function isHiddenEmptyAssistantArtifact(message: ChatMessage): boolean {
+  return Boolean(
+    message.role === "assistant" &&
+      !message.streaming &&
+      !message.pending &&
+      !message.content,
+  );
+}
+
+function isProcessGroupMessage(
+  message: ChatMessage,
+  turnStreaming: boolean,
+): boolean {
+  return (
+    message.role === "thought" ||
+    message.role === "tool" ||
+    (turnStreaming && isThinkingShell(message))
+  );
 }
 
 export interface MessageListProps {
@@ -87,6 +127,7 @@ export interface MessageListProps {
   /** Runtime to attribute a message to when it carries no id of its own. */
   fallbackRuntimeId: RuntimeId | null;
   assistantTypingUntil: Record<string, number>;
+  turnStreaming: boolean;
   skills: SkillInfo[];
   onTypingProgress: () => void;
   onQuote: (target: QuoteTarget) => void;
@@ -396,6 +437,137 @@ function ProcessRow({
   );
 }
 
+type ProcessChip = {
+  key: string;
+  label: string;
+  count: number;
+  active: boolean;
+};
+
+function ProcessChipStack({
+  items,
+  activeItemId,
+  firstAgentTurnItem,
+  avatarSrc,
+  focusedMessageId,
+  renderProcessContent,
+}: {
+  items: ChatMessage[];
+  activeItemId: string | null;
+  firstAgentTurnItem: boolean;
+  avatarSrc: string | null;
+  focusedMessageId: string | null;
+  renderProcessContent: (message: ChatMessage, itemActive: boolean) => ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const chips = useMemo(
+    () => summarizeProcessChips(items, activeItemId),
+    [activeItemId, items],
+  );
+  const itemCount = items.length;
+  const activeItem =
+    activeItemId === null ? null : items.find((item) => item.id === activeItemId) ?? null;
+  const activeLabel = activeItem ? processItemLabel(activeItem) : null;
+  const summary =
+    itemCount === 1
+      ? "1 个过程"
+      : `${itemCount} 个过程`;
+
+  return (
+    <div
+      className={
+        "message-process-stack message-process-stack--chips" +
+        (!firstAgentTurnItem || !avatarSrc
+          ? " message-process-stack--continuation"
+          : "")
+      }
+    >
+      <button
+        type="button"
+        className={
+          "message-tool-chips" +
+          (activeItemId ? " message-tool-chips--active" : "")
+        }
+        aria-expanded={expanded}
+        title={expanded ? "收起工具过程" : "展开工具过程"}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <span className="message-tool-chips__chevron" aria-hidden="true">
+          {expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
+        </span>
+        <span className="message-tool-chips__items">
+          {chips.map((chip) => (
+            <span
+              key={chip.key}
+              className={
+                "message-tool-chip" +
+                (chip.active ? " message-tool-chip--active" : "")
+              }
+            >
+              <span className="message-tool-chip__dot" aria-hidden="true" />
+              <span className="message-tool-chip__label">{chip.label}</span>
+              {chip.count > 1 ? (
+                <span className="message-tool-chip__count">{chip.count}</span>
+              ) : null}
+            </span>
+          ))}
+        </span>
+        <span className="message-tool-chips__summary">
+          {activeLabel ? `正在 ${activeLabel}` : summary}
+        </span>
+      </button>
+      {expanded ? (
+        <div className="message-tool-chips__details">
+          {items.map((item) => (
+            <div
+              key={item.id}
+              data-message-id={item.id}
+              className={
+                "message-block message-block--assistant message-block--process" +
+                (focusedMessageId === item.id ? " message-node-focus" : "")
+              }
+            >
+              {renderProcessContent(item, item.id === activeItemId)}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function summarizeProcessChips(
+  items: ChatMessage[],
+  activeItemId: string | null,
+): ProcessChip[] {
+  const chips: ProcessChip[] = [];
+  const positions = new Map<string, number>();
+  for (const item of items) {
+    const label = processItemLabel(item);
+    const key = label.toLowerCase();
+    const active = item.id === activeItemId;
+    const index = positions.get(key);
+    if (index === undefined) {
+      positions.set(key, chips.length);
+      chips.push({ key, label, count: 1, active });
+      continue;
+    }
+    const chip = chips[index];
+    chips[index] = {
+      ...chip,
+      count: chip.count + 1,
+      active: chip.active || active,
+    };
+  }
+  return chips;
+}
+
+function processItemLabel(message: ChatMessage): string {
+  if (message.role === "thought") return "Think";
+  if (message.role === "tool") return processToolLabel(message);
+  return "Base";
+}
+
 function MessageAvatar({
   runtimeId,
   src,
@@ -429,7 +601,21 @@ function processToolLabel(message: ChatMessage): string {
   const name = (message.toolName ?? "").trim().toLowerCase();
   const rawTitle = (message.toolTitle ?? "").trim();
   const title = rawTitle.toLowerCase();
-  if (name === "command") return "Bash";
+  if (name === "command") {
+    if (
+      title.includes("powershell") ||
+      title.includes("pwsh") ||
+      title.includes("set-content") ||
+      title.includes("get-content") ||
+      title.includes("new-item") ||
+      title.includes("copy-item") ||
+      title.includes("move-item") ||
+      title.includes("remove-item")
+    ) {
+      return "PowerShell";
+    }
+    return "Bash";
+  }
   if (name.includes("read") || title.startsWith("read")) return "Read";
   if (name.includes("write") || title.startsWith("write")) return "Write";
   if (name.includes("edit") || title.startsWith("edit")) return "Edit";
@@ -456,6 +642,36 @@ function processThoughtDetail(message: ChatMessage): string | undefined {
   return detail || undefined;
 }
 
+function assistantLoadingState(message: ChatMessage):
+  | {
+      kind: "base" | "thinking";
+      label: string;
+      detail: string;
+    }
+  | null {
+  if (
+    message.role !== "assistant" ||
+    (!message.streaming && !message.pending) ||
+    message.completedAt
+  ) {
+    return null;
+  }
+
+  if (!message.content.trim()) {
+    return {
+      kind: "thinking",
+      label: "Thinking",
+      detail: "等待模型输出",
+    };
+  }
+
+  return {
+    kind: "base",
+    label: "Base",
+    detail: "正在生成回复",
+  };
+}
+
 function isProcessToolActive(message: ChatMessage): boolean {
   const status = message.toolStatus?.trim().toLowerCase();
   return (
@@ -468,9 +684,22 @@ function isProcessToolActive(message: ChatMessage): boolean {
 
 function ThoughtBubbleContent({
   message,
+  active,
 }: {
   message: ChatMessage;
+  active: boolean;
 }) {
+  if (active && (message.streaming || message.pending)) {
+    return (
+      <LoadingState
+        kind="thinking"
+        label="Thinking"
+        detail={processThoughtDetail(message)}
+        startedAt={message.createdAt}
+      />
+    );
+  }
+
   return (
     <ProcessRow
       kind="think"
@@ -485,6 +714,7 @@ function AssistantBubbleContent({
   message,
   typing,
   thinking,
+  active,
   skills,
   revealImmediately,
   onTypingProgress,
@@ -492,6 +722,7 @@ function AssistantBubbleContent({
   message: ChatMessage;
   typing: boolean;
   thinking: boolean;
+  active: boolean;
   skills: SkillInfo[];
   revealImmediately?: boolean;
   onTypingProgress: () => void;
@@ -501,19 +732,46 @@ function AssistantBubbleContent({
   const blocks = new Map(
     (message.worktreeChangeBlocks ?? []).map((block) => [block.id, block.files]),
   );
+  const loadingState = active ? assistantLoadingState(message) : null;
   if (blocks.size === 0) {
     return typing ? (
-      <StreamingText
-        content={message.content || ""}
-        revealImmediately={revealImmediately}
-        onProgress={onTypingProgress}
-      />
+      <>
+        <div className="message__streaming-copy">
+          <StreamingText
+            content={message.content || ""}
+            revealImmediately={revealImmediately}
+            onProgress={onTypingProgress}
+          />
+        </div>
+        {loadingState ? (
+          <div className="message__assistant-loading">
+            <LoadingState
+              kind={loadingState.kind}
+              label={loadingState.label}
+              detail={loadingState.detail}
+              startedAt={message.createdAt}
+            />
+          </div>
+        ) : null}
+      </>
     ) : (
-      <MarkdownMessage
-        content={message.content || ""}
-        skills={skills}
-        formatLongParagraphs
-      />
+      <>
+        <MarkdownMessage
+          content={message.content || ""}
+          skills={skills}
+          formatLongParagraphs
+        />
+        {loadingState ? (
+          <div className="message__assistant-loading">
+            <LoadingState
+              kind={loadingState.kind}
+              label={loadingState.label}
+              detail={loadingState.detail}
+              startedAt={message.createdAt}
+            />
+          </div>
+        ) : null}
+      </>
     );
   }
 
@@ -541,12 +799,14 @@ function AssistantBubbleContent({
         return (
           <div key={`text:${index}`} className="message__content-segment">
             {typing ? (
-              <StreamingText
-                content={text}
-                revealImmediately={revealImmediately}
-                showCursor={index === lastTextPartIndex}
-                onProgress={onTypingProgress}
-              />
+              <div className="message__streaming-copy">
+                <StreamingText
+                  content={text}
+                  revealImmediately={revealImmediately}
+                  showCursor={index === lastTextPartIndex}
+                  onProgress={onTypingProgress}
+                />
+              </div>
             ) : (
               <MarkdownMessage
                 content={text}
@@ -557,6 +817,16 @@ function AssistantBubbleContent({
           </div>
         );
       })}
+      {loadingState ? (
+        <div className="message__assistant-loading">
+          <LoadingState
+            kind={loadingState.kind}
+            label={loadingState.label}
+            detail={loadingState.detail}
+            startedAt={message.createdAt}
+          />
+        </div>
+      ) : null}
     </>
   );
 }
@@ -588,6 +858,7 @@ export function MessageList({
   onRevealMessage,
   fallbackRuntimeId,
   assistantTypingUntil,
+  turnStreaming,
   skills,
   onTypingProgress,
   onQuote,
@@ -612,6 +883,53 @@ export function MessageList({
   const assistantLabel = fallbackRuntimeId
     ? runtimeLabel(fallbackRuntimeId)
     : "Agent";
+  const visibleGroups = useMemo(
+    () =>
+      groups
+        .filter(
+          ({ message }) =>
+            !isInternalProcessMessage(message) &&
+            !isHiddenEmptyAssistantArtifact(message),
+        )
+        .map(({ message, toolMessages }) => ({
+          message,
+          toolMessages: toolMessages.filter(
+            (tool) => !isInternalProcessMessage(tool),
+          ),
+        })),
+    [groups],
+  );
+  const activeTurnStartIndex = useMemo(() => {
+    for (let index = visibleGroups.length - 1; index >= 0; index -= 1) {
+      if (visibleGroups[index].message.role === "user") return index;
+    }
+    return -1;
+  }, [visibleGroups]);
+  const activeStatusIndex = useMemo(() => {
+    if (!turnStreaming) return -1;
+    for (let index = visibleGroups.length - 1; index > activeTurnStartIndex; index -= 1) {
+      const message = visibleGroups[index].message;
+      if (
+        message.role === "assistant" ||
+        isProcessGroupMessage(message, true)
+      ) {
+        return index;
+      }
+    }
+    return -1;
+  }, [activeTurnStartIndex, turnStreaming, visibleGroups]);
+  const activeProcessStartIndex = useMemo(() => {
+    if (activeStatusIndex < 0) return -1;
+    const message = visibleGroups[activeStatusIndex]?.message;
+    if (!message || !isProcessGroupMessage(message, true)) return -1;
+
+    let start = activeStatusIndex;
+    for (let index = activeStatusIndex - 1; index > activeTurnStartIndex; index -= 1) {
+      if (!isProcessGroupMessage(visibleGroups[index].message, true)) break;
+      start = index;
+    }
+    return start;
+  }, [activeStatusIndex, activeTurnStartIndex, visibleGroups]);
 
   return (
     <div className="message-list-shell">
@@ -648,12 +966,12 @@ export function MessageList({
           ) : (
             <div className="message-history-state">已加载全部历史</div>
           )}
-          {groups.map(({ message: m, toolMessages }, groupIndex) => {
-            // An assistant record with neither text nor an open stream is an
-            // artifact of replay; drop it rather than render an empty bubble.
-            if (m.role === "assistant" && !m.streaming && !m.content) {
-              return null;
-            }
+          {visibleGroups.map(({ message: m, toolMessages }, groupIndex) => {
+            const currentTurn = turnStreaming && groupIndex > activeTurnStartIndex;
+            const activeAssistant = currentTurn && groupIndex === activeStatusIndex;
+            const activeProcessGroup = currentTurn && groupIndex === activeProcessStartIndex;
+            if (!activeProcessGroup && isThinkingShell(m)) return null;
+
             const isThought = m.role === "thought";
             const isSystemNotice = m.role === "system";
             const visualRole =
@@ -662,13 +980,17 @@ export function MessageList({
             const messageRuntimeLabel = runtimeLabel(messageRuntime);
             const avatarSrc =
               isAgentTurnRole(m.role) ? runtimeAvatarSrc[messageRuntime] : null;
-            const firstAgentTurnItem = isFirstAgentTurnItem(groups, groupIndex);
+            const firstAgentTurnItem = isFirstAgentTurnItem(
+              visibleGroups,
+              groupIndex,
+            );
             const thinking = Boolean(
-              m.role === "assistant" && m.pending && m.streaming,
+              activeAssistant && m.role === "assistant" && m.pending && m.streaming,
             );
             const typing =
               m.role === "assistant" &&
-              (m.streaming || (assistantTypingUntil[m.id] ?? 0) > Date.now()) &&
+              ((activeAssistant && m.streaming) ||
+                (assistantTypingUntil[m.id] ?? 0) > Date.now()) &&
               !thinking;
             const messageMetaLines =
               m.role === "assistant" && toolMessages.length
@@ -738,62 +1060,84 @@ export function MessageList({
                   </div>
                 </div>
               ) : null;
-            const renderProcessBlock = (content: ReactNode) => {
-              const block = (
-                <div className="message-block message-block--assistant message-block--process">
-                  {content}
-                </div>
-              );
-              if (!firstAgentTurnItem || !avatarSrc) {
-                return (
-                  <div
-                    key={m.id}
-                    data-message-id={m.id}
-                    className={
-                      "message-block message-block--process" +
-                      (focusedMessageId === m.id ? " message-node-focus" : "")
-                    }
-                  >
-                    {content}
-                  </div>
-                );
+            const renderProcessContent = (
+              message: ChatMessage,
+              itemActive: boolean,
+            ) => {
+              if (message.role === "thought") {
+                return <ThoughtBubbleContent message={message} active={itemActive} />;
               }
-              return (
-                <div
-                  key={m.id}
-                  data-message-id={m.id}
-                  className={
-                    "message-row message-row--assistant" +
-                    (focusedMessageId === m.id ? " message-node-focus" : "")
-                  }
-                >
-                  <MessageAvatar runtimeId={messageRuntime} src={avatarSrc} />
-                  {block}
-                </div>
-              );
-            };
-
-            if (isThought) {
-              return renderProcessBlock(<ThoughtBubbleContent message={m} />);
-            }
-
-            if (m.role === "tool") {
-              return renderProcessBlock(
+              if (message.role === "tool") {
+                if (itemActive && isProcessToolActive(message)) {
+                  return (
+                    <LoadingState
+                      kind="tool"
+                      label={processToolLabel(message)}
+                      detail={processToolDetail(message)}
+                      startedAt={message.createdAt}
+                    />
+                  );
+                }
+                return (
                   <ProcessRow
                     kind="tool"
-                    label={processToolLabel(m)}
-                    detail={processToolDetail(m)}
-                    active={isProcessToolActive(m)}
-                  />,
-              );
-            }
+                    label={processToolLabel(message)}
+                    detail={processToolDetail(message)}
+                    active={itemActive && isProcessToolActive(message)}
+                  />
+                );
+              }
+              return itemActive ? (
+                <LoadingState
+                  kind="base"
+                  label="Base"
+                  detail="等待模型输出"
+                  startedAt={message.createdAt}
+                />
+              ) : null;
+            };
 
-            if (thinking && !m.content) {
-              return renderProcessBlock(
-                <>
-                    <ProcessRow kind="think" label="Thinking" active />
-                    {messageActions}
-                </>,
+            if (isProcessGroupMessage(m, currentTurn)) {
+              const previous = visibleGroups[groupIndex - 1]?.message;
+              if (previous && isProcessGroupMessage(previous, currentTurn)) return null;
+
+              const processItems: ChatMessage[] = [];
+              for (
+                let cursor = groupIndex;
+                cursor < visibleGroups.length;
+                cursor += 1
+              ) {
+                const nextMessage = visibleGroups[cursor].message;
+                if (!isProcessGroupMessage(nextMessage, currentTurn)) break;
+                processItems.push(nextMessage);
+              }
+              const activeProcessItemId = activeProcessGroup
+                ? (processItems[processItems.length - 1]?.id ?? null)
+                : null;
+
+              const stack = (
+                <ProcessChipStack
+                  items={processItems}
+                  activeItemId={activeProcessItemId}
+                  firstAgentTurnItem={firstAgentTurnItem}
+                  avatarSrc={avatarSrc ?? null}
+                  focusedMessageId={focusedMessageId}
+                  renderProcessContent={renderProcessContent}
+                />
+              );
+
+              if (!firstAgentTurnItem || !avatarSrc) {
+                return stack;
+              }
+
+              return (
+                <div
+                  key={`process:${m.id}`}
+                  className="message-row message-row--assistant message-row--process"
+                >
+                  <MessageAvatar runtimeId={messageRuntime} src={avatarSrc} />
+                  {stack}
+                </div>
               );
             }
 
@@ -804,10 +1148,11 @@ export function MessageList({
                     message={m}
                     typing={typing}
                     thinking={thinking}
+                    active={activeAssistant}
                     skills={[]}
                     revealImmediately={m.revealImmediately}
                     onTypingProgress={onTypingProgress}
-                    />
+                  />
                 ) : (
                   <MessageContentWithImages
                     sessionId={sessionKey}

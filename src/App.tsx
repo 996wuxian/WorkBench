@@ -46,11 +46,14 @@ import {
 } from "./lib/fontSize";
 import { applyTheme, loadTheme, toggleTheme, type ThemeMode } from "./lib/theme";
 import {
-  CODEX_REASONING_OPTIONS,
   codexReasoningEffortFromModel,
   fallbackModelOptions,
   normalizeCodexModelId,
 } from "./lib/codex";
+import {
+  defaultReasoningEffortForRuntime,
+  reasoningOptionsForRuntime,
+} from "./lib/reasoning";
 import { copyTextToClipboard, nowIso, uid } from "./lib/format";
 import { emitToast } from "./lib/toast";
 import { notifySessionResult } from "./lib/sessionNotifications";
@@ -172,6 +175,7 @@ function runtimeRouteMode(runtime: RuntimeInfo): string {
 function runtimeConnectHint(runtimeId: RuntimeId): string {
   if (runtimeId === "claude") return "claude -p --output-format stream-json";
   if (runtimeId === "codex") return "codex app-server --stdio";
+  if (runtimeId === "deepseek-harness") return 'dsh --profile headless "task"';
   if (runtimeId === "grok") return "grok agent stdio";
   if (runtimeId === "kimi") return "kimi acp";
   return "runtime manifest";
@@ -240,6 +244,9 @@ function runtimeRouteDescription(runtime: RuntimeInfo): string {
   }
   if (runtime.id === "kimi") {
     return "Workbench 按 manifest 启动 kimi acp 并通过 ACP 通信；模型出口由 Kimi CLI 自身处理，是否可用取决于本机 Kimi CLI 是否安装并完成握手。";
+  }
+  if (runtime.id === "deepseek-harness") {
+    return "Workbench 启动 dsh --profile headless 执行一次性任务；模型、工具和权限策略由 DeepSeek Harness profile 自身配置。当前阶段只接最终输出，完整事件桥后续再接。";
   }
   return `Workbench 通过 ${runtime.capabilities.protocol} 协议连接 ${runtime.displayName}；具体命令和参数来自 runtime manifest，模型出口由该 CLI 自身处理。`;
 }
@@ -476,6 +483,7 @@ export default function App() {
       (active?.runtimeId === "codex"
         ? codexReasoningEffortFromModel(active?.modelId ?? snapshot.modelId)
         : null) ??
+      defaultReasoningEffortForRuntime(active?.runtimeId ?? snapshot.runtimeId) ??
       null
     : null;
   const activePermissionMode =
@@ -496,8 +504,8 @@ export default function App() {
         (activeModelValue || "default"))
     : "default";
   const controlReasoningOptions = useMemo(
-    () => CODEX_REASONING_OPTIONS,
-    [],
+    () => reasoningOptionsForRuntime(activeRuntimeId),
+    [activeRuntimeId],
   );
   const controlPermissionOptions = useMemo(
     () =>
@@ -562,6 +570,7 @@ export default function App() {
   const projectContextMenuRef = useRef<HTMLDivElement | null>(null);
   const sessionSelectionAnchorRef = useRef<string | null>(null);
   const stickToBottomRef = useRef(true);
+  const autoFollowStreamRef = useRef(true);
   const lastMessageScrollTopRef = useRef(0);
   const userScrolledUpRef = useRef(false);
   const pendingHistoryRestoreRef = useRef<{
@@ -679,10 +688,33 @@ export default function App() {
 
   const updateSessionMessages = useCallback(
     (sessionId: string, updater: (messages: ChatMessage[]) => ChatMessage[]) => {
-      setMessagesBySession((prev) => ({
-        ...prev,
-        [sessionId]: updater(prev[sessionId] ?? []),
-      }));
+      setMessagesBySession((prev) => {
+        const current = prev[sessionId] ?? [];
+        const next = updater(current);
+        const addedCount = Math.max(0, next.length - current.length);
+
+        if (
+          addedCount > 0 &&
+          activeIdRef.current === sessionId &&
+          stickToBottomRef.current
+        ) {
+          setVisibleMessageCounts((counts) => {
+            const currentVisible = counts[sessionId] ?? INITIAL_VISIBLE_MESSAGES;
+            const nextVisible = Math.min(next.length, currentVisible + addedCount);
+            if (nextVisible === currentVisible) return counts;
+            return {
+              ...counts,
+              [sessionId]: nextVisible,
+            };
+          });
+        }
+
+        if (next === current) return prev;
+        return {
+          ...prev,
+          [sessionId]: next,
+        };
+      });
     },
     [],
   );
@@ -788,6 +820,11 @@ export default function App() {
       const el = messageScrollRef.current;
       if (!el) return;
       el.scrollTo({ top: el.scrollHeight, behavior });
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (distanceFromBottom <= CHAT_BOTTOM_THRESHOLD) {
+        stickToBottomRef.current = true;
+        lastMessageScrollTopRef.current = el.scrollTop;
+      }
     };
     window.requestAnimationFrame(() => {
       scroll();
@@ -805,6 +842,7 @@ export default function App() {
             : INITIAL_VISIBLE_MESSAGES,
       }));
       stickToBottomRef.current = true;
+      autoFollowStreamRef.current = true;
       userScrolledUpRef.current = false;
       lastMessageScrollTopRef.current = 0;
       scrollChatToBottom();
@@ -836,6 +874,7 @@ export default function App() {
       messageNavigationLockUntilRef.current = performance.now() + 1400;
       pendingHistoryRestoreRef.current = null;
       stickToBottomRef.current = false;
+      autoFollowStreamRef.current = false;
       const requiredCount = messages.length - messageIndex;
       setVisibleMessageCounts((previous) => ({
         ...previous,
@@ -857,8 +896,10 @@ export default function App() {
     stickToBottomRef.current = distanceFromBottom <= CHAT_BOTTOM_THRESHOLD;
     lastMessageScrollTopRef.current = el.scrollTop;
     if (stickToBottomRef.current) {
+      autoFollowStreamRef.current = true;
       userScrolledUpRef.current = false;
     } else if (movingUp) {
+      autoFollowStreamRef.current = false;
       userScrolledUpRef.current = true;
     }
     if (
@@ -874,7 +915,7 @@ export default function App() {
   }, [hiddenMessageCount, isActiveTurnStreaming, revealOlderMessages]);
 
   const handleTypingProgress = useCallback(() => {
-    if (!stickToBottomRef.current) return;
+    if (!stickToBottomRef.current && !autoFollowStreamRef.current) return;
     scrollChatToBottom();
   }, [scrollChatToBottom]);
 
@@ -885,6 +926,7 @@ export default function App() {
     if (distanceFromBottom <= CHAT_BOTTOM_THRESHOLD) return;
     pendingHistoryRestoreRef.current = null;
     stickToBottomRef.current = true;
+    autoFollowStreamRef.current = true;
     userScrolledUpRef.current = false;
     scrollChatToBottom("smooth");
   }, [scrollChatToBottom]);
@@ -907,6 +949,9 @@ export default function App() {
       });
       delete assistantTypingTimersRef.current[messageId];
       delete assistantTypingSessionRef.current[messageId];
+      if (Object.keys(assistantTypingTimersRef.current).length === 0) {
+        autoFollowStreamRef.current = false;
+      }
     }, duration);
   }, []);
 
@@ -979,7 +1024,7 @@ export default function App() {
 
   useEffect(() => {
     if (!activeId || pendingHistoryRestoreRef.current) return;
-    if (stickToBottomRef.current) {
+    if (stickToBottomRef.current || autoFollowStreamRef.current) {
       scrollChatToBottom();
     }
   }, [
@@ -2033,8 +2078,13 @@ export default function App() {
           archived: false,
           runtimeId: runtimePick,
           projectPath,
-          modelId: runtimePick === "grok" ? "grok-4.5" : "default",
-          modelReasoningEffort: runtimePick === "codex" ? "high" : null,
+          modelId:
+            runtimePick === "grok"
+              ? "grok-4.5"
+              : runtimePick === "deepseek-harness"
+                ? "deepseek-v4-flash"
+                : "default",
+          modelReasoningEffort: defaultReasoningEffortForRuntime(runtimePick),
           permissionMode: defaultPermissionMode(runtimePick),
           createdAt: nowIso(),
           updatedAt: nowIso(),
@@ -2383,6 +2433,7 @@ export default function App() {
     clearImageAttachments();
     setFileAttachments([]);
     stickToBottomRef.current = true;
+    autoFollowStreamRef.current = true;
     scrollChatToBottom("smooth");
     const userMsg: ChatMessage = {
       id: uid("u"),
@@ -2442,6 +2493,7 @@ export default function App() {
           delete next[session.id];
           return next;
         });
+        autoFollowStreamRef.current = false;
       }, 400);
       return;
     }
@@ -2472,6 +2524,7 @@ export default function App() {
       setPendingSession((prev) => (prev?.id === session.id ? null : prev));
       setQuoteTarget(null);
     } catch (e) {
+      autoFollowStreamRef.current = false;
       setSessionTurnBusy((prev) => {
         const next = { ...prev };
         delete next[session.id];
@@ -2502,6 +2555,7 @@ export default function App() {
 
   async function stopActive() {
     if (!active) return;
+    autoFollowStreamRef.current = false;
 
     if (!isTauri() && mockReplyTimerRef.current !== null) {
       window.clearTimeout(mockReplyTimerRef.current);
@@ -2786,8 +2840,13 @@ export default function App() {
       archived: false,
       runtimeId: node.runtimeId,
       projectPath,
-      modelId: node.runtimeId === "grok" ? "grok-4.5" : "default",
-      modelReasoningEffort: node.runtimeId === "codex" ? "high" : null,
+      modelId:
+        node.runtimeId === "grok"
+          ? "grok-4.5"
+          : node.runtimeId === "deepseek-harness"
+            ? "deepseek-v4-flash"
+            : "default",
+      modelReasoningEffort: defaultReasoningEffortForRuntime(node.runtimeId),
       permissionMode: defaultPermissionMode(node.runtimeId),
       createdAt: nowIso(),
       updatedAt: nowIso(),
@@ -3145,6 +3204,7 @@ export default function App() {
                 onRevealMessage={revealMessageForNavigation}
                 fallbackRuntimeId={active.runtimeId ?? snapshot.runtimeId ?? null}
                 assistantTypingUntil={assistantTypingUntil}
+                turnStreaming={isActiveTurnStreaming}
                 skills={skills}
                 onTypingProgress={handleTypingProgress}
                 onQuote={(target) => {

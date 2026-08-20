@@ -151,4 +151,24 @@ describe("live session restoration", () => {
       createdAt: "2026-07-29T00:00:00.000Z",
     });
   });
+
+  it("clears stale streaming flags from completed messages", () => {
+    const restored = normalizeLoadedMessages([
+      {
+        id: "assistant-done",
+        role: "assistant",
+        content: "finished",
+        streaming: true,
+        pending: true,
+        completedAt: "2026-07-29T00:02:00.000Z",
+        createdAt: "2026-07-29T00:00:00.000Z",
+      },
+    ]);
+
+    expect(restored[0]).toMatchObject({
+      streaming: false,
+      pending: false,
+      completedAt: "2026-07-29T00:02:00.000Z",
+    });
+  });
 });
