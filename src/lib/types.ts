@@ -79,6 +79,39 @@ export interface CodexRouteStatus {
   note: string;
 }
 
+export type RuntimeUsageState =
+  | "ready"
+  | "unavailable"
+  | "not_configured"
+  | "error";
+
+export interface RuntimeUsageBalance {
+  currency: string;
+  totalBalance: string;
+  grantedBalance?: string | null;
+  toppedUpBalance?: string | null;
+}
+
+export interface RuntimeUsageStatus {
+  runtimeId: RuntimeId;
+  provider: string;
+  status: RuntimeUsageState;
+  label: string;
+  summary: string;
+  detail?: string | null;
+  refreshedAt?: string | null;
+  hasCredential: boolean;
+  balances: RuntimeUsageBalance[];
+  used?: string | null;
+  remaining?: string | null;
+  total?: string | null;
+  unit?: string | null;
+  expiresAt?: string | null;
+  routeKind?: string | null;
+  model?: string | null;
+  modelReasoningEffort?: string | null;
+}
+
 export interface ClaudeRouteStatus {
   baseUrl?: string | null;
   model?: string | null;
@@ -342,6 +375,24 @@ export interface RuntimeOverride {
   homeDir?: string | null;
 }
 
+export interface CodexGatewayUsageConfig {
+  baseUrl?: string | null;
+  apiKey?: string | null;
+  path?: string | null;
+  timeoutSecs?: number | null;
+}
+
+export interface DeepSeekUsageConfig {
+  apiKey?: string | null;
+  timeoutSecs?: number | null;
+}
+
+export interface UsageSettings {
+  codexGateway?: CodexGatewayUsageConfig;
+  deepseek?: DeepSeekUsageConfig;
+}
+
 export interface AppSettings {
   runtimes: Record<string, RuntimeOverride>;
+  usage?: UsageSettings;
 }

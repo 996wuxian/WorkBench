@@ -1,6 +1,6 @@
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
 
-import { IconClose, IconDoctor, IconRefresh, IconSettings } from "./icons";
+import { IconClose, IconDoctor, IconPlug, IconRefresh, IconSettings } from "./icons";
 import {
   capabilityDescriptors,
   protocolLabel,
@@ -13,9 +13,16 @@ import {
   runtimeLabel,
   sortRuntimes,
 } from "../lib/runtimes";
-import type { AppSettings, ProbeResult, RuntimeId, RuntimeInfo } from "../lib/types";
+import type {
+  AppSettings,
+  CodexGatewayUsageConfig,
+  DeepSeekUsageConfig,
+  ProbeResult,
+  RuntimeId,
+  RuntimeInfo,
+} from "../lib/types";
 
-export type SettingsSection = "general" | "cli";
+export type SettingsSection = "general" | "usage" | "cli";
 
 type Props = {
   activeSection: SettingsSection;
@@ -24,6 +31,7 @@ type Props = {
   probes: ProbeResult[];
   appSettings: AppSettings | null;
   settingsRuntimeBusy: string | null;
+  settingsUsageBusy: boolean;
   routeDiagnosticsPanel: ReactNode;
   statusLine: string;
   onSectionChange: (section: SettingsSection) => void;
@@ -31,6 +39,8 @@ type Props = {
   onRefreshDiagnostics: () => void;
   onSaveRuntimeCliPath: (runtimeId: RuntimeId, cliPath: string) => void;
   onClearRuntimeCliPath: (runtimeId: RuntimeId) => void;
+  onSaveCodexGatewayUsage: (patch: CodexGatewayUsageConfig) => void;
+  onSaveDeepSeekUsage: (patch: DeepSeekUsageConfig) => void;
   onClose: () => void;
 };
 
@@ -40,8 +50,35 @@ const settingsSections: Array<{
   description: string;
 }> = [
   { id: "general", label: "常规", description: "显示与基础偏好" },
+  { id: "usage", label: "余额与消耗", description: "Codex / DeepSeek" },
   { id: "cli", label: "CLI 检测", description: "本机 Agent 状态" },
 ];
+
+type UsageProvider = "codex" | "deepseek";
+
+type CodexUsageDraft = {
+  baseUrl: string;
+  apiKey: string;
+  path: string;
+  timeoutSecs: string;
+};
+
+type DeepSeekUsageDraft = {
+  apiKey: string;
+  timeoutSecs: string;
+};
+
+const defaultCodexUsageDraft: CodexUsageDraft = {
+  baseUrl: "https://api.999555999.com",
+  apiKey: "",
+  path: "/v1/usage",
+  timeoutSecs: "10",
+};
+
+const defaultDeepSeekUsageDraft: DeepSeekUsageDraft = {
+  apiKey: "",
+  timeoutSecs: "12",
+};
 
 function probeForRuntime(probes: ProbeResult[], runtimeId: string) {
   return probes.find((probe) => probe.runtimeId === runtimeId) ?? null;
@@ -68,6 +105,7 @@ export function SettingsDialog({
   probes,
   appSettings,
   settingsRuntimeBusy,
+  settingsUsageBusy,
   routeDiagnosticsPanel,
   statusLine,
   onSectionChange,
@@ -75,9 +113,18 @@ export function SettingsDialog({
   onRefreshDiagnostics,
   onSaveRuntimeCliPath,
   onClearRuntimeCliPath,
+  onSaveCodexGatewayUsage,
+  onSaveDeepSeekUsage,
   onClose,
 }: Props) {
   const [cliPathDrafts, setCliPathDrafts] = useState<Record<string, string>>({});
+  const [usageProvider, setUsageProvider] = useState<UsageProvider>("codex");
+  const [codexUsageDraft, setCodexUsageDraft] = useState<CodexUsageDraft>(
+    defaultCodexUsageDraft,
+  );
+  const [deepseekUsageDraft, setDeepSeekUsageDraft] = useState<DeepSeekUsageDraft>(
+    defaultDeepSeekUsageDraft,
+  );
   const visibleRuntimes = useMemo(() => sortRuntimes(runtimes), [runtimes]);
   const enabledCount = visibleRuntimes.filter((runtime) => runtime.enabled).length;
   const foundCount = visibleRuntimes.filter((runtime) => {
@@ -109,6 +156,86 @@ export function SettingsDialog({
     });
   }, [appSettings, visibleRuntimes]);
 
+  useEffect(() => {
+    const saved = appSettings?.usage?.codexGateway;
+    setCodexUsageDraft({
+      baseUrl: saved?.baseUrl ?? defaultCodexUsageDraft.baseUrl,
+      apiKey: saved?.apiKey ?? "",
+      path: saved?.path ?? defaultCodexUsageDraft.path,
+      timeoutSecs: String(saved?.timeoutSecs ?? defaultCodexUsageDraft.timeoutSecs),
+    });
+  }, [appSettings]);
+
+  useEffect(() => {
+    const saved = appSettings?.usage?.deepseek;
+    setDeepSeekUsageDraft({
+      apiKey: saved?.apiKey ?? "",
+      timeoutSecs: String(saved?.timeoutSecs ?? defaultDeepSeekUsageDraft.timeoutSecs),
+    });
+  }, [appSettings]);
+
+  const savedCodexUsage = appSettings?.usage?.codexGateway;
+  const codexUsageTimeout = Number(codexUsageDraft.timeoutSecs);
+  const codexUsageTimeoutValid =
+    Number.isFinite(codexUsageTimeout) && codexUsageTimeout >= 3 && codexUsageTimeout <= 30;
+  const codexUsageDirty =
+    codexUsageDraft.baseUrl.trim() !== (savedCodexUsage?.baseUrl ?? defaultCodexUsageDraft.baseUrl) ||
+    codexUsageDraft.apiKey.trim() !== (savedCodexUsage?.apiKey ?? "") ||
+    codexUsageDraft.path.trim() !== (savedCodexUsage?.path ?? defaultCodexUsageDraft.path) ||
+    codexUsageTimeout !== (savedCodexUsage?.timeoutSecs ?? Number(defaultCodexUsageDraft.timeoutSecs));
+  const canSaveCodexUsage =
+    codexUsageDraft.baseUrl.trim().length > 0 &&
+    codexUsageDraft.apiKey.trim().length > 0 &&
+    codexUsageDraft.path.trim().length > 0 &&
+    codexUsageTimeoutValid &&
+    !settingsUsageBusy &&
+    codexUsageDirty;
+  const canClearCodexUsage =
+    !settingsUsageBusy &&
+    Boolean(
+      savedCodexUsage?.baseUrl ||
+        savedCodexUsage?.apiKey ||
+        savedCodexUsage?.path ||
+        savedCodexUsage?.timeoutSecs,
+    );
+  const savedDeepSeekUsage = appSettings?.usage?.deepseek;
+  const deepseekUsageTimeout = Number(deepseekUsageDraft.timeoutSecs);
+  const deepseekUsageTimeoutValid =
+    Number.isFinite(deepseekUsageTimeout) &&
+    deepseekUsageTimeout >= 3 &&
+    deepseekUsageTimeout <= 30;
+  const deepseekUsageDirty =
+    deepseekUsageDraft.apiKey.trim() !== (savedDeepSeekUsage?.apiKey ?? "") ||
+    deepseekUsageTimeout !==
+      (savedDeepSeekUsage?.timeoutSecs ?? Number(defaultDeepSeekUsageDraft.timeoutSecs));
+  const canSaveDeepSeekUsage =
+    deepseekUsageDraft.apiKey.trim().length > 0 &&
+    deepseekUsageTimeoutValid &&
+    !settingsUsageBusy &&
+    deepseekUsageDirty;
+  const canClearDeepSeekUsage =
+    !settingsUsageBusy && Boolean(savedDeepSeekUsage?.apiKey || savedDeepSeekUsage?.timeoutSecs);
+
+  function saveCodexUsage(ev: FormEvent<HTMLFormElement>) {
+    ev.preventDefault();
+    if (!canSaveCodexUsage) return;
+    onSaveCodexGatewayUsage({
+      baseUrl: codexUsageDraft.baseUrl.trim(),
+      apiKey: codexUsageDraft.apiKey.trim(),
+      path: codexUsageDraft.path.trim(),
+      timeoutSecs: codexUsageTimeout,
+    });
+  }
+
+  function saveDeepSeekUsage(ev: FormEvent<HTMLFormElement>) {
+    ev.preventDefault();
+    if (!canSaveDeepSeekUsage) return;
+    onSaveDeepSeekUsage({
+      apiKey: deepseekUsageDraft.apiKey.trim(),
+      timeoutSecs: deepseekUsageTimeout,
+    });
+  }
+
   return (
     <section
       className="settings-dialog settings-dialog--main"
@@ -132,7 +259,13 @@ export function SettingsDialog({
               }
               onClick={() => onSectionChange(section.id)}
             >
-              {section.id === "general" ? <IconSettings size={15} /> : <IconDoctor size={15} />}
+              {section.id === "general" ? (
+                <IconSettings size={15} />
+              ) : section.id === "usage" ? (
+                <IconPlug size={15} />
+              ) : (
+                <IconDoctor size={15} />
+              )}
               <span>
                 <strong>{section.label}</strong>
                 <small>{section.description}</small>
@@ -187,6 +320,170 @@ export function SettingsDialog({
                 <strong>预览文本</strong>
                 <span>聊天、会话列表和设置面板会使用当前字体大小。</span>
               </div>
+            </div>
+          ) : activeSection === "usage" ? (
+            <div className="settings-section">
+              <div className="settings-usage-tabs" role="tablist" aria-label="余额与消耗">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={usageProvider === "codex"}
+                  className={
+                    "settings-usage-tab" +
+                    (usageProvider === "codex" ? " settings-usage-tab--active" : "")
+                  }
+                  onClick={() => setUsageProvider("codex")}
+                >
+                  Codex
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={usageProvider === "deepseek"}
+                  className={
+                    "settings-usage-tab" +
+                    (usageProvider === "deepseek" ? " settings-usage-tab--active" : "")
+                  }
+                  onClick={() => setUsageProvider("deepseek")}
+                >
+                  DeepSeek
+                </button>
+              </div>
+
+              {usageProvider === "codex" ? (
+                <form className="settings-usage-form" onSubmit={saveCodexUsage}>
+                  <div className="settings-row settings-row--stack">
+                    <div className="settings-row__title">Codex</div>
+                  </div>
+                  <label className="settings-runtime-path__label" htmlFor="codex-usage-base-url">
+                    API 地址
+                  </label>
+                  <input
+                    id="codex-usage-base-url"
+                    className="settings-usage-input"
+                    type="url"
+                    value={codexUsageDraft.baseUrl}
+                    placeholder="https://api.999555999.com"
+                    spellCheck={false}
+                    disabled={settingsUsageBusy}
+                    onChange={(ev) =>
+                      setCodexUsageDraft((prev) => ({ ...prev, baseUrl: ev.target.value }))
+                    }
+                  />
+                  <label className="settings-runtime-path__label" htmlFor="codex-usage-path">
+                    接口路径
+                  </label>
+                  <input
+                    id="codex-usage-path"
+                    className="settings-usage-input"
+                    type="text"
+                    value={codexUsageDraft.path}
+                    placeholder="/v1/usage"
+                    spellCheck={false}
+                    disabled={settingsUsageBusy}
+                    onChange={(ev) =>
+                      setCodexUsageDraft((prev) => ({ ...prev, path: ev.target.value }))
+                    }
+                  />
+                  <label className="settings-runtime-path__label" htmlFor="codex-usage-api-key">
+                    API Key
+                  </label>
+                  <input
+                    id="codex-usage-api-key"
+                    className="settings-usage-input"
+                    type="password"
+                    value={codexUsageDraft.apiKey}
+                    placeholder="sk-..."
+                    spellCheck={false}
+                    autoComplete="off"
+                    disabled={settingsUsageBusy}
+                    onChange={(ev) =>
+                      setCodexUsageDraft((prev) => ({ ...prev, apiKey: ev.target.value }))
+                    }
+                  />
+                  <label className="settings-runtime-path__label" htmlFor="codex-usage-timeout">
+                    查询超时
+                  </label>
+                  <input
+                    id="codex-usage-timeout"
+                    className="settings-usage-input settings-usage-input--number"
+                    type="number"
+                    min={3}
+                    max={30}
+                    value={codexUsageDraft.timeoutSecs}
+                    disabled={settingsUsageBusy}
+                    onChange={(ev) =>
+                      setCodexUsageDraft((prev) => ({ ...prev, timeoutSecs: ev.target.value }))
+                    }
+                  />
+                  <div className="settings-usage-actions">
+                    <button type="submit" className="btn" disabled={!canSaveCodexUsage}>
+                      {settingsUsageBusy ? "保存中" : "保存"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      disabled={!canClearCodexUsage}
+                      onClick={() => onSaveCodexGatewayUsage({})}
+                    >
+                      清除
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <form className="settings-usage-form" onSubmit={saveDeepSeekUsage}>
+                  <div className="settings-row settings-row--stack">
+                    <div className="settings-row__title">DeepSeek</div>
+                  </div>
+                  <label className="settings-runtime-path__label" htmlFor="deepseek-usage-api-key">
+                    API Key
+                  </label>
+                  <input
+                    id="deepseek-usage-api-key"
+                    className="settings-usage-input"
+                    type="password"
+                    value={deepseekUsageDraft.apiKey}
+                    placeholder="sk-..."
+                    spellCheck={false}
+                    autoComplete="off"
+                    disabled={settingsUsageBusy}
+                    onChange={(ev) =>
+                      setDeepSeekUsageDraft((prev) => ({ ...prev, apiKey: ev.target.value }))
+                    }
+                  />
+                  <label className="settings-runtime-path__label" htmlFor="deepseek-usage-timeout">
+                    查询超时
+                  </label>
+                  <input
+                    id="deepseek-usage-timeout"
+                    className="settings-usage-input settings-usage-input--number"
+                    type="number"
+                    min={3}
+                    max={30}
+                    value={deepseekUsageDraft.timeoutSecs}
+                    disabled={settingsUsageBusy}
+                    onChange={(ev) =>
+                      setDeepSeekUsageDraft((prev) => ({
+                        ...prev,
+                        timeoutSecs: ev.target.value,
+                      }))
+                    }
+                  />
+                  <div className="settings-usage-actions">
+                    <button type="submit" className="btn" disabled={!canSaveDeepSeekUsage}>
+                      {settingsUsageBusy ? "保存中" : "保存"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      disabled={!canClearDeepSeekUsage}
+                      onClick={() => onSaveDeepSeekUsage({})}
+                    >
+                      清除
+                    </button>
+                  </div>
+                </form>
+              )}
             </div>
           ) : (
             <div className="settings-section">
@@ -323,7 +620,7 @@ export function SettingsDialog({
                           <input
                             type="text"
                             value={cliPathDraft}
-                            placeholder="例如 C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd"
+                            placeholder="C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd"
                             spellCheck={false}
                             disabled={pathBusy}
                             onChange={(ev) =>

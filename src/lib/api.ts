@@ -2,8 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
   ClaudeRouteStatus,
+  CodexGatewayUsageConfig,
   CodexRouteStatus,
   ChatMessage,
+  DeepSeekUsageConfig,
   PermissionDecision,
   ProbeResult,
   RuntimeOverride,
@@ -15,6 +17,7 @@ import type {
   SessionSelectionCatalog,
   PermissionMode,
   PickedFile,
+  RuntimeUsageStatus,
   RuntimeInfo,
   SessionMeta,
   SessionSnapshot,
@@ -43,6 +46,8 @@ export const api = {
     call<ProbeResult>("probe_runtime", { runtimeId }),
   claudeRouteStatus: () => call<ClaudeRouteStatus>("claude_route_status"),
   codexRouteStatus: () => call<CodexRouteStatus>("codex_route_status"),
+  runtimeUsageStatus: (runtimeId: string, projectPath?: string | null) =>
+    call<RuntimeUsageStatus>("runtime_usage_status", { runtimeId, projectPath }),
   openCcSwitch: () => call<string>("open_cc_switch"),
   pickProjectDirectory: (initialPath?: string | null) =>
     call<string | null>("project_pick_directory", { initialPath }),
@@ -147,6 +152,10 @@ export const api = {
   reloadSettings: () => call<AppSettings>("settings_reload"),
   setRuntimeOverride: (runtimeId: string, patch: RuntimeOverride) =>
     call<AppSettings>("settings_set_runtime_override", { runtimeId, patch }),
+  setCodexGatewayUsage: (patch: CodexGatewayUsageConfig) =>
+    call<AppSettings>("settings_set_codex_gateway_usage", { patch }),
+  setDeepSeekUsage: (patch: DeepSeekUsageConfig) =>
+    call<AppSettings>("settings_set_deepseek_usage", { patch }),
 
   appInfo: () =>
     call<{ name: string; version: string; dataDir: string }>("app_info"),

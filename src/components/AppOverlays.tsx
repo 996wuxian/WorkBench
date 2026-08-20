@@ -25,6 +25,8 @@ import type {
 } from "react";
 import type {
   AppSettings,
+  CodexGatewayUsageConfig,
+  DeepSeekUsageConfig,
   ProbeResult,
   RuntimeId,
   RuntimeInfo,
@@ -67,6 +69,7 @@ type Props = {
   probes: ProbeResult[];
   appSettings: AppSettings | null;
   settingsRuntimeBusy: string | null;
+  settingsUsageBusy: boolean;
   routeDiagnosticsPanel: ReactNode;
   statusLine: string;
   onCloseSettings: () => void;
@@ -75,6 +78,8 @@ type Props = {
   onRefreshSettingsDiagnostics: () => void;
   onSaveRuntimeCliPath: (runtimeId: RuntimeId, cliPath: string) => void;
   onClearRuntimeCliPath: (runtimeId: RuntimeId) => void;
+  onSaveCodexGatewayUsage: (patch: CodexGatewayUsageConfig) => void;
+  onSaveDeepSeekUsage: (patch: DeepSeekUsageConfig) => void;
   sessionContextMenu: SessionContextMenu;
   sessionContextTargetTitle: string;
   sessionContextTargetPinned: boolean;
@@ -132,6 +137,7 @@ export function AppOverlays({
   probes,
   appSettings,
   settingsRuntimeBusy,
+  settingsUsageBusy,
   routeDiagnosticsPanel,
   statusLine,
   onCloseSettings,
@@ -140,6 +146,8 @@ export function AppOverlays({
   onRefreshSettingsDiagnostics,
   onSaveRuntimeCliPath,
   onClearRuntimeCliPath,
+  onSaveCodexGatewayUsage,
+  onSaveDeepSeekUsage,
   sessionContextMenu,
   sessionContextTargetTitle,
   sessionContextTargetPinned,
@@ -412,6 +420,7 @@ export function AppOverlays({
                 probes={probes}
                 appSettings={appSettings}
                 settingsRuntimeBusy={settingsRuntimeBusy}
+                settingsUsageBusy={settingsUsageBusy}
                 routeDiagnosticsPanel={routeDiagnosticsPanel}
                 statusLine={statusLine}
                 onSectionChange={onSettingsSectionChange}
@@ -419,6 +428,8 @@ export function AppOverlays({
                 onRefreshDiagnostics={onRefreshSettingsDiagnostics}
                 onSaveRuntimeCliPath={onSaveRuntimeCliPath}
                 onClearRuntimeCliPath={onClearRuntimeCliPath}
+                onSaveCodexGatewayUsage={onSaveCodexGatewayUsage}
+                onSaveDeepSeekUsage={onSaveDeepSeekUsage}
                 onClose={onCloseSettings}
               />
             </div>,

@@ -33,12 +33,63 @@ impl RuntimeOverride {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexGatewayUsageConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+impl CodexGatewayUsageConfig {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeepSeekUsageConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+impl DeepSeekUsageConfig {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSettings {
+    #[serde(default, skip_serializing_if = "CodexGatewayUsageConfig::is_empty")]
+    pub codex_gateway: CodexGatewayUsageConfig,
+    #[serde(default, skip_serializing_if = "DeepSeekUsageConfig::is_empty")]
+    pub deepseek: DeepSeekUsageConfig,
+}
+
+impl UsageSettings {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     /// Keyed by runtime id.
     #[serde(default)]
     pub runtimes: BTreeMap<String, RuntimeOverride>,
+    #[serde(default, skip_serializing_if = "UsageSettings::is_empty")]
+    pub usage: UsageSettings,
 }
 
 fn settings_path() -> PathBuf {
@@ -89,6 +140,26 @@ pub fn set_runtime_override(
         } else {
             guard.runtimes.insert(runtime_id.to_string(), value);
         }
+        guard.clone()
+    };
+    write_to_disk(&next)?;
+    Ok(next)
+}
+
+pub fn set_codex_gateway_usage(value: CodexGatewayUsageConfig) -> Result<AppSettings, String> {
+    let next = {
+        let mut guard = cache().write();
+        guard.usage.codex_gateway = value;
+        guard.clone()
+    };
+    write_to_disk(&next)?;
+    Ok(next)
+}
+
+pub fn set_deepseek_usage(value: DeepSeekUsageConfig) -> Result<AppSettings, String> {
+    let next = {
+        let mut guard = cache().write();
+        guard.usage.deepseek = value;
         guard.clone()
     };
     write_to_disk(&next)?;

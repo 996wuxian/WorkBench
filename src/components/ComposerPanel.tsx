@@ -20,6 +20,7 @@ import {
   IconPlus,
   IconQuote,
   IconPuzzle,
+  IconRefresh,
   IconRiskAsk,
   IconRiskAuto,
   IconRiskFullAccess,
@@ -32,7 +33,7 @@ import { compactLabel } from "../lib/format";
 import { copyImageSourceToClipboard } from "../lib/clipboardImages";
 import { findSkillByName } from "../lib/skills";
 import { emitToast } from "../lib/toast";
-import type { PermissionMode, SkillInfo } from "../lib/types";
+import type { PermissionMode, RuntimeUsageStatus, SkillInfo } from "../lib/types";
 import type { QuoteTarget } from "../lib/messages";
 
 export type ComposerImageAttachment = {
@@ -72,6 +73,8 @@ type Props = {
   skillsLoading: boolean;
   skillsError: string | null;
   selectedSkillNames: string[];
+  runtimeUsageStatus: RuntimeUsageStatus | null;
+  runtimeUsageLoading: boolean;
   projectPath: string | null;
   projectPathEditable: boolean;
   projectPathBusy: boolean;
@@ -94,6 +97,7 @@ type Props = {
   onPermissionChange: (value: string) => void;
   onSkillSelect: (name: string) => void;
   onSkillRemove: (name: string) => void;
+  onRefreshRuntimeUsage: () => void;
   onPickProjectPath: () => void;
 };
 
@@ -123,6 +127,8 @@ export function ComposerPanel({
   skillsLoading,
   skillsError,
   selectedSkillNames,
+  runtimeUsageStatus,
+  runtimeUsageLoading,
   projectPath,
   projectPathEditable,
   projectPathBusy,
@@ -145,6 +151,7 @@ export function ComposerPanel({
   onPermissionChange,
   onSkillSelect,
   onSkillRemove,
+  onRefreshRuntimeUsage,
   onPickProjectPath,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<ComposerContextMenu>(null);
@@ -306,6 +313,73 @@ export function ComposerPanel({
         return "permission-risk--unknown";
     }
   };
+
+  const formatUsageExpiresAt = (value?: string | null) => {
+    if (!value) return null;
+    const normalized = value.includes("T") ? value : value.replace(" ", "T");
+    const date = new Date(normalized);
+    if (Number.isNaN(date.getTime())) return value;
+    const pad = (part: number) => String(part).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  };
+  const usageRemainingNumber = runtimeUsageStatus?.remaining
+    ? Number.parseFloat(runtimeUsageStatus.remaining)
+    : Number.NaN;
+  const usageRemainingTone = Number.isFinite(usageRemainingNumber)
+    ? usageRemainingNumber > 20
+      ? "good"
+      : usageRemainingNumber >= 10
+        ? "warn"
+        : "danger"
+    : null;
+  const usageExpiresAt = formatUsageExpiresAt(runtimeUsageStatus?.expiresAt);
+  const usageStructured = runtimeUsageStatus
+    ? [
+        runtimeUsageStatus.used ? (
+          <span key="used">已使用：{runtimeUsageStatus.used}</span>
+        ) : null,
+        runtimeUsageStatus.remaining ? (
+          <span
+            key="remaining"
+            className={
+              usageRemainingTone
+                ? `composer-usage__remaining composer-usage__remaining--${usageRemainingTone}`
+                : "composer-usage__remaining"
+            }
+          >
+            剩余：{runtimeUsageStatus.remaining}
+            {runtimeUsageStatus.unit ? ` ${runtimeUsageStatus.unit}` : ""}
+          </span>
+        ) : null,
+        usageExpiresAt ? <span key="expires">到期：{usageExpiresAt}</span> : null,
+      ].filter(Boolean)
+    : [];
+  const usageSummary =
+    runtimeUsageLoading && !runtimeUsageStatus
+      ? "正在刷新"
+      : runtimeUsageStatus
+        ? runtimeUsageStatus.summary
+        : "未接入";
+  const usageTitle = runtimeUsageStatus
+    ? [
+        runtimeUsageStatus.label,
+        runtimeUsageStatus.summary,
+        runtimeUsageStatus.detail,
+        ...runtimeUsageStatus.balances.map((balance) =>
+          [
+            `${balance.currency} ${balance.totalBalance}`,
+            balance.grantedBalance ? `赠送 ${balance.grantedBalance}` : null,
+            balance.toppedUpBalance ? `充值 ${balance.toppedUpBalance}` : null,
+          ]
+            .filter(Boolean)
+            .join(" · "),
+        ),
+      ]
+        .filter(Boolean)
+        .join("\n")
+    : "正在读取用量";
+  const usageTone = runtimeUsageStatus?.status ?? (runtimeUsageLoading ? "loading" : "unavailable");
+  const usageLabel = runtimeUsageLoading && !runtimeUsageStatus ? "用量读取中" : null;
 
   const openContextMenu = (event: MouseEvent<HTMLTextAreaElement>) => {
     event.preventDefault();
@@ -682,6 +756,30 @@ export function ComposerPanel({
           )}
         </div>
       </div>
+      {runtimeUsageStatus || runtimeUsageLoading ? (
+        <div className="composer__usage-row">
+          <div
+            className={`composer-usage composer-usage--${usageTone}`}
+            title={usageTitle}
+            aria-live="polite"
+          >
+            <span className="composer-usage__text">
+              {usageLabel ? <strong>{usageLabel}</strong> : null}
+              {usageStructured.length > 0 ? usageStructured : <span>{usageSummary}</span>}
+            </span>
+            <button
+              type="button"
+              className="composer-usage__refresh"
+              title="刷新用量"
+              aria-label="刷新用量"
+              disabled={runtimeUsageLoading}
+              onClick={onRefreshRuntimeUsage}
+            >
+              <IconRefresh size={13} />
+            </button>
+          </div>
+        </div>
+      ) : null}
       {contextMenu
         ? createPortal(
             <div

@@ -61,6 +61,7 @@ pub fn run() {
             commands::probe_runtime,
             commands::codex_route_status,
             commands::claude_route_status,
+            commands::runtime_usage_status,
             commands::open_cc_switch,
             commands::skills_list,
             commands::project_worktree_changes,
@@ -91,6 +92,8 @@ pub fn run() {
             commands::settings_get,
             commands::settings_reload,
             commands::settings_set_runtime_override,
+            commands::settings_set_codex_gateway_usage,
+            commands::settings_set_deepseek_usage,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Workbench");

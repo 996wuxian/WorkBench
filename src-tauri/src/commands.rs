@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use tauri::{AppHandle, Manager};
@@ -19,7 +20,9 @@ use crate::runtime::{
 };
 use crate::session_manager::{SessionManager, SessionMeta, SessionSettingsPatch, SessionSnapshot};
 use crate::session_store::{self, StoredChatMessage};
-use crate::settings::{self, AppSettings, RuntimeOverride};
+use crate::settings::{
+    self, AppSettings, CodexGatewayUsageConfig, DeepSeekUsageConfig, RuntimeOverride,
+};
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,6 +94,7 @@ pub struct SessionImageAttachmentData {
 }
 
 const MAX_IMAGE_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const DEEPSEEK_BALANCE_TIMEOUT_SECS: u64 = 12;
 
 /// Sync native window fill with UI theme so rounded corners don't show a dark halo.
 #[tauri::command]
@@ -146,6 +150,600 @@ pub fn codex_route_status() -> CodexRouteStatus {
 #[tauri::command]
 pub fn claude_route_status() -> route_diagnostics::ClaudeRouteStatus {
     route_diagnostics::claude_route_status()
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeUsageBalance {
+    pub currency: String,
+    pub total_balance: String,
+    pub granted_balance: Option<String>,
+    pub topped_up_balance: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeUsageStatus {
+    pub runtime_id: RuntimeId,
+    pub provider: String,
+    pub status: String,
+    pub label: String,
+    pub summary: String,
+    pub detail: Option<String>,
+    pub refreshed_at: Option<String>,
+    pub has_credential: bool,
+    pub balances: Vec<RuntimeUsageBalance>,
+    pub used: Option<String>,
+    pub remaining: Option<String>,
+    pub total: Option<String>,
+    pub unit: Option<String>,
+    pub expires_at: Option<String>,
+    pub route_kind: Option<String>,
+    pub model: Option<String>,
+    pub model_reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DeepSeekBalanceResponse {
+    is_available: bool,
+    #[serde(default)]
+    balance_infos: Vec<DeepSeekBalanceInfo>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DeepSeekBalanceInfo {
+    currency: String,
+    total_balance: String,
+    granted_balance: Option<String>,
+    topped_up_balance: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CodexUsageConfig {
+    url: String,
+    api_key: String,
+    timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CodexGatewayUsage {
+    used: Option<String>,
+    remaining: Option<String>,
+    total: Option<String>,
+    unit: Option<String>,
+    expires_at: Option<String>,
+    plan_name: Option<String>,
+}
+
+#[tauri::command]
+pub async fn runtime_usage_status(
+    runtime_id: String,
+    project_path: Option<String>,
+) -> Result<RuntimeUsageStatus, String> {
+    let id =
+        RuntimeId::parse(&runtime_id).ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
+    match id.as_str() {
+        "deepseek-harness" => deepseek_usage_status(id, project_path.as_deref()).await,
+        "codex" => codex_usage_status(id, project_path.as_deref()).await,
+        _ => Ok(RuntimeUsageStatus {
+            runtime_id: id,
+            provider: crate::runtime::manifest::display_name(id),
+            status: "unavailable".into(),
+            label: "未接入".into(),
+            summary: "该 runtime 暂未接入用量显示".into(),
+            detail: None,
+            refreshed_at: Some(Utc::now().to_rfc3339()),
+            has_credential: false,
+            balances: Vec::new(),
+            used: None,
+            remaining: None,
+            total: None,
+            unit: None,
+            expires_at: None,
+            route_kind: None,
+            model: None,
+            model_reasoning_effort: None,
+        }),
+    }
+}
+
+async fn codex_usage_status(
+    runtime_id: RuntimeId,
+    _project_path: Option<&str>,
+) -> Result<RuntimeUsageStatus, String> {
+    let fetched_at = Utc::now().to_rfc3339();
+    let Some(config) = resolve_codex_usage_config() else {
+        return Ok(RuntimeUsageStatus {
+            runtime_id,
+            provider: "Codex".into(),
+            status: "not_configured".into(),
+            label: "Codex 用量".into(),
+            summary: "未配置中转用量".into(),
+            detail: Some("请在设置 > 余额与消耗 中配置 Codex。".into()),
+            refreshed_at: Some(fetched_at),
+            has_credential: false,
+            balances: Vec::new(),
+            used: None,
+            remaining: None,
+            total: None,
+            unit: None,
+            expires_at: None,
+            route_kind: None,
+            model: None,
+            model_reasoning_effort: None,
+        });
+    };
+
+    match fetch_json_with_bearer(&config.url, &config.api_key, config.timeout_secs).await {
+        Ok(value) => {
+            let usage = extract_codex_gateway_usage(&value);
+            let summary = format_usage_summary(&usage);
+            Ok(RuntimeUsageStatus {
+                runtime_id,
+                provider: "Codex".into(),
+                status: "ready".into(),
+                label: "Codex 用量".into(),
+                summary,
+                detail: usage.plan_name.map(|plan| format!("套餐：{plan}")),
+                refreshed_at: Some(fetched_at),
+                has_credential: true,
+                balances: Vec::new(),
+                used: usage.used,
+                remaining: usage.remaining,
+                total: usage.total,
+                unit: usage.unit,
+                expires_at: usage.expires_at,
+                route_kind: None,
+                model: None,
+                model_reasoning_effort: None,
+            })
+        }
+        Err(err) => Ok(RuntimeUsageStatus {
+            runtime_id,
+            provider: "Codex".into(),
+            status: "error".into(),
+            label: "Codex 用量".into(),
+            summary: "用量查询失败".into(),
+            detail: Some(err),
+            refreshed_at: Some(fetched_at),
+            has_credential: true,
+            balances: Vec::new(),
+            used: None,
+            remaining: None,
+            total: None,
+            unit: None,
+            expires_at: None,
+            route_kind: None,
+            model: None,
+            model_reasoning_effort: None,
+        }),
+    }
+}
+
+async fn deepseek_usage_status(
+    runtime_id: RuntimeId,
+    project_path: Option<&str>,
+) -> Result<RuntimeUsageStatus, String> {
+    let Some((api_key, source, timeout_secs)) = resolve_deepseek_api_key(project_path) else {
+        return Ok(RuntimeUsageStatus {
+            runtime_id,
+            provider: "DeepSeek".into(),
+            status: "not_configured".into(),
+            label: "DeepSeek 用量".into(),
+            summary: "未找到 DEEPSEEK_API_KEY".into(),
+            detail: Some("请在设置 > 余额与消耗 中配置 DeepSeek。".into()),
+            refreshed_at: Some(Utc::now().to_rfc3339()),
+            has_credential: false,
+            balances: Vec::new(),
+            used: None,
+            remaining: None,
+            total: None,
+            unit: None,
+            expires_at: None,
+            route_kind: None,
+            model: None,
+            model_reasoning_effort: None,
+        });
+    };
+
+    let fetched_at = Utc::now().to_rfc3339();
+    match fetch_deepseek_balance(&api_key, timeout_secs).await {
+        Ok(response) => {
+            let balances = response
+                .balance_infos
+                .into_iter()
+                .map(|item| RuntimeUsageBalance {
+                    currency: item.currency,
+                    total_balance: item.total_balance,
+                    granted_balance: item.granted_balance,
+                    topped_up_balance: item.topped_up_balance,
+                })
+                .collect::<Vec<_>>();
+            let first_remaining = balances.first().map(|item| item.total_balance.clone());
+            let first_unit = balances.first().map(|item| item.currency.clone());
+            let summary = balances
+                .first()
+                .map(|item| format!("{} {}", item.currency, item.total_balance))
+                .unwrap_or_else(|| "未返回余额分项".into());
+            Ok(RuntimeUsageStatus {
+                runtime_id,
+                provider: "DeepSeek".into(),
+                status: if response.is_available {
+                    "ready".into()
+                } else {
+                    "unavailable".into()
+                },
+                label: if response.is_available {
+                    "DeepSeek 可用".into()
+                } else {
+                    "DeepSeek 不可用".into()
+                },
+                summary,
+                detail: Some(format!("凭据来源：{source}")),
+                refreshed_at: Some(fetched_at),
+                has_credential: true,
+                balances,
+                used: None,
+                remaining: first_remaining,
+                total: None,
+                unit: first_unit,
+                expires_at: None,
+                route_kind: Some("deepseek-official".into()),
+                model: None,
+                model_reasoning_effort: None,
+            })
+        }
+        Err(err) => Ok(RuntimeUsageStatus {
+            runtime_id,
+            provider: "DeepSeek".into(),
+            status: "error".into(),
+            label: "DeepSeek 查询失败".into(),
+            summary: "余额查询失败".into(),
+            detail: Some(err),
+            refreshed_at: Some(fetched_at),
+            has_credential: true,
+            balances: Vec::new(),
+            used: None,
+            remaining: None,
+            total: None,
+            unit: None,
+            expires_at: None,
+            route_kind: Some("deepseek-official".into()),
+            model: None,
+            model_reasoning_effort: None,
+        }),
+    }
+}
+
+fn resolve_codex_usage_config() -> Option<CodexUsageConfig> {
+    let config = settings::get().usage.codex_gateway;
+    let base_url = config.base_url?.trim().to_string();
+    let api_key = config.api_key?.trim().to_string();
+    if base_url.is_empty() || api_key.is_empty() {
+        return None;
+    }
+    let path = config
+        .path
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "/v1/usage".into());
+    let timeout_secs = config.timeout_secs.unwrap_or(10).clamp(3, 30);
+
+    Some(CodexUsageConfig {
+        url: join_url(&base_url, &path),
+        api_key,
+        timeout_secs,
+    })
+}
+
+fn join_url(base_url: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
+
+async fn fetch_json_with_bearer(
+    url: &str,
+    api_key: &str,
+    timeout_secs: u64,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "windows")]
+    let shell = PathBuf::from("powershell.exe");
+    #[cfg(not(target_os = "windows"))]
+    let shell = which::which("pwsh")
+        .map_err(|_| "找不到 PowerShell，无法在无新增依赖模式下查询用量".to_string())?;
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$headers = @{
+  Authorization = "Bearer $env:WORKBENCH_USAGE_API_KEY"
+  Accept = "application/json"
+  "User-Agent" = "workbench/1.0"
+}
+$response = Invoke-RestMethod -Method Get -Uri $env:WORKBENCH_USAGE_URL -Headers $headers -TimeoutSec ([int]$env:WORKBENCH_USAGE_TIMEOUT)
+$response | ConvertTo-Json -Depth 16 -Compress
+"#;
+    let mut cmd = tokio::process::Command::new(shell);
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    cmd.env("WORKBENCH_USAGE_URL", url);
+    cmd.env("WORKBENCH_USAGE_API_KEY", api_key);
+    cmd.env("WORKBENCH_USAGE_TIMEOUT", timeout_secs.to_string());
+    crate::process_util::apply_no_window_tokio(&mut cmd);
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(timeout_secs.saturating_add(2)),
+        cmd.output(),
+    )
+    .await
+    .map_err(|_| "Codex 中转用量查询超时".to_string())?
+    .map_err(|err| format!("Codex 中转用量查询进程启动失败: {err}"))?;
+
+    if !output.status.success() {
+        return Err("Codex 中转用量接口返回错误或网络不可用".into());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str::<serde_json::Value>(text.trim())
+        .map_err(|err| format!("Codex 中转用量响应解析失败: {err}"))
+}
+
+fn extract_codex_gateway_usage(value: &serde_json::Value) -> CodexGatewayUsage {
+    let used = usage_value(
+        value,
+        &[
+            &["subscription", "monthly_usage_usd"],
+            &["usage", "monthly_usage_usd"],
+            &["usage", "used"],
+            &["used"],
+        ],
+    );
+    let total = usage_value(
+        value,
+        &[
+            &["subscription", "monthly_limit_usd"],
+            &["quota", "total"],
+            &["total"],
+        ],
+    );
+    let remaining = usage_value(
+        value,
+        &[&["remaining"], &["quota", "remaining"], &["balance"]],
+    )
+    .or_else(|| compute_remaining(total.as_deref(), used.as_deref()));
+    let unit = string_value_at(value, &["unit"])
+        .or_else(|| string_value_at(value, &["quota", "unit"]))
+        .or_else(|| Some("USD".into()));
+    let expires_at = string_value_at(value, &["subscription", "expires_at"])
+        .or_else(|| string_value_at(value, &["expires_at"]))
+        .or_else(|| string_value_at(value, &["expiresAt"]));
+    let plan_name = string_value_at(value, &["planName"])
+        .or_else(|| string_value_at(value, &["subscription", "plan_name"]));
+
+    CodexGatewayUsage {
+        used,
+        remaining,
+        total,
+        unit,
+        expires_at,
+        plan_name,
+    }
+}
+
+fn usage_value(value: &serde_json::Value, paths: &[&[&str]]) -> Option<String> {
+    paths
+        .iter()
+        .find_map(|path| value_at(value, path))
+        .and_then(format_json_number)
+}
+
+fn string_value_at(value: &serde_json::Value, path: &[&str]) -> Option<String> {
+    value_at(value, path).and_then(|value| {
+        value
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| format_json_number(value))
+    })
+}
+
+fn value_at<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    Some(current)
+}
+
+fn format_json_number(value: &serde_json::Value) -> Option<String> {
+    if let Some(number) = value.as_f64() {
+        return Some(format_usage_number(number));
+    }
+    let text = value.as_str()?.trim();
+    let number = text.parse::<f64>().ok()?;
+    Some(format_usage_number(number))
+}
+
+fn format_usage_number(number: f64) -> String {
+    let rounded = format!("{number:.2}");
+    rounded
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
+fn compute_remaining(total: Option<&str>, used: Option<&str>) -> Option<String> {
+    let total = total?.parse::<f64>().ok()?;
+    let used = used?.parse::<f64>().ok()?;
+    Some(format_usage_number((total - used).max(0.0)))
+}
+
+fn format_usage_summary(usage: &CodexGatewayUsage) -> String {
+    let mut parts = Vec::new();
+    if let Some(used) = usage.used.as_deref() {
+        parts.push(format!("已使用：{used}"));
+    }
+    if let Some(remaining) = usage.remaining.as_deref() {
+        let unit = usage.unit.as_deref().unwrap_or("USD");
+        parts.push(format!("剩余：{remaining} {unit}"));
+    }
+    if let Some(expires_at) = usage.expires_at.as_deref() {
+        parts.push(format!("到期：{expires_at}"));
+    }
+    if parts.is_empty() {
+        "用量接口未返回可显示字段".into()
+    } else {
+        parts.join(" ")
+    }
+}
+
+async fn fetch_deepseek_balance(
+    api_key: &str,
+    timeout_secs: u64,
+) -> Result<DeepSeekBalanceResponse, String> {
+    #[cfg(target_os = "windows")]
+    let shell = PathBuf::from("powershell.exe");
+    #[cfg(not(target_os = "windows"))]
+    let shell = which::which("pwsh")
+        .map_err(|_| "找不到 PowerShell，无法在无新增依赖模式下查询 DeepSeek 余额".to_string())?;
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$headers = @{ Authorization = "Bearer $env:DEEPSEEK_API_KEY" }
+$response = Invoke-RestMethod -Method Get -Uri 'https://api.deepseek.com/user/balance' -Headers $headers -TimeoutSec ([int]$env:WORKBENCH_USAGE_TIMEOUT)
+$response | ConvertTo-Json -Depth 8 -Compress
+"#;
+    let mut cmd = tokio::process::Command::new(shell);
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    cmd.env("DEEPSEEK_API_KEY", api_key);
+    cmd.env("WORKBENCH_USAGE_TIMEOUT", timeout_secs.to_string());
+    crate::process_util::apply_no_window_tokio(&mut cmd);
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(timeout_secs.saturating_add(2)),
+        cmd.output(),
+    )
+    .await
+    .map_err(|_| "DeepSeek 余额查询超时".to_string())?
+    .map_err(|err| format!("DeepSeek 余额查询进程启动失败: {err}"))?;
+
+    if !output.status.success() {
+        return Err("DeepSeek API 返回错误或网络不可用".into());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str::<DeepSeekBalanceResponse>(text.trim())
+        .map_err(|err| format!("DeepSeek 余额响应解析失败: {err}"))
+}
+
+fn resolve_deepseek_api_key(project_path: Option<&str>) -> Option<(String, String, u64)> {
+    let deepseek_settings = settings::get().usage.deepseek;
+    if let Some(value) = deepseek_settings
+        .api_key
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Some((
+            value,
+            "Workbench 设置".into(),
+            deepseek_settings
+                .timeout_secs
+                .unwrap_or(DEEPSEEK_BALANCE_TIMEOUT_SECS)
+                .clamp(3, 30),
+        ));
+    }
+
+    if let Some(value) = non_empty_env("DEEPSEEK_API_KEY") {
+        return Some((
+            value,
+            "进程环境 DEEPSEEK_API_KEY".into(),
+            DEEPSEEK_BALANCE_TIMEOUT_SECS,
+        ));
+    }
+
+    let dsh_home = RuntimeId::parse("deepseek-harness")
+        .and_then(crate::runtime::manifest::get)
+        .map(|manifest| manifest.resolve_home())
+        .unwrap_or_else(|| crate::process_util::user_home().join(".dsh"));
+
+    let credentials = dsh_home.join(".credentials.yaml");
+    if let Some(value) = read_mapping_key(&credentials, "DEEPSEEK_API_KEY") {
+        return Some((
+            value,
+            format!("{}", credentials.display()),
+            DEEPSEEK_BALANCE_TIMEOUT_SECS,
+        ));
+    }
+
+    if let Some(project_env) = project_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .map(|path| path.join(".env"))
+    {
+        if let Some(value) = read_env_file_key(&project_env, "DEEPSEEK_API_KEY") {
+            return Some((
+                value,
+                format!("{}", project_env.display()),
+                DEEPSEEK_BALANCE_TIMEOUT_SECS,
+            ));
+        }
+    }
+
+    let home_env = dsh_home.join(".env");
+    read_env_file_key(&home_env, "DEEPSEEK_API_KEY").map(|value| {
+        (
+            value,
+            format!("{}", home_env.display()),
+            DEEPSEEK_BALANCE_TIMEOUT_SECS,
+        )
+    })
+}
+
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn read_mapping_key(path: &Path, key: &str) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            return None;
+        }
+        let (name, value) = trimmed.split_once(':')?;
+        (name.trim() == key)
+            .then(|| clean_secret_literal(value))
+            .flatten()
+    })
+}
+
+fn read_env_file_key(path: &Path, key: &str) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            return None;
+        }
+        let raw = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        let (name, value) = raw.split_once('=')?;
+        (name.trim() == key)
+            .then(|| clean_secret_literal(value))
+            .flatten()
+    })
+}
+
+fn clean_secret_literal(raw: &str) -> Option<String> {
+    let value = raw
+        .trim()
+        .split_once(" #")
+        .map(|(head, _)| head)
+        .unwrap_or(raw.trim())
+        .trim_matches(['"', '\''])
+        .trim()
+        .to_string();
+    (!value.is_empty()).then_some(value)
 }
 
 #[tauri::command]
@@ -1306,6 +1904,45 @@ pub fn settings_set_runtime_override(
     let id =
         RuntimeId::parse(&runtime_id).ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
     settings::set_runtime_override(id.as_str(), patch)
+}
+
+#[tauri::command]
+pub fn settings_set_codex_gateway_usage(
+    patch: CodexGatewayUsageConfig,
+) -> Result<AppSettings, String> {
+    let base_url = normalize_optional_non_empty(patch.base_url);
+    let api_key = normalize_optional_non_empty(patch.api_key);
+    if base_url.is_none() && api_key.is_none() {
+        return settings::set_codex_gateway_usage(CodexGatewayUsageConfig::default());
+    }
+
+    let normalized = CodexGatewayUsageConfig {
+        base_url,
+        api_key,
+        path: normalize_optional_non_empty(patch.path).or_else(|| Some("/v1/usage".into())),
+        timeout_secs: patch.timeout_secs.map(|value| value.clamp(3, 30)),
+    };
+    settings::set_codex_gateway_usage(normalized)
+}
+
+#[tauri::command]
+pub fn settings_set_deepseek_usage(patch: DeepSeekUsageConfig) -> Result<AppSettings, String> {
+    let api_key = normalize_optional_non_empty(patch.api_key);
+    if api_key.is_none() {
+        return settings::set_deepseek_usage(DeepSeekUsageConfig::default());
+    }
+
+    let normalized = DeepSeekUsageConfig {
+        api_key,
+        timeout_secs: patch.timeout_secs.map(|value| value.clamp(3, 30)),
+    };
+    settings::set_deepseek_usage(normalized)
+}
+
+fn normalize_optional_non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
 }
 
 #[tauri::command]

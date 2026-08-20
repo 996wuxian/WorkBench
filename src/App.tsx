@@ -91,7 +91,9 @@ import type {
   AppSettings,
   ClaudeRouteStatus,
   ChatMessage,
+  CodexGatewayUsageConfig,
   CodexRouteStatus,
+  DeepSeekUsageConfig,
   NativeDeleteMode,
   PermissionDecision,
   PermissionMode,
@@ -100,6 +102,7 @@ import type {
   ProbeResult,
   RuntimeId,
   RuntimeInfo,
+  RuntimeUsageStatus,
   SessionMeta,
   SessionImageAttachment,
   SessionSelectionCatalog,
@@ -280,6 +283,8 @@ export default function App() {
   >({});
   const [permissionBusy, setPermissionBusy] = useState<string | null>(null);
   const [codexRoute, setCodexRoute] = useState<CodexRouteStatus | null>(null);
+  const [runtimeUsage, setRuntimeUsage] = useState<RuntimeUsageStatus | null>(null);
+  const [runtimeUsageLoading, setRuntimeUsageLoading] = useState(false);
   const [messagesBySession, setMessagesBySession] = useState<
     Record<string, ChatMessage[]>
   >({});
@@ -315,6 +320,7 @@ export default function App() {
   const [settingsRuntimeBusy, setSettingsRuntimeBusy] = useState<string | null>(
     null,
   );
+  const [settingsUsageBusy, setSettingsUsageBusy] = useState(false);
   const [sessionFilter, setSessionFilter] = useState("");
   const [showSearch, setShowSearch] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
@@ -398,6 +404,83 @@ export default function App() {
     [sessions, pendingSession, activeId],
   );
   const activeRuntimeId = active?.runtimeId ?? snapshot.runtimeId ?? runtimePick;
+
+  const refreshRuntimeUsage = useCallback(async () => {
+    const runtimeId = activeRuntimeId;
+    const supportsUsage = runtimeId === "deepseek-harness" || runtimeId === "codex";
+    if (!active || !supportsUsage) {
+      setRuntimeUsage(null);
+      setRuntimeUsageLoading(false);
+      return;
+    }
+
+    setRuntimeUsageLoading(true);
+    if (!isTauri()) {
+      setRuntimeUsage(
+        runtimeId === "deepseek-harness"
+          ? {
+              runtimeId,
+              provider: "DeepSeek",
+              status: "ready",
+              label: "DeepSeek 可用",
+              summary: "CNY 88.80",
+              detail: "浏览器预览数据",
+              refreshedAt: nowIso(),
+              hasCredential: true,
+              balances: [
+                {
+                  currency: "CNY",
+                  totalBalance: "88.80",
+                  grantedBalance: "0.00",
+                  toppedUpBalance: "88.80",
+                },
+              ],
+              routeKind: "deepseek-official",
+            }
+          : {
+              runtimeId,
+              provider: "Codex",
+              status: "ready",
+              label: "Codex 用量",
+              summary: "已使用：39.96 剩余：35.04 USD 到期：2026-09-18T09:46:05",
+              detail: "浏览器预览数据",
+              refreshedAt: nowIso(),
+              hasCredential: true,
+              balances: [],
+              used: "39.96",
+              remaining: "35.04",
+              total: "75.00",
+              unit: "USD",
+              expiresAt: "2026-09-18T09:46:05",
+            },
+      );
+      setRuntimeUsageLoading(false);
+      return;
+    }
+
+    try {
+      const status = await api.runtimeUsageStatus(runtimeId, active.projectPath ?? null);
+      setRuntimeUsage(status);
+    } catch (error) {
+      setRuntimeUsage({
+        runtimeId,
+        provider: runtimeLabel(runtimeId),
+        status: "error",
+        label: "用量查询失败",
+        summary: "无法读取用量",
+        detail: String(error),
+        refreshedAt: nowIso(),
+        hasCredential: false,
+        balances: [],
+      });
+    } finally {
+      setRuntimeUsageLoading(false);
+    }
+  }, [active, activeRuntimeId]);
+
+  useEffect(() => {
+    void refreshRuntimeUsage();
+  }, [refreshRuntimeUsage]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1239,6 +1322,64 @@ export default function App() {
       }
     },
     [appSettings, refreshSettingsDiagnostics],
+  );
+
+  const saveCodexGatewayUsage = useCallback(
+    async (patch: CodexGatewayUsageConfig) => {
+      if (!isTauri()) {
+        setAppSettings((prev) => ({
+          runtimes: prev?.runtimes ?? {},
+          usage: {
+            ...(prev?.usage ?? {}),
+            codexGateway: patch,
+          },
+        }));
+        setStatusLine("Codex 中转用量配置已保存 · browser mock");
+        return;
+      }
+
+      try {
+        setSettingsUsageBusy(true);
+        const next = await api.setCodexGatewayUsage(patch);
+        setAppSettings(next);
+        setStatusLine("Codex 中转用量配置已保存");
+        void refreshRuntimeUsage();
+      } catch (e) {
+        setStatusLine(`save usage config failed: ${String(e)}`);
+      } finally {
+        setSettingsUsageBusy(false);
+      }
+    },
+    [refreshRuntimeUsage],
+  );
+
+  const saveDeepSeekUsage = useCallback(
+    async (patch: DeepSeekUsageConfig) => {
+      if (!isTauri()) {
+        setAppSettings((prev) => ({
+          runtimes: prev?.runtimes ?? {},
+          usage: {
+            ...(prev?.usage ?? {}),
+            deepseek: patch,
+          },
+        }));
+        setStatusLine("DeepSeek 用量配置已保存 · browser mock");
+        return;
+      }
+
+      try {
+        setSettingsUsageBusy(true);
+        const next = await api.setDeepSeekUsage(patch);
+        setAppSettings(next);
+        setStatusLine("DeepSeek 用量配置已保存");
+        void refreshRuntimeUsage();
+      } catch (e) {
+        setStatusLine(`save usage config failed: ${String(e)}`);
+      } finally {
+        setSettingsUsageBusy(false);
+      }
+    },
+    [refreshRuntimeUsage],
   );
 
   const loadSessions = useCallback(async () => {
@@ -3244,6 +3385,8 @@ export default function App() {
                 skillsLoading={skillsLoading}
                 skillsError={skillsError}
                 selectedSkillNames={selectedSkillNames}
+                runtimeUsageStatus={runtimeUsage}
+                runtimeUsageLoading={runtimeUsageLoading}
                 projectPath={active.projectPath ?? null}
                 projectPathEditable={projectPathEditable}
                 projectPathBusy={projectPathBusy}
@@ -3280,6 +3423,7 @@ export default function App() {
                     prev.filter((item) => skillKey(item) !== skillKey(name)),
                   )
                 }
+                onRefreshRuntimeUsage={() => void refreshRuntimeUsage()}
                 onPickProjectPath={() => void pickActiveProjectDirectory()}
               />
             </>
@@ -3320,6 +3464,7 @@ export default function App() {
         probes={probes}
         appSettings={appSettings}
         settingsRuntimeBusy={settingsRuntimeBusy}
+        settingsUsageBusy={settingsUsageBusy}
         routeDiagnosticsPanel={routeDiagnosticsPanel}
         statusLine={statusLine}
         onCloseSettings={() => setSettingsOpen(false)}
@@ -3328,6 +3473,8 @@ export default function App() {
         onRefreshSettingsDiagnostics={refreshSettingsDiagnostics}
         onSaveRuntimeCliPath={saveRuntimeCliPath}
         onClearRuntimeCliPath={clearRuntimeCliPath}
+        onSaveCodexGatewayUsage={saveCodexGatewayUsage}
+        onSaveDeepSeekUsage={saveDeepSeekUsage}
         sessionContextMenu={sessionContextMenu}
         sessionContextTargetTitle={sessionContextTargetTitle}
         sessionContextTargetPinned={sessionContextTarget?.pinned ?? false}
