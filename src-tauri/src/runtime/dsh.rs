@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex as ParkingMutex;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
@@ -274,7 +274,7 @@ impl LiveSession for DshLiveSession {
 
         let output_result = tokio::time::timeout(
             std::time::Duration::from_secs(PROMPT_TIMEOUT_SECS),
-            read_stdout(stdout),
+            stream_stdout(stdout, self.event_tx.clone()),
         )
         .await;
 
@@ -308,8 +308,8 @@ impl LiveSession for DshLiveSession {
             ));
         }
 
-        let stdout = match output_result {
-            Ok(Ok(output)) => output,
+        match output_result {
+            Ok(Ok(_)) => {}
             Ok(Err(error)) => {
                 self.emit_failed_tool(&run_id, "DeepSeek Harness headless failed");
                 return Err(error);
@@ -321,18 +321,10 @@ impl LiveSession for DshLiveSession {
                     format!("DeepSeek Harness timed out after {PROMPT_TIMEOUT_SECS} seconds"),
                 ));
             }
-        };
+        }
 
         match status {
             Some(status) if status.success() => {
-                let trimmed = stdout.trim();
-                if !trimmed.is_empty() {
-                    let _ = self.event_tx.send(HostEvent::Stream {
-                        kind: StreamKind::Assistant,
-                        text: trimmed.to_string(),
-                        done: false,
-                    });
-                }
                 let _ = self.event_tx.send(HostEvent::ToolCall {
                     id: run_id,
                     name: "dsh_headless".into(),
@@ -572,14 +564,36 @@ fn json_string(value: &str) -> Result<String, AgentError> {
     })
 }
 
-async fn read_stdout(mut stdout: tokio::process::ChildStdout) -> Result<String, AgentError> {
+async fn stream_stdout(
+    stdout: tokio::process::ChildStdout,
+    event_tx: mpsc::UnboundedSender<HostEvent>,
+) -> Result<String, AgentError> {
+    let mut reader = BufReader::new(stdout);
     let mut output = String::new();
-    stdout.read_to_string(&mut output).await.map_err(|err| {
-        AgentError::new(
-            AgentErrorCode::AgentCrashed,
-            format!("DeepSeek Harness stdout read error: {err}"),
-        )
-    })?;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes = reader.read_line(&mut line).await.map_err(|err| {
+            AgentError::new(
+                AgentErrorCode::AgentCrashed,
+                format!("DeepSeek Harness stdout read error: {err}"),
+            )
+        })?;
+        if bytes == 0 {
+            break;
+        }
+        output.push_str(&line);
+        let _ = event_tx.send(HostEvent::Stream {
+            kind: StreamKind::Assistant,
+            text: line.clone(),
+            done: false,
+        });
+    }
+    let _ = event_tx.send(HostEvent::Stream {
+        kind: StreamKind::Assistant,
+        text: String::new(),
+        done: true,
+    });
     Ok(output)
 }
 

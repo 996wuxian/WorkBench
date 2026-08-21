@@ -16,6 +16,7 @@ import {
   IconFileAdd,
   IconFileText,
   IconFolder,
+  IconGoal,
   IconPhoto,
   IconPlus,
   IconQuote,
@@ -73,6 +74,8 @@ type Props = {
   skillsLoading: boolean;
   skillsError: string | null;
   selectedSkillNames: string[];
+  goalModeAvailable: boolean;
+  goalModeActive: boolean;
   runtimeUsageStatus: RuntimeUsageStatus | null;
   runtimeUsageLoading: boolean;
   projectPath: string | null;
@@ -97,6 +100,7 @@ type Props = {
   onPermissionChange: (value: string) => void;
   onSkillSelect: (name: string) => void;
   onSkillRemove: (name: string) => void;
+  onGoalModeToggle: () => void;
   onRefreshRuntimeUsage: () => void;
   onPickProjectPath: () => void;
 };
@@ -127,6 +131,8 @@ export function ComposerPanel({
   skillsLoading,
   skillsError,
   selectedSkillNames,
+  goalModeAvailable,
+  goalModeActive,
   runtimeUsageStatus,
   runtimeUsageLoading,
   projectPath,
@@ -151,6 +157,7 @@ export function ComposerPanel({
   onPermissionChange,
   onSkillSelect,
   onSkillRemove,
+  onGoalModeToggle,
   onRefreshRuntimeUsage,
   onPickProjectPath,
 }: Props) {
@@ -570,6 +577,24 @@ export function ComposerPanel({
               </div>
             ) : null}
           </div>
+          <button
+            type="button"
+            className={"composer-goal-trigger" + (goalModeActive ? " is-active" : "")}
+            title={
+              goalModeAvailable
+                ? goalModeActive
+                  ? "关闭 Codex Goal 模式"
+                  : "开启 Codex Goal 模式"
+                : "Goal 目前仅支持 Codex 会话"
+            }
+            aria-label={goalModeActive ? "关闭 Codex Goal 模式" : "开启 Codex Goal 模式"}
+            aria-pressed={goalModeActive}
+            disabled={inputDisabled || !goalModeAvailable}
+            onClick={onGoalModeToggle}
+          >
+            <IconGoal size={15} />
+            <span>Goal</span>
+          </button>
         </div>
         {quoteTarget ? (
           <div className="composer__quote">

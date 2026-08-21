@@ -138,6 +138,13 @@ const INITIAL_VISIBLE_MESSAGES = 60;
 const HISTORY_BATCH_SIZE = 40;
 const CHAT_BOTTOM_THRESHOLD = 80;
 const CHAT_TOP_THRESHOLD = 48;
+
+function codexGoalPrompt(text: string): string {
+  if (/^\/goal(?:\s|$)/i.test(text.trimStart())) {
+    return text;
+  }
+  return `/goal ${text}`;
+}
 const PROJECT_ORDER_STORAGE_KEY = "workbench.projectOrder";
 const PINNED_PROJECTS_STORAGE_KEY = "workbench.pinnedProjects";
 const APP_VERSION = __APP_VERSION__;
@@ -299,6 +306,7 @@ export default function App() {
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [selectedSkillNames, setSelectedSkillNames] = useState<string[]>([]);
+  const [goalModeBySession, setGoalModeBySession] = useState<Record<string, boolean>>({});
   const [quoteTarget, setQuoteTarget] = useState<QuoteTarget | null>(null);
   const [imageAttachments, setImageAttachments] = useState<ComposerImageAttachment[]>([]);
   const [fileAttachments, setFileAttachments] = useState<ComposerFileAttachment[]>([]);
@@ -633,6 +641,9 @@ export default function App() {
   }, [runtimePick, sessionFilter, sessions, showArchived]);
   const activeSupportsReasoningEffort =
     activeRuntimeCapabilities?.reasoningEffort ?? false;
+  const activeGoalModeAvailable = active?.runtimeId === "codex";
+  const activeGoalMode =
+    Boolean(active && goalModeBySession[active.id]) && activeGoalModeAvailable;
   const activePermissionQueue = activeId
     ? (permissionQueue[activeId] ?? [])
     : [];
@@ -2558,8 +2569,10 @@ export default function App() {
     const bodyWithSkills = [selectedSkillTokens.join(" "), fileContextLines.join("\n"), body]
       .filter(Boolean)
       .join("\n\n");
-    const text = composeMessageText(quoteTarget, bodyWithSkills);
     const session = active;
+    const goalMode = session.runtimeId === "codex" && Boolean(goalModeBySession[session.id]);
+    const composedText = composeMessageText(quoteTarget, bodyWithSkills);
+    const text = goalMode ? codexGoalPrompt(composedText) : composedText;
     const outgoingImages = imageAttachments;
     const imagePaths = outgoingImages.map((image) => image.path);
     const displayText = [
@@ -3385,6 +3398,8 @@ export default function App() {
                 skillsLoading={skillsLoading}
                 skillsError={skillsError}
                 selectedSkillNames={selectedSkillNames}
+                goalModeAvailable={activeGoalModeAvailable}
+                goalModeActive={activeGoalMode}
                 runtimeUsageStatus={runtimeUsage}
                 runtimeUsageLoading={runtimeUsageLoading}
                 projectPath={active.projectPath ?? null}
@@ -3423,6 +3438,14 @@ export default function App() {
                     prev.filter((item) => skillKey(item) !== skillKey(name)),
                   )
                 }
+                onGoalModeToggle={() => {
+                  if (!active || active.runtimeId !== "codex") return;
+                  setGoalModeBySession((prev) => ({
+                    ...prev,
+                    [active.id]: !prev[active.id],
+                  }));
+                  requestAnimationFrame(() => composerInputRef.current?.focus());
+                }}
                 onRefreshRuntimeUsage={() => void refreshRuntimeUsage()}
                 onPickProjectPath={() => void pickActiveProjectDirectory()}
               />

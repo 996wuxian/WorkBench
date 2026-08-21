@@ -41,9 +41,9 @@ describe("runtime capabilities", () => {
       { key: "streaming", label: "流式输出", enabled: true },
       {
         key: "permissionGate",
-        label: "Host 权限",
+        label: "Host 审批",
         enabled: false,
-        unavailableReason: "该 runtime 不支持 Host 侧权限闸",
+        unavailableReason: "该 runtime 不支持 Workbench 侧逐工具审批",
       },
     ]);
   });

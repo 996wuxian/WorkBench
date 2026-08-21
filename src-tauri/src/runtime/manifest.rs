@@ -345,6 +345,17 @@ mod tests {
     }
 
     #[test]
+    fn builtin_static_models_are_reported_as_model_options() {
+        for manifest in all() {
+            assert!(
+                manifest.models.is_empty() || manifest.capabilities.models_list,
+                "{} has static model options but does not report modelsList",
+                manifest.id
+            );
+        }
+    }
+
+    #[test]
     fn expand_path_handles_tilde() {
         let expanded = expand_path("~/.grok");
         assert!(!expanded.starts_with('~'));

@@ -53,6 +53,7 @@ import {
   IconQuote as TbQuote,
   IconSquare as TbSquare,
   IconSun as TbSun,
+  IconTarget as TbTarget,
   IconTrash as TbTrash,
   IconX as TbX,
 } from "@tabler/icons-react";
@@ -194,6 +195,7 @@ export const IconPlug = wrap(TbPlug);
 export const IconPuzzle = wrap(TbPuzzle);
 export const IconThemeSun = wrap(TbSun);
 export const IconThemeMoon = wrap(TbMoon);
+export const IconGoal = wrap(TbTarget);
 export const IconRiskAsk = wrap(TbShieldQuestion);
 export const IconRiskAuto = wrap(TbShieldBolt);
 export const IconRiskReadOnly = wrap(TbShieldCheck);

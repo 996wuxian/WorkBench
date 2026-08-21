@@ -2457,7 +2457,7 @@ mod tests {
     #[test]
     fn trace_detail_builders_do_not_include_private_text() {
         let secret = "SECRET prompt and response body";
-        let prompt = prompt_trace_details(secret).to_string();
+        let prompt = prompt_trace_details(secret, &[]).to_string();
         let error = error_trace_details(&AgentError::new(AgentErrorCode::NetworkProvider, secret))
             .to_string();
         let stream = first_delta_trace_details(StreamKind::Assistant, secret, 42).to_string();
