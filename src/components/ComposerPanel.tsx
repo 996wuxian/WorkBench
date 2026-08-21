@@ -17,6 +17,7 @@ import {
   IconFileText,
   IconFolder,
   IconGoal,
+  IconHistory,
   IconPhoto,
   IconPlus,
   IconQuote,
@@ -76,6 +77,9 @@ type Props = {
   selectedSkillNames: string[];
   goalModeAvailable: boolean;
   goalModeActive: boolean;
+  personalCenterAvailable: boolean;
+  personalCenterActive: boolean;
+  personalCenterPath: string | null;
   runtimeUsageStatus: RuntimeUsageStatus | null;
   runtimeUsageLoading: boolean;
   projectPath: string | null;
@@ -101,6 +105,7 @@ type Props = {
   onSkillSelect: (name: string) => void;
   onSkillRemove: (name: string) => void;
   onGoalModeToggle: () => void;
+  onPersonalCenterToggle: () => void;
   onRefreshRuntimeUsage: () => void;
   onPickProjectPath: () => void;
 };
@@ -133,6 +138,9 @@ export function ComposerPanel({
   selectedSkillNames,
   goalModeAvailable,
   goalModeActive,
+  personalCenterAvailable,
+  personalCenterActive,
+  personalCenterPath,
   runtimeUsageStatus,
   runtimeUsageLoading,
   projectPath,
@@ -158,6 +166,7 @@ export function ComposerPanel({
   onSkillSelect,
   onSkillRemove,
   onGoalModeToggle,
+  onPersonalCenterToggle,
   onRefreshRuntimeUsage,
   onPickProjectPath,
 }: Props) {
@@ -594,6 +603,24 @@ export function ComposerPanel({
           >
             <IconGoal size={15} />
             <span>Goal</span>
+          </button>
+          <button
+            type="button"
+            className={"composer-goal-trigger" + (personalCenterActive ? " is-active" : "")}
+            title={
+              personalCenterAvailable
+                ? personalCenterActive
+                  ? `关闭个人中心模式 · ${personalCenterPath ?? ""}`
+                  : `开启个人中心模式 · ${personalCenterPath ?? ""}`
+                : "请先在设置中配置个人中心目录"
+            }
+            aria-label={personalCenterActive ? "关闭个人中心模式" : "开启个人中心模式"}
+            aria-pressed={personalCenterActive}
+            disabled={inputDisabled || (!personalCenterAvailable && !personalCenterActive)}
+            onClick={onPersonalCenterToggle}
+          >
+            <IconHistory size={15} />
+            <span>Center</span>
           </button>
         </div>
         {quoteTarget ? (

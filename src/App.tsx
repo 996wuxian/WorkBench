@@ -329,6 +329,7 @@ export default function App() {
     null,
   );
   const [settingsUsageBusy, setSettingsUsageBusy] = useState(false);
+  const [settingsPersonalCenterBusy, setSettingsPersonalCenterBusy] = useState(false);
   const [sessionFilter, setSessionFilter] = useState("");
   const [showSearch, setShowSearch] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
@@ -1393,6 +1394,46 @@ export default function App() {
     [refreshRuntimeUsage],
   );
 
+  const savePersonalCenterPath = useCallback(async (path: string | null) => {
+    const nextPath = path?.trim().replace(/^["']|["']$/g, "") || null;
+    if (!isTauri()) {
+      setAppSettings((prev) => ({
+        runtimes: prev?.runtimes ?? {},
+        usage: prev?.usage,
+        personalCenter: nextPath ? { path: nextPath } : {},
+      }));
+      setStatusLine("个人中心目录已保存 · browser mock");
+      return;
+    }
+
+    try {
+      setSettingsPersonalCenterBusy(true);
+      const next = await api.setPersonalCenter(nextPath);
+      setAppSettings(next);
+      setStatusLine(nextPath ? "个人中心目录已保存" : "个人中心目录已清除");
+    } catch (e) {
+      setStatusLine(`save personal center failed: ${String(e)}`);
+    } finally {
+      setSettingsPersonalCenterBusy(false);
+    }
+  }, []);
+
+  const pickPersonalCenterPath = useCallback(async () => {
+    if (!isTauri()) {
+      setStatusLine("目录选择仅在桌面模式可用");
+      return;
+    }
+    try {
+      const selected = await api.pickProjectDirectory(
+        appSettings?.personalCenter?.path ?? null,
+      );
+      if (!selected) return;
+      await savePersonalCenterPath(selected);
+    } catch (e) {
+      setStatusLine(`pick personal center failed: ${String(e)}`);
+    }
+  }, [appSettings?.personalCenter?.path, savePersonalCenterPath]);
+
   const loadSessions = useCallback(async () => {
     if (!isTauri()) {
       const list = mockSessions();
@@ -2238,6 +2279,8 @@ export default function App() {
                 : "default",
           modelReasoningEffort: defaultReasoningEffortForRuntime(runtimePick),
           permissionMode: defaultPermissionMode(runtimePick),
+          personalCenterEnabled: false,
+          personalCenterPath: null,
           createdAt: nowIso(),
           updatedAt: nowIso(),
         };
@@ -2355,6 +2398,39 @@ export default function App() {
       setStatusLine(String(e));
     } finally {
       setSettingsBusy(false);
+    }
+  }
+
+  async function toggleActivePersonalCenter() {
+    if (!active) return;
+    const enabled = !Boolean(active.personalCenterEnabled);
+    if (!isTauri()) {
+      const nextMeta: SessionMeta = {
+        ...active,
+        personalCenterEnabled: enabled,
+        personalCenterPath: enabled
+          ? appSettings?.personalCenter?.path ?? active.personalCenterPath ?? null
+          : active.personalCenterPath ?? null,
+        updatedAt: nowIso(),
+      };
+      setPendingSession((prev) => (prev?.id === active.id ? nextMeta : prev));
+      setSessions((prev) => mergeSessions(prev, [nextMeta]));
+      setStatusLine(
+        enabled ? "个人中心模式已开启 · browser mock" : "个人中心模式已关闭 · browser mock",
+      );
+      requestAnimationFrame(() => composerInputRef.current?.focus());
+      return;
+    }
+
+    try {
+      const nextMeta = await api.setSessionPersonalCenter(active.id, enabled);
+      setPendingSession((prev) => (prev?.id === active.id ? nextMeta : prev));
+      setSessions((prev) => mergeSessions(prev, [nextMeta]));
+      setStatusLine(enabled ? "个人中心模式已开启" : "个人中心模式已关闭");
+    } catch (e) {
+      setStatusLine(`personal center mode failed: ${String(e)}`);
+    } finally {
+      requestAnimationFrame(() => composerInputRef.current?.focus());
     }
   }
 
@@ -3002,6 +3078,8 @@ export default function App() {
             : "default",
       modelReasoningEffort: defaultReasoningEffortForRuntime(node.runtimeId),
       permissionMode: defaultPermissionMode(node.runtimeId),
+      personalCenterEnabled: false,
+      personalCenterPath: null,
       createdAt: nowIso(),
       updatedAt: nowIso(),
     };
@@ -3400,6 +3478,11 @@ export default function App() {
                 selectedSkillNames={selectedSkillNames}
                 goalModeAvailable={activeGoalModeAvailable}
                 goalModeActive={activeGoalMode}
+                personalCenterAvailable={Boolean(appSettings?.personalCenter?.path?.trim())}
+                personalCenterActive={Boolean(active.personalCenterEnabled)}
+                personalCenterPath={
+                  active.personalCenterPath ?? appSettings?.personalCenter?.path ?? null
+                }
                 runtimeUsageStatus={runtimeUsage}
                 runtimeUsageLoading={runtimeUsageLoading}
                 projectPath={active.projectPath ?? null}
@@ -3446,6 +3529,7 @@ export default function App() {
                   }));
                   requestAnimationFrame(() => composerInputRef.current?.focus());
                 }}
+                onPersonalCenterToggle={() => void toggleActivePersonalCenter()}
                 onRefreshRuntimeUsage={() => void refreshRuntimeUsage()}
                 onPickProjectPath={() => void pickActiveProjectDirectory()}
               />
@@ -3488,6 +3572,7 @@ export default function App() {
         appSettings={appSettings}
         settingsRuntimeBusy={settingsRuntimeBusy}
         settingsUsageBusy={settingsUsageBusy}
+        settingsPersonalCenterBusy={settingsPersonalCenterBusy}
         routeDiagnosticsPanel={routeDiagnosticsPanel}
         statusLine={statusLine}
         onCloseSettings={() => setSettingsOpen(false)}
@@ -3498,6 +3583,8 @@ export default function App() {
         onClearRuntimeCliPath={clearRuntimeCliPath}
         onSaveCodexGatewayUsage={saveCodexGatewayUsage}
         onSaveDeepSeekUsage={saveDeepSeekUsage}
+        onSavePersonalCenterPath={savePersonalCenterPath}
+        onPickPersonalCenterPath={pickPersonalCenterPath}
         sessionContextMenu={sessionContextMenu}
         sessionContextTargetTitle={sessionContextTargetTitle}
         sessionContextTargetPinned={sessionContextTarget?.pinned ?? false}

@@ -1,6 +1,13 @@
 import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
 
-import { IconClose, IconDoctor, IconPlug, IconRefresh, IconSettings } from "./icons";
+import {
+  IconClose,
+  IconDoctor,
+  IconFolder,
+  IconPlug,
+  IconRefresh,
+  IconSettings,
+} from "./icons";
 import {
   capabilityDescriptors,
   protocolLabel,
@@ -22,7 +29,7 @@ import type {
   RuntimeInfo,
 } from "../lib/types";
 
-export type SettingsSection = "general" | "usage" | "cli";
+export type SettingsSection = "general" | "personal" | "usage" | "cli";
 
 type Props = {
   activeSection: SettingsSection;
@@ -32,6 +39,7 @@ type Props = {
   appSettings: AppSettings | null;
   settingsRuntimeBusy: string | null;
   settingsUsageBusy: boolean;
+  settingsPersonalCenterBusy: boolean;
   routeDiagnosticsPanel: ReactNode;
   statusLine: string;
   onSectionChange: (section: SettingsSection) => void;
@@ -41,6 +49,8 @@ type Props = {
   onClearRuntimeCliPath: (runtimeId: RuntimeId) => void;
   onSaveCodexGatewayUsage: (patch: CodexGatewayUsageConfig) => void;
   onSaveDeepSeekUsage: (patch: DeepSeekUsageConfig) => void;
+  onSavePersonalCenterPath: (path: string | null) => void;
+  onPickPersonalCenterPath: () => void;
   onClose: () => void;
 };
 
@@ -50,6 +60,7 @@ const settingsSections: Array<{
   description: string;
 }> = [
   { id: "general", label: "常规", description: "显示与基础偏好" },
+  { id: "personal", label: "个人中心", description: "目录与会话模式" },
   { id: "usage", label: "余额与消耗", description: "Codex / DeepSeek" },
   { id: "cli", label: "CLI 检测", description: "本机 Agent 状态" },
 ];
@@ -106,6 +117,7 @@ export function SettingsDialog({
   appSettings,
   settingsRuntimeBusy,
   settingsUsageBusy,
+  settingsPersonalCenterBusy,
   routeDiagnosticsPanel,
   statusLine,
   onSectionChange,
@@ -115,9 +127,12 @@ export function SettingsDialog({
   onClearRuntimeCliPath,
   onSaveCodexGatewayUsage,
   onSaveDeepSeekUsage,
+  onSavePersonalCenterPath,
+  onPickPersonalCenterPath,
   onClose,
 }: Props) {
   const [cliPathDrafts, setCliPathDrafts] = useState<Record<string, string>>({});
+  const [personalCenterPathDraft, setPersonalCenterPathDraft] = useState("");
   const [usageProvider, setUsageProvider] = useState<UsageProvider>("codex");
   const [codexUsageDraft, setCodexUsageDraft] = useState<CodexUsageDraft>(
     defaultCodexUsageDraft,
@@ -174,6 +189,10 @@ export function SettingsDialog({
     });
   }, [appSettings]);
 
+  useEffect(() => {
+    setPersonalCenterPathDraft(appSettings?.personalCenter?.path ?? "");
+  }, [appSettings]);
+
   const savedCodexUsage = appSettings?.usage?.codexGateway;
   const codexUsageTimeout = Number(codexUsageDraft.timeoutSecs);
   const codexUsageTimeoutValid =
@@ -215,6 +234,13 @@ export function SettingsDialog({
     deepseekUsageDirty;
   const canClearDeepSeekUsage =
     !settingsUsageBusy && Boolean(savedDeepSeekUsage?.apiKey || savedDeepSeekUsage?.timeoutSecs);
+  const savedPersonalCenterPath = appSettings?.personalCenter?.path ?? "";
+  const personalCenterPathDirty =
+    personalCenterPathDraft.trim() !== savedPersonalCenterPath.trim();
+  const canSavePersonalCenterPath =
+    personalCenterPathDirty && !settingsPersonalCenterBusy;
+  const canClearPersonalCenterPath =
+    Boolean(savedPersonalCenterPath.trim()) && !settingsPersonalCenterBusy;
 
   function saveCodexUsage(ev: FormEvent<HTMLFormElement>) {
     ev.preventDefault();
@@ -261,6 +287,8 @@ export function SettingsDialog({
             >
               {section.id === "general" ? (
                 <IconSettings size={15} />
+              ) : section.id === "personal" ? (
+                <IconFolder size={15} />
               ) : section.id === "usage" ? (
                 <IconPlug size={15} />
               ) : (
@@ -319,6 +347,72 @@ export function SettingsDialog({
               <div className="settings-preview">
                 <strong>预览文本</strong>
                 <span>聊天、会话列表和设置面板会使用当前字体大小。</span>
+              </div>
+            </div>
+          ) : activeSection === "personal" ? (
+            <div className="settings-section">
+              <div className="settings-row settings-row--stack">
+                <div className="settings-row__title">个人中心目录</div>
+                <div className="settings-row__desc">
+                  仅在会话手动开启个人中心模式时读取入口规则，不会默认注入或写入该目录。
+                </div>
+              </div>
+              <form
+                className="settings-runtime-path"
+                onSubmit={(ev) => {
+                  ev.preventDefault();
+                  if (!canSavePersonalCenterPath) return;
+                  const nextPath = personalCenterPathDraft.trim().replace(/^["']|["']$/g, "");
+                  onSavePersonalCenterPath(nextPath.length > 0 ? nextPath : null);
+                }}
+              >
+                <label className="settings-runtime-path__label" htmlFor="personal-center-path">
+                  目录路径
+                  <span>
+                    读取 AGENTS.md、workflows/README.md 和 memory/personal 入口文件。
+                  </span>
+                </label>
+                <div className="settings-runtime-path__row">
+                  <input
+                    id="personal-center-path"
+                    type="text"
+                    value={personalCenterPathDraft}
+                    placeholder="X:\\1_2026_project\\wuxian-ai-center"
+                    spellCheck={false}
+                    disabled={settingsPersonalCenterBusy}
+                    onChange={(ev) => setPersonalCenterPathDraft(ev.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    disabled={settingsPersonalCenterBusy}
+                    onClick={onPickPersonalCenterPath}
+                  >
+                    选择
+                  </button>
+                  <button
+                    type="submit"
+                    className="btn"
+                    disabled={!canSavePersonalCenterPath}
+                  >
+                    {settingsPersonalCenterBusy ? "保存中" : "保存"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    disabled={!canClearPersonalCenterPath}
+                    onClick={() => {
+                      setPersonalCenterPathDraft("");
+                      onSavePersonalCenterPath(null);
+                    }}
+                  >
+                    清除
+                  </button>
+                </div>
+              </form>
+              <div className="settings-preview">
+                <strong>会话开关</strong>
+                <span>在聊天输入区开启 Center 后，本会话每轮会附加个人中心入口规则。</span>
               </div>
             </div>
           ) : activeSection === "usage" ? (

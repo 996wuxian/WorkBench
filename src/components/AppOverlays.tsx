@@ -70,6 +70,7 @@ type Props = {
   appSettings: AppSettings | null;
   settingsRuntimeBusy: string | null;
   settingsUsageBusy: boolean;
+  settingsPersonalCenterBusy: boolean;
   routeDiagnosticsPanel: ReactNode;
   statusLine: string;
   onCloseSettings: () => void;
@@ -80,6 +81,8 @@ type Props = {
   onClearRuntimeCliPath: (runtimeId: RuntimeId) => void;
   onSaveCodexGatewayUsage: (patch: CodexGatewayUsageConfig) => void;
   onSaveDeepSeekUsage: (patch: DeepSeekUsageConfig) => void;
+  onSavePersonalCenterPath: (path: string | null) => void;
+  onPickPersonalCenterPath: () => void;
   sessionContextMenu: SessionContextMenu;
   sessionContextTargetTitle: string;
   sessionContextTargetPinned: boolean;
@@ -138,6 +141,7 @@ export function AppOverlays({
   appSettings,
   settingsRuntimeBusy,
   settingsUsageBusy,
+  settingsPersonalCenterBusy,
   routeDiagnosticsPanel,
   statusLine,
   onCloseSettings,
@@ -148,6 +152,8 @@ export function AppOverlays({
   onClearRuntimeCliPath,
   onSaveCodexGatewayUsage,
   onSaveDeepSeekUsage,
+  onSavePersonalCenterPath,
+  onPickPersonalCenterPath,
   sessionContextMenu,
   sessionContextTargetTitle,
   sessionContextTargetPinned,
@@ -421,6 +427,7 @@ export function AppOverlays({
                 appSettings={appSettings}
                 settingsRuntimeBusy={settingsRuntimeBusy}
                 settingsUsageBusy={settingsUsageBusy}
+                settingsPersonalCenterBusy={settingsPersonalCenterBusy}
                 routeDiagnosticsPanel={routeDiagnosticsPanel}
                 statusLine={statusLine}
                 onSectionChange={onSettingsSectionChange}
@@ -430,6 +437,8 @@ export function AppOverlays({
                 onClearRuntimeCliPath={onClearRuntimeCliPath}
                 onSaveCodexGatewayUsage={onSaveCodexGatewayUsage}
                 onSaveDeepSeekUsage={onSaveDeepSeekUsage}
+                onSavePersonalCenterPath={onSavePersonalCenterPath}
+                onPickPersonalCenterPath={onPickPersonalCenterPath}
                 onClose={onCloseSettings}
               />
             </div>,

@@ -155,6 +155,8 @@ export interface SessionMeta {
   nativeSource?: string | null;
   nativeUpdatedAt?: string | null;
   nativeHistoryImportedAt?: string | null;
+  personalCenterEnabled?: boolean;
+  personalCenterPath?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -392,7 +394,12 @@ export interface UsageSettings {
   deepseek?: DeepSeekUsageConfig;
 }
 
+export interface PersonalCenterSettings {
+  path?: string | null;
+}
+
 export interface AppSettings {
   runtimes: Record<string, RuntimeOverride>;
   usage?: UsageSettings;
+  personalCenter?: PersonalCenterSettings;
 }

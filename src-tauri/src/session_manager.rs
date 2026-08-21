@@ -25,6 +25,17 @@ use crate::session_fsm::{SessionFsm, SessionState};
 use crate::session_store::{
     self, StoredChatMessage, StoredSessionMeta, StoredTraceEvent, StoredWorktreeChangeBlock,
 };
+use crate::settings;
+
+const PERSONAL_CENTER_CONTEXT_CHAR_LIMIT: usize = 32 * 1024;
+const PERSONAL_CENTER_ENTRY_FILES: [&str; 6] = [
+    "AGENTS.md",
+    "README.md",
+    "workflows/README.md",
+    "memory/personal/profile.md",
+    "memory/personal/working-style.md",
+    "memory/personal/goals.md",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +62,9 @@ pub struct SessionMeta {
     pub native_source: Option<String>,
     pub native_updated_at: Option<String>,
     pub native_history_imported_at: Option<String>,
+    #[serde(default)]
+    pub personal_center_enabled: bool,
+    pub personal_center_path: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -272,6 +286,107 @@ fn prompt_display_text(text: &str, images: &[PromptImageInput]) -> String {
     out
 }
 
+struct PersonalCenterContext {
+    prompt: String,
+    path: String,
+    entries: Vec<String>,
+    chars: usize,
+}
+
+fn personal_center_context(meta: &SessionMeta) -> Result<Option<PersonalCenterContext>, String> {
+    if !meta.personal_center_enabled {
+        return Ok(None);
+    }
+    let path = meta
+        .personal_center_path
+        .clone()
+        .or_else(|| settings::get().personal_center.path)
+        .ok_or_else(|| "personal center path is not configured".to_string())?;
+    let root = PathBuf::from(&path);
+    if !root.is_dir() {
+        return Err(format!(
+            "personal center directory does not exist: {}",
+            root.display()
+        ));
+    }
+
+    let mut sections = Vec::new();
+    let mut entries = Vec::new();
+    let mut remaining = PERSONAL_CENTER_CONTEXT_CHAR_LIMIT;
+    for relative in PERSONAL_CENTER_ENTRY_FILES {
+        if remaining == 0 {
+            break;
+        }
+        let path = root.join(relative);
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            tracing::warn!("failed to read personal center entry {}", path.display());
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let (content, used) = take_chars(text, remaining);
+        remaining = remaining.saturating_sub(used);
+        entries.push(relative.replace('\\', "/"));
+        sections.push(format!(
+            "## {}\n{}",
+            relative.replace('\\', "/"),
+            content.trim_end()
+        ));
+    }
+
+    if sections.is_empty() {
+        return Err(format!(
+            "personal center has no readable entry files under {}",
+            root.display()
+        ));
+    }
+
+    let prompt = format!(
+        "You are running inside Workbench Personal Center Mode.\n\
+Use the following personal center rules, workflows, and memory as operating context for this turn.\n\
+Do not write to the personal center directory unless the user explicitly asks.\n\
+Personal center root: {}\n\n{}",
+        root.display(),
+        sections.join("\n\n---\n\n")
+    );
+    let chars = prompt.chars().count();
+    Ok(Some(PersonalCenterContext {
+        prompt,
+        path: root.display().to_string(),
+        entries,
+        chars,
+    }))
+}
+
+fn take_chars(text: &str, max_chars: usize) -> (String, usize) {
+    let mut out = String::new();
+    for (index, ch) in text.chars().enumerate() {
+        if index >= max_chars {
+            out.push_str("\n\n[truncated by Workbench personal center context limit]");
+            return (out, max_chars);
+        }
+        out.push(ch);
+    }
+    let used = out.chars().count();
+    (out, used)
+}
+
+fn attach_personal_center_context(
+    text: &str,
+    context: &PersonalCenterContext,
+) -> String {
+    format!(
+        "{}\n\n---\n\nUser request:\n{}",
+        context.prompt,
+        text.trim_start()
+    )
+}
+
 fn error_trace_details(error: &AgentError) -> serde_json::Value {
     serde_json::json!({
         "errorCode": error.code.as_str(),
@@ -421,6 +536,8 @@ impl SessionMeta {
             native_source: stored.native_source,
             native_updated_at: stored.native_updated_at,
             native_history_imported_at: stored.native_history_imported_at,
+            personal_center_enabled: stored.personal_center_enabled,
+            personal_center_path: stored.personal_center_path,
             created_at: stored.created_at,
             updated_at: stored.updated_at,
         }
@@ -447,6 +564,8 @@ impl SessionMeta {
             native_source: self.native_source.clone(),
             native_updated_at: self.native_updated_at.clone(),
             native_history_imported_at: self.native_history_imported_at.clone(),
+            personal_center_enabled: self.personal_center_enabled,
+            personal_center_path: self.personal_center_path.clone(),
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
         }
@@ -580,6 +699,8 @@ impl SessionManager {
                     native_source: Some(item.native_source.clone()),
                     native_updated_at: Some(item.updated_at.clone()),
                     native_history_imported_at: None,
+                    personal_center_enabled: false,
+                    personal_center_path: None,
                     created_at: item.created_at.clone(),
                     updated_at: item.updated_at.clone(),
                 };
@@ -660,6 +781,8 @@ impl SessionManager {
             native_source: None,
             native_updated_at: None,
             native_history_imported_at: None,
+            personal_center_enabled: false,
+            personal_center_path: None,
             created_at: now.clone(),
             updated_at: now,
         };
@@ -1007,6 +1130,50 @@ impl SessionManager {
             .get(session_id)
             .map(|slot| slot.meta.clone())
             .ok_or_else(|| "session not found".to_string())
+    }
+
+    pub fn set_personal_center(
+        &self,
+        session_id: &str,
+        enabled: bool,
+    ) -> Result<SessionMeta, String> {
+        let mut guard = self.inner.lock();
+        let slot = guard
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session not found".to_string())?;
+        if slot.meta.archived {
+            return Err("restore the archived session before changing personal center".into());
+        }
+        let path = if enabled {
+            let configured = settings::get()
+                .personal_center
+                .path
+                .ok_or_else(|| "personal center path is not configured".to_string())?;
+            let trimmed = configured.trim();
+            if trimmed.is_empty() {
+                return Err("personal center path is not configured".into());
+            }
+            let path = PathBuf::from(trimmed);
+            if !path.is_dir() {
+                return Err(format!(
+                    "personal center directory does not exist: {}",
+                    path.display()
+                ));
+            }
+            Some(path.display().to_string())
+        } else {
+            slot.meta.personal_center_path.clone()
+        };
+        slot.meta.personal_center_enabled = enabled;
+        slot.meta.personal_center_path = path;
+        slot.meta.updated_at = Utc::now().to_rfc3339();
+        if slot.persisted {
+            if let Err(err) = session_store::save_meta(&slot.meta.to_stored()) {
+                tracing::warn!("failed to save session meta {}: {err}", slot.meta.id);
+            }
+        }
+        Ok(slot.meta.clone())
     }
 
     pub async fn connect(
@@ -2098,6 +2265,19 @@ impl SessionManager {
             Arc::clone(&self).connect(&app, &session_id).await?;
         }
 
+        let personal_center = {
+            let guard = self.inner.lock();
+            let slot = guard
+                .sessions
+                .get(&session_id)
+                .ok_or_else(|| "session not found".to_string())?;
+            personal_center_context(&slot.meta)?
+        };
+        let runtime_text = match &personal_center {
+            Some(context) => attach_personal_center_context(&text, context),
+            None => text.clone(),
+        };
+
         {
             let mut guard = self.inner.lock();
             let slot = guard
@@ -2120,8 +2300,19 @@ impl SessionManager {
         self.record_trace(
             &session_id,
             "prompt_submitted",
-            prompt_trace_details(&text, &images),
+            prompt_trace_details(&runtime_text, &images),
         );
+        if let Some(context) = &personal_center {
+            self.record_trace(
+                &session_id,
+                "personal_center_context_attached",
+                serde_json::json!({
+                    "path": context.path,
+                    "entries": context.entries,
+                    "chars": context.chars,
+                }),
+            );
+        }
         self.append_message(
             &session_id,
             &StoredChatMessage::new("user", prompt_display_text(&text, &images), runtime_id),
@@ -2143,7 +2334,12 @@ impl SessionManager {
 
         let mgr = std::sync::Arc::clone(&self);
         tokio::spawn(async move {
-            let result = live.prompt(PromptInput { text, images }).await;
+            let result = live
+                .prompt(PromptInput {
+                    text: runtime_text,
+                    images,
+                })
+                .await;
             if let Err(error) = &result {
                 mgr.record_error(&session_id, error);
                 mgr.record_trace(&session_id, "prompt_failed", error_trace_details(error));
@@ -2429,6 +2625,8 @@ mod tests {
             native_source: None,
             native_updated_at: None,
             native_history_imported_at: None,
+            personal_center_enabled: false,
+            personal_center_path: None,
             created_at: updated_at.into(),
             updated_at: updated_at.into(),
         }
@@ -2540,6 +2738,8 @@ mod tests {
                 native_source: None,
                 native_updated_at: None,
                 native_history_imported_at: None,
+                personal_center_enabled: false,
+                personal_center_path: None,
                 created_at: now.clone(),
                 updated_at: now,
             },

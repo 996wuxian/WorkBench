@@ -21,7 +21,8 @@ use crate::runtime::{
 use crate::session_manager::{SessionManager, SessionMeta, SessionSettingsPatch, SessionSnapshot};
 use crate::session_store::{self, StoredChatMessage};
 use crate::settings::{
-    self, AppSettings, CodexGatewayUsageConfig, DeepSeekUsageConfig, RuntimeOverride,
+    self, AppSettings, CodexGatewayUsageConfig, DeepSeekUsageConfig, PersonalCenterSettings,
+    RuntimeOverride,
 };
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1575,6 +1576,15 @@ pub async fn session_set_archived(
 }
 
 #[tauri::command]
+pub fn session_set_personal_center(
+    mgr: tauri::State<'_, Arc<SessionManager>>,
+    session_id: String,
+    enabled: bool,
+) -> Result<SessionMeta, String> {
+    mgr.set_personal_center(&session_id, enabled)
+}
+
+#[tauri::command]
 pub fn session_get_state(
     mgr: tauri::State<'_, Arc<SessionManager>>,
     session_id: Option<String>,
@@ -1937,6 +1947,17 @@ pub fn settings_set_deepseek_usage(patch: DeepSeekUsageConfig) -> Result<AppSett
         timeout_secs: patch.timeout_secs.map(|value| value.clamp(3, 30)),
     };
     settings::set_deepseek_usage(normalized)
+}
+
+#[tauri::command]
+pub fn settings_set_personal_center(path: Option<String>) -> Result<AppSettings, String> {
+    let normalized = PersonalCenterSettings {
+        path: path.and_then(|value| {
+            let value = value.trim().trim_matches(['"', '\'']).to_string();
+            (!value.is_empty()).then_some(value)
+        }),
+    };
+    settings::set_personal_center(normalized)
 }
 
 fn normalize_optional_non_empty(value: Option<String>) -> Option<String> {

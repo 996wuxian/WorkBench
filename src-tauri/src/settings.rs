@@ -82,6 +82,19 @@ impl UsageSettings {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonalCenterSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+impl PersonalCenterSettings {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -90,6 +103,8 @@ pub struct AppSettings {
     pub runtimes: BTreeMap<String, RuntimeOverride>,
     #[serde(default, skip_serializing_if = "UsageSettings::is_empty")]
     pub usage: UsageSettings,
+    #[serde(default, skip_serializing_if = "PersonalCenterSettings::is_empty")]
+    pub personal_center: PersonalCenterSettings,
 }
 
 fn settings_path() -> PathBuf {
@@ -160,6 +175,25 @@ pub fn set_deepseek_usage(value: DeepSeekUsageConfig) -> Result<AppSettings, Str
     let next = {
         let mut guard = cache().write();
         guard.usage.deepseek = value;
+        guard.clone()
+    };
+    write_to_disk(&next)?;
+    Ok(next)
+}
+
+pub fn set_personal_center(value: PersonalCenterSettings) -> Result<AppSettings, String> {
+    if let Some(path) = value.path.as_deref() {
+        let path = PathBuf::from(path);
+        if !path.is_dir() {
+            return Err(format!(
+                "personal center directory does not exist: {}",
+                path.display()
+            ));
+        }
+    }
+    let next = {
+        let mut guard = cache().write();
+        guard.personal_center = value;
         guard.clone()
     };
     write_to_disk(&next)?;

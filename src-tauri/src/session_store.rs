@@ -58,6 +58,10 @@ pub struct StoredSessionMeta {
     pub native_updated_at: Option<String>,
     #[serde(default)]
     pub native_history_imported_at: Option<String>,
+    #[serde(default)]
+    pub personal_center_enabled: bool,
+    #[serde(default)]
+    pub personal_center_path: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

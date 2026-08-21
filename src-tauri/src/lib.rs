@@ -72,6 +72,7 @@ pub fn run() {
             commands::session_update_presentation,
             commands::session_update_project,
             commands::session_set_archived,
+            commands::session_set_personal_center,
             commands::session_get_state,
             commands::session_list_states,
             commands::session_control_options,
@@ -94,6 +95,7 @@ pub fn run() {
             commands::settings_set_runtime_override,
             commands::settings_set_codex_gateway_usage,
             commands::settings_set_deepseek_usage,
+            commands::settings_set_personal_center,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Workbench");

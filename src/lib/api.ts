@@ -75,6 +75,8 @@ export const api = {
     call<SessionMeta>("session_update_project", { sessionId, projectPath }),
   setSessionArchived: (sessionId: string, archived: boolean) =>
     call<SessionMeta>("session_set_archived", { sessionId, archived }),
+  setSessionPersonalCenter: (sessionId: string, enabled: boolean) =>
+    call<SessionMeta>("session_set_personal_center", { sessionId, enabled }),
   getSnapshot: (sessionId?: string | null) =>
     call<SessionSnapshot>("session_get_state", { sessionId }),
   listSnapshots: () => call<SessionSnapshot[]>("session_list_states"),
@@ -156,6 +158,8 @@ export const api = {
     call<AppSettings>("settings_set_codex_gateway_usage", { patch }),
   setDeepSeekUsage: (patch: DeepSeekUsageConfig) =>
     call<AppSettings>("settings_set_deepseek_usage", { patch }),
+  setPersonalCenter: (path?: string | null) =>
+    call<AppSettings>("settings_set_personal_center", { path }),
 
   appInfo: () =>
     call<{ name: string; version: string; dataDir: string }>("app_info"),
