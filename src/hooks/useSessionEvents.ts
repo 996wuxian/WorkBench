@@ -229,7 +229,6 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
         ).trim();
         const toolStatus = ev.payload.status.trim();
         ref.current.updateSessionMessages(ev.payload.sessionId, (m) => {
-          const closed = finalizeTrailingStreams(m);
           const nextMessage: ChatMessage = {
             id: toolCallId ? `tool:${toolCallId}` : uid("tool"),
             role: "tool",
@@ -258,7 +257,7 @@ export function useSessionEvents(handlers: SessionEventHandlers): void {
             next[existingIndex] = { ...existing, ...nextMessage, id: existing.id };
             return next;
           }
-          return [...closed, nextMessage];
+          return [...m, nextMessage];
         });
       });
       if (!cancelled) unsubs.push(u3);

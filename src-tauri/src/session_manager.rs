@@ -2231,10 +2231,12 @@ impl SessionManager {
             if slot.meta.archived {
                 return Err("restore the archived session before sending".to_string());
             }
-            if !runtime_supports_workbench_image_input(
-                slot.meta.runtime_id,
-                slot.meta.model_id.as_deref(),
-            ) {
+            if !images.is_empty()
+                && !runtime_supports_workbench_image_input(
+                    slot.meta.runtime_id,
+                    slot.meta.model_id.as_deref(),
+                )
+            {
                 return Err("图片输入仅支持 Codex 或 DeepSeek Vision 模型".into());
             }
             let attachment_root = if images.is_empty() {

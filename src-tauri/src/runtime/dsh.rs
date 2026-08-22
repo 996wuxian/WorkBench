@@ -20,8 +20,8 @@ use crate::runtime::traits::{
     AgentRuntime, ConnectOpts, LiveSession, PermissionMode, ProbeResult, PromptInput,
     SessionSettings, SessionSettingsPatch,
 };
+use crate::settings;
 
-const PROMPT_TIMEOUT_SECS: u64 = 60 * 30;
 const DSH_VISION_MODEL: &str = "deepseek-v4-flash-vision-exp";
 const DSH_BRIDGE_RUNNER: &str = "workbench_dsh_headless_runner.mjs";
 
@@ -298,15 +298,7 @@ impl LiveSession for DshLiveSession {
             })
         };
 
-        let output_result = tokio::time::timeout(
-            std::time::Duration::from_secs(PROMPT_TIMEOUT_SECS),
-            stream_stdout(stdout, self.event_tx.clone()),
-        )
-        .await;
-
-        if output_result.is_err() {
-            let _ = self.cancel().await;
-        }
+        let output_result = stream_stdout(stdout, self.event_tx.clone()).await;
 
         let status = {
             let mut slot = self.current_child.lock().await;
@@ -335,17 +327,10 @@ impl LiveSession for DshLiveSession {
         }
 
         match output_result {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
+            Ok(_) => {}
+            Err(error) => {
                 self.emit_failed_tool(&run_id, "DeepSeek Harness headless failed");
                 return Err(error);
-            }
-            Err(_) => {
-                self.emit_failed_tool(&run_id, "DeepSeek Harness headless timed out");
-                return Err(AgentError::new(
-                    AgentErrorCode::NetworkProvider,
-                    format!("DeepSeek Harness timed out after {PROMPT_TIMEOUT_SECS} seconds"),
-                ));
             }
         }
 
@@ -437,6 +422,16 @@ fn spawn_dsh_headless(
     });
     if let Some(home_env) = home_env {
         cmd.env(home_env, home);
+    }
+    if let Some(api_key) = settings::get()
+        .usage
+        .deepseek
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        cmd.env("DEEPSEEK_API_KEY", api_key);
     }
     process_util::apply_no_window_tokio(&mut cmd);
     if let Some(path) = process_util::enriched_path_env() {
