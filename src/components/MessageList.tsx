@@ -727,12 +727,22 @@ function AssistantBubbleContent({
   revealImmediately?: boolean;
   onTypingProgress: () => void;
 }) {
-  if (thinking) return null;
-
   const blocks = new Map(
     (message.worktreeChangeBlocks ?? []).map((block) => [block.id, block.files]),
   );
   const loadingState = active ? assistantLoadingState(message) : null;
+  if (thinking && loadingState) {
+    return (
+      <div className="message__assistant-loading">
+        <LoadingState
+          kind={loadingState.kind}
+          label={loadingState.label}
+          detail={loadingState.detail}
+          startedAt={message.createdAt}
+        />
+      </div>
+    );
+  }
   if (blocks.size === 0) {
     return typing ? (
       <>

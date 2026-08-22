@@ -151,6 +151,9 @@ const APP_VERSION = __APP_VERSION__;
 const APP_DEVELOPMENT_DATE = "2026-08-19";
 const APP_REPOSITORY_URL = "https://github.com/996wuxian/WorkBench";
 const APP_DOWNLOAD_URL = "https://github.com/996wuxian/WorkBench/releases";
+const DSH_VISION_MODEL = "deepseek-v4-flash-vision-exp";
+const CODEX_RUNTIME_ID = "codex";
+const DEEPSEEK_HARNESS_RUNTIME_ID = "deepseek-harness";
 
 type DeleteSessionScope =
   | { kind: "sessions" }
@@ -568,6 +571,9 @@ export default function App() {
     active?.runtimeId === "codex"
       ? activeSessionModelValue || activeCodexModelFallback || "default"
       : activeSessionModelValue;
+  const activeSupportsImageInput =
+    active?.runtimeId === CODEX_RUNTIME_ID ||
+    (active?.runtimeId === DEEPSEEK_HARNESS_RUNTIME_ID && activeModelValue === DSH_VISION_MODEL);
   const activeModelReasoningEffort = activeRuntimeCapabilities?.reasoningEffort
     ? active?.modelReasoningEffort ??
       snapshot.modelReasoningEffort ??
@@ -2404,12 +2410,22 @@ export default function App() {
   async function toggleActivePersonalCenter() {
     if (!active) return;
     const enabled = !Boolean(active.personalCenterEnabled);
+    const configuredPath =
+      active.personalCenterPath?.trim() || appSettings?.personalCenter?.path?.trim() || "";
+    if (enabled && !configuredPath) {
+      setSettingsSection("personal");
+      setSettingsOpen(true);
+      refreshSettingsDiagnostics();
+      void refreshAppSettings();
+      setStatusLine("请先配置个人中心目录");
+      return;
+    }
     if (!isTauri()) {
       const nextMeta: SessionMeta = {
         ...active,
         personalCenterEnabled: enabled,
         personalCenterPath: enabled
-          ? appSettings?.personalCenter?.path ?? active.personalCenterPath ?? null
+          ? configuredPath
           : active.personalCenterPath ?? null,
         updatedAt: nowIso(),
       };
@@ -2503,8 +2519,8 @@ export default function App() {
   async function pasteImageAttachments(files: File[]) {
     const session = active;
     if (!session || files.length === 0) return;
-    if (session.runtimeId !== "codex") {
-      emitToast({ message: "图片粘贴目前仅支持 Codex 会话", tone: "danger" });
+    if (!activeSupportsImageInput) {
+      emitToast({ message: "图片粘贴仅支持 Codex 或 DeepSeek Vision 模型", tone: "danger" });
       return;
     }
     if (!isTauri()) {
@@ -2603,7 +2619,7 @@ export default function App() {
         setImageAttachments((current) => [...current, ...nextImages]);
       }
       if (skippedImages > 0) {
-        emitToast({ message: "图片添加目前仅支持 Codex 会话", tone: "danger" });
+        emitToast({ message: "图片添加仅支持 Codex 或 DeepSeek Vision 模型", tone: "danger" });
       }
       const totalAdded = nextFiles.length + nextImages.length;
       if (totalAdded > 0) setStatusLine(`已添加 ${totalAdded} 个附件`);
@@ -2637,8 +2653,8 @@ export default function App() {
       setStatusLine("请先恢复归档会话再继续发送");
       return;
     }
-    if (imageAttachments.length > 0 && active.runtimeId !== "codex") {
-      setStatusLine("图片输入目前仅支持 Codex 会话");
+    if (imageAttachments.length > 0 && !activeSupportsImageInput) {
+      setStatusLine("图片输入仅支持 Codex 或 DeepSeek Vision 模型");
       return;
     }
     const fileContextLines = fileAttachments.map((file) => `[file] ${file.path}`);
@@ -3478,7 +3494,10 @@ export default function App() {
                 selectedSkillNames={selectedSkillNames}
                 goalModeAvailable={activeGoalModeAvailable}
                 goalModeActive={activeGoalMode}
-                personalCenterAvailable={Boolean(appSettings?.personalCenter?.path?.trim())}
+                personalCenterAvailable={Boolean(
+                  active.personalCenterPath?.trim() ||
+                    appSettings?.personalCenter?.path?.trim(),
+                )}
                 personalCenterActive={Boolean(active.personalCenterEnabled)}
                 personalCenterPath={
                   active.personalCenterPath ?? appSettings?.personalCenter?.path ?? null
@@ -3491,7 +3510,7 @@ export default function App() {
                 quoteTarget={quoteTarget}
                 imageAttachments={imageAttachments}
                 fileAttachments={fileAttachments}
-                imagePasteEnabled={active.runtimeId === "codex"}
+                imagePasteEnabled={activeSupportsImageInput}
                 composerInputRef={composerInputRef}
                 onDraftChange={setDraft}
                 onSend={() => void sendMessage()}

@@ -96,6 +96,8 @@ pub struct SessionImageAttachmentData {
 
 const MAX_IMAGE_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const DEEPSEEK_BALANCE_TIMEOUT_SECS: u64 = 12;
+const DEEPSEEK_HARNESS_RUNTIME_ID: &str = "deepseek-harness";
+const DSH_VISION_MODEL: &str = "deepseek-v4-flash-vision-exp";
 
 /// Sync native window fill with UI theme so rounded corners don't show a dark halo.
 #[tauri::command]
@@ -1624,8 +1626,8 @@ pub fn session_save_image_attachment(
     bytes: Vec<u8>,
 ) -> Result<SessionImageAttachment, String> {
     let meta = mgr.session_meta(&session_id)?;
-    if meta.runtime_id != RuntimeId::CODEX {
-        return Err("图片粘贴目前仅支持 Codex 会话".into());
+    if !runtime_supports_workbench_image_attachments(meta.runtime_id, meta.model_id.as_deref()) {
+        return Err("图片粘贴仅支持 Codex 或 DeepSeek Vision 模型".into());
     }
     if bytes.is_empty() {
         return Err("image is empty".into());
@@ -1662,8 +1664,8 @@ pub fn session_load_image_attachment(
     path: String,
 ) -> Result<SessionImageAttachmentData, String> {
     let meta = mgr.session_meta(&session_id)?;
-    if meta.runtime_id != RuntimeId::CODEX {
-        return Err("图片读取目前仅支持 Codex 会话".into());
+    if !runtime_supports_workbench_image_attachments(meta.runtime_id, meta.model_id.as_deref()) {
+        return Err("图片读取仅支持 Codex 或 DeepSeek Vision 模型".into());
     }
     let path = path.trim();
     if path.is_empty() {
@@ -2063,6 +2065,17 @@ fn image_extension(mime_type: &str) -> Option<&'static str> {
         "image/gif" => Some("gif"),
         _ => None,
     }
+}
+
+fn runtime_supports_workbench_image_attachments(
+    runtime_id: RuntimeId,
+    model_id: Option<&str>,
+) -> bool {
+    runtime_id == RuntimeId::CODEX
+        || (runtime_id.as_str() == DEEPSEEK_HARNESS_RUNTIME_ID
+            && model_id
+                .map(|model| model.trim() == DSH_VISION_MODEL)
+                .unwrap_or(false))
 }
 
 fn image_mime_type_from_path(path: &Path) -> Option<&'static str> {

@@ -616,7 +616,7 @@ export function ComposerPanel({
             }
             aria-label={personalCenterActive ? "关闭个人中心模式" : "开启个人中心模式"}
             aria-pressed={personalCenterActive}
-            disabled={inputDisabled || (!personalCenterAvailable && !personalCenterActive)}
+            disabled={inputDisabled}
             onClick={onPersonalCenterToggle}
           >
             <IconHistory size={15} />

@@ -36,6 +36,8 @@ const PERSONAL_CENTER_ENTRY_FILES: [&str; 6] = [
     "memory/personal/working-style.md",
     "memory/personal/goals.md",
 ];
+const DSH_VISION_MODEL: &str = "deepseek-v4-flash-vision-exp";
+const DEEPSEEK_HARNESS_RUNTIME_ID: &str = "deepseek-harness";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2229,8 +2231,11 @@ impl SessionManager {
             if slot.meta.archived {
                 return Err("restore the archived session before sending".to_string());
             }
-            if !images.is_empty() && slot.meta.runtime_id != RuntimeId::CODEX {
-                return Err("图片输入目前仅支持 Codex 会话".into());
+            if !runtime_supports_workbench_image_input(
+                slot.meta.runtime_id,
+                slot.meta.model_id.as_deref(),
+            ) {
+                return Err("图片输入仅支持 Codex 或 DeepSeek Vision 模型".into());
             }
             let attachment_root = if images.is_empty() {
                 None
@@ -2534,6 +2539,14 @@ fn prompt_summary_with_images(text: &str, images: &[PromptImageInput]) -> Option
             if images.len() == 1 { "" } else { "s" }
         ))
     }
+}
+
+fn runtime_supports_workbench_image_input(runtime_id: RuntimeId, model_id: Option<&str>) -> bool {
+    runtime_id == RuntimeId::CODEX
+        || (runtime_id.as_str() == DEEPSEEK_HARNESS_RUNTIME_ID
+            && model_id
+                .map(|model| model.trim() == DSH_VISION_MODEL)
+                .unwrap_or(false))
 }
 
 fn process_exit_error(code: Option<i32>) -> AgentError {

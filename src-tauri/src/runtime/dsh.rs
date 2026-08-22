@@ -22,6 +22,23 @@ use crate::runtime::traits::{
 };
 
 const PROMPT_TIMEOUT_SECS: u64 = 60 * 30;
+const DSH_VISION_MODEL: &str = "deepseek-v4-flash-vision-exp";
+const DSH_BRIDGE_RUNNER: &str = "workbench_dsh_headless_runner.mjs";
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DshPromptFile {
+    text: String,
+    images: Vec<DshPromptImageFile>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DshPromptImageFile {
+    path: String,
+    media_type: String,
+    name: Option<String>,
+}
 
 pub struct DshRuntime {
     manifest: &'static RuntimeManifest,
@@ -191,12 +208,20 @@ impl LiveSession for DshLiveSession {
         let _guard = self.prompt_lock.lock().await;
         self.cancelled.store(false, Ordering::SeqCst);
 
-        if !input.images.is_empty() {
-            return Err(AgentError::new(
-                AgentErrorCode::CapabilityMissing,
-                "DeepSeek Harness headless runtime does not support Workbench image attachments yet",
-            ));
-        }
+        let prompt_input_path = if input.images.is_empty() {
+            None
+        } else {
+            let model = normalize_optional_setting(self.model_id.as_deref()).unwrap_or_default();
+            if model != DSH_VISION_MODEL {
+                return Err(AgentError::new(
+                    AgentErrorCode::CapabilityMissing,
+                    format!(
+                        "DeepSeek Harness image input requires model `{DSH_VISION_MODEL}`"
+                    ),
+                ));
+            }
+            Some(write_prompt_input(&input)?)
+        };
 
         let run_id = uuid::Uuid::new_v4().to_string();
         let _ = self.event_tx.send(HostEvent::ToolCall {
@@ -215,6 +240,7 @@ impl LiveSession for DshLiveSession {
             self.model_reasoning_effort.as_deref(),
             self.permission_mode,
             &input.text,
+            prompt_input_path.as_deref(),
         ) {
             Ok(child) => child,
             Err(error) => {
@@ -386,6 +412,7 @@ fn spawn_dsh_headless(
     model_reasoning_effort: Option<&str>,
     permission_mode: PermissionMode,
     prompt: &str,
+    prompt_input_path: Option<&Path>,
 ) -> Result<Child, AgentError> {
     let mut cmd = Command::new(cli_path);
     cmd.current_dir(cwd)
@@ -393,12 +420,21 @@ fn spawn_dsh_headless(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .args(["--profile", "headless"]);
-    if let Some(patch) =
-        write_settings_patch(cwd, model_id, model_reasoning_effort, permission_mode)?
+    if let Some(patch) = write_settings_patch(
+        cwd,
+        model_id,
+        model_reasoning_effort,
+        permission_mode,
+        prompt_input_path,
+    )?
     {
         cmd.arg("--patch").arg(patch);
     }
-    cmd.arg(prompt);
+    cmd.arg(if prompt_input_path.is_some() {
+        "workbench multimodal input"
+    } else {
+        prompt
+    });
     if let Some(home_env) = home_env {
         cmd.env(home_env, home);
     }
@@ -454,6 +490,7 @@ fn write_settings_patch(
     model_id: Option<&str>,
     model_reasoning_effort: Option<&str>,
     permission_mode: PermissionMode,
+    prompt_input_path: Option<&Path>,
 ) -> Result<Option<PathBuf>, AgentError> {
     let model_id = normalize_optional_setting(model_id);
     let model_reasoning_effort = normalize_optional_setting(model_reasoning_effort)
@@ -532,6 +569,20 @@ fn write_settings_patch(
         patch.push_str(&json_string(effort)?);
         patch.push('\n');
     }
+    if let Some(prompt_input_path) = prompt_input_path {
+        let runner_path = ensure_workbench_runner()?;
+        patch.push_str("- id: headless-runner\n");
+        patch.push_str("  disabled: true\n");
+        patch.push_str("- insert:\n");
+        patch.push_str("    - id: workbench-headless-runner\n");
+        patch.push_str("      name: ");
+        patch.push_str(&json_string(&file_url(&runner_path))?);
+        patch.push('\n');
+        patch.push_str("      config:\n");
+        patch.push_str("        inputPath: ");
+        patch.push_str(&json_string(&prompt_input_path.display().to_string())?);
+        patch.push('\n');
+    }
 
     let settings_text = serde_json::to_string_pretty(&serde_json::Value::Object(settings))
         .map_err(|err| {
@@ -555,6 +606,131 @@ fn write_settings_patch(
     Ok(Some(patch_path))
 }
 
+fn write_prompt_input(input: &PromptInput) -> Result<PathBuf, AgentError> {
+    let dir = paths::data_dir().join("dsh-patches");
+    std::fs::create_dir_all(&dir).map_err(|err| {
+        AgentError::new(
+            AgentErrorCode::ConnectFailed,
+            format!("failed to create DeepSeek Harness prompt input dir: {err}"),
+        )
+    })?;
+    let input_path = dir.join(format!("{}.prompt.json", uuid::Uuid::new_v4()));
+    let images = input
+        .images
+        .iter()
+        .map(|image| {
+            let path = std::fs::canonicalize(&image.path).map_err(|err| {
+                AgentError::new(
+                    AgentErrorCode::ConnectFailed,
+                    format!("failed to resolve image attachment {}: {err}", image.path.display()),
+                )
+            })?;
+            if !path.is_file() {
+                return Err(AgentError::new(
+                    AgentErrorCode::ConnectFailed,
+                    format!("image attachment is not a file: {}", path.display()),
+                ));
+            }
+            let media_type = image_mime_type_from_path(&path).ok_or_else(|| {
+                AgentError::new(
+                    AgentErrorCode::CapabilityMissing,
+                    format!("unsupported image attachment type: {}", path.display()),
+                )
+            })?;
+            Ok(DshPromptImageFile {
+                path: path.display().to_string(),
+                media_type: media_type.into(),
+                name: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.to_string()),
+            })
+        })
+        .collect::<Result<Vec<_>, AgentError>>()?;
+    let payload = DshPromptFile {
+        text: input.text.clone(),
+        images,
+    };
+    let text = serde_json::to_string_pretty(&payload).map_err(|err| {
+        AgentError::new(
+            AgentErrorCode::ConnectFailed,
+            format!("failed to serialize DeepSeek Harness prompt input: {err}"),
+        )
+    })?;
+    std::fs::write(&input_path, text).map_err(|err| {
+        AgentError::new(
+            AgentErrorCode::ConnectFailed,
+            format!("failed to write DeepSeek Harness prompt input: {err}"),
+        )
+    })?;
+    Ok(input_path)
+}
+
+fn ensure_workbench_runner() -> Result<PathBuf, AgentError> {
+    let dir = paths::data_dir().join("dsh-bridge");
+    std::fs::create_dir_all(&dir).map_err(|err| {
+        AgentError::new(
+            AgentErrorCode::ConnectFailed,
+            format!("failed to create DeepSeek Harness bridge dir: {err}"),
+        )
+    })?;
+    let runner_path = dir.join(DSH_BRIDGE_RUNNER);
+    std::fs::write(&runner_path, WORKBENCH_HEADLESS_RUNNER).map_err(|err| {
+        AgentError::new(
+            AgentErrorCode::ConnectFailed,
+            format!("failed to write DeepSeek Harness bridge runner: {err}"),
+        )
+    })?;
+    Ok(runner_path)
+}
+
+fn image_mime_type_from_path(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg") | Some("jpeg") => Some("image/jpeg"),
+        Some("webp") => Some("image/webp"),
+        Some("gif") => Some("image/gif"),
+        _ => None,
+    }
+}
+
+fn file_url(path: &Path) -> String {
+    let mut path = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) && path.as_bytes().get(1) == Some(&b':') {
+        path = format!("/{path}");
+    }
+    format!("file://{}", percent_encode_file_path(&path))
+}
+
+fn percent_encode_file_path(path: &str) -> String {
+    let mut out = String::new();
+    for byte in path.as_bytes() {
+        let keep = matches!(
+            *byte,
+            b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'0'..=b'9'
+                | b'-'
+                | b'.'
+                | b'_'
+                | b'~'
+                | b'/'
+                | b':'
+        );
+        if keep {
+            out.push(*byte as char);
+        } else {
+            out.push_str(&format!("%{:02X}", *byte));
+        }
+    }
+    out
+}
+
 fn json_string(value: &str) -> Result<String, AgentError> {
     serde_json::to_string(value).map_err(|err| {
         AgentError::new(
@@ -563,6 +739,170 @@ fn json_string(value: &str) -> Result<String, AgentError> {
         )
     })
 }
+
+const WORKBENCH_HEADLESS_RUNNER: &str = r#"
+import { randomUUID } from "node:crypto";
+import { basename } from "node:path";
+import { readFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
+
+async function importDshPackage(specifier) {
+  const failures = [];
+  const dshEntry = process.argv[1];
+  if (dshEntry) {
+    try {
+      const dshRoot = new URL("../", pathToFileURL(dshEntry));
+      const pkgUrl = new URL(`node_modules/${specifier}/package.json`, dshRoot);
+      const pkg = JSON.parse(await readFile(pkgUrl, "utf8"));
+      const entry =
+        pkg.exports?.["."]?.import ??
+        pkg.exports?.["."]?.default ??
+        pkg.module ??
+        pkg.main ??
+        "lib/index.js";
+      const normalizedEntry = typeof entry === "string" ? entry.replace(/^\.\//, "") : "lib/index.js";
+      return await import(new URL(`node_modules/${specifier}/${normalizedEntry}`, dshRoot).href);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  try {
+    return await import(specifier);
+  } catch (error) {
+    failures.push(error);
+  }
+  throw new Error(`Unable to import ${specifier}: ${failures.map((error) => error?.message ?? String(error)).join("; ")}`);
+}
+
+const [
+  schemastery,
+  dshAgent,
+  dshLlm,
+  dshSession,
+] = await Promise.all([
+  importDshPackage("@deepseek-ai/schemastery"),
+  importDshPackage("@deepseek-ai/dsh-agent"),
+  importDshPackage("@deepseek-ai/dsh-llm"),
+  importDshPackage("@deepseek-ai/dsh-session"),
+]);
+
+const z = schemastery.default ?? schemastery;
+const { installModelSelection } = dshAgent;
+const { createUserMessage } = dshLlm;
+const { SessionId } = dshSession;
+
+export const name = "workbench-headless-runner";
+export const inject = ["agentDefaultModel", "agents", "sessions", "attachments"];
+export const Config = z.object({ inputPath: z.string().required() });
+
+function summarize(events, firstSeq) {
+  let started = false;
+  let text = "";
+  let reason;
+  for (const event of events) {
+    if (event.seq < firstSeq) continue;
+    if (event.type === "turn/start") {
+      started = true;
+      continue;
+    }
+    if (!started) continue;
+    if (event.type === "assistant/message") {
+      const joined = event.data.message.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("");
+      if (joined !== "") text = joined;
+    }
+    if (event.type === "turn/end") reason = event.data.reason;
+  }
+  return { text, reason };
+}
+
+function fail(io, error) {
+  io.stderr.write(`dsh: ${error instanceof Error ? error.message : String(error)}\n`);
+  io.exit(1);
+}
+
+async function readInput(inputPath) {
+  const parsed = JSON.parse(await readFile(inputPath, "utf8"));
+  const text = typeof parsed.text === "string" ? parsed.text : "";
+  const images = Array.isArray(parsed.images) ? parsed.images : [];
+  return { text, images };
+}
+
+async function imageBlocks(attachments, images) {
+  if (images.length === 0) return [];
+  const refs = await attachments.saveImages(
+    await Promise.all(
+      images.map(async (image) => ({
+        data: new Uint8Array(await readFile(image.path)),
+        mediaType: image.mediaType,
+        name: typeof image.name === "string" ? image.name : basename(image.path),
+      })),
+    ),
+  );
+  return refs.map((attachment) => ({ type: "image", attachment }));
+}
+
+async function run(ctx, inputPath, io) {
+  await ctx.get("loader")?.await();
+  const agents = ctx.get("agents");
+  const defaultModel = ctx.get("agentDefaultModel");
+  const sessions = ctx.get("sessions");
+  const attachments = ctx.get("attachments");
+  if (agents === undefined || defaultModel === undefined || sessions === undefined || attachments === undefined) return;
+
+  const input = await readInput(inputPath);
+  const selection = defaultModel.currentSelection();
+  const { agent } = await agents.create({
+    sessionId: SessionId(`session-${randomUUID()}`),
+    meta: { cwd: process.cwd() },
+    agentOptions: {
+      provider: selection.provider,
+      model: selection.model,
+    },
+    setup: (agentCtx) => {
+      installModelSelection(agentCtx, {
+        current: selection,
+        assembled: undefined,
+      });
+    },
+  });
+  await agent.whenIdle();
+  const firstSeq = agent.session.seq;
+  const content = [];
+  if (input.text.trim() !== "" || input.images.length === 0) {
+    content.push({ type: "text", text: input.text });
+  }
+  content.push(...await imageBlocks(attachments, input.images));
+  agent.followup(createUserMessage({
+    content,
+    source: { kind: "user" },
+  }));
+  await agent.whenIdle();
+  await sessions.flush(agent.session);
+  const outcome = summarize(agent.session.events, firstSeq);
+  io.stdout.write(outcome.text + "\n");
+  if (outcome.reason?.kind === "error") {
+    const error = outcome.reason.error ?? outcome.reason.failure;
+    io.stderr.write(`dsh: ${error?.code ?? "ERROR"}: ${error?.message ?? "DeepSeek Harness failed"}\n`);
+  }
+  io.exit(outcome.reason?.kind === "completed" ? 0 : 1);
+}
+
+export function apply(ctx, config) {
+  const exit = ctx.get("appExit");
+  if (exit === undefined) {
+    throw new Error("workbench-headless-runner: ctx.appExit is required");
+  }
+  const io = {
+    stdout: process.stdout,
+    stderr: process.stderr,
+    exit,
+  };
+  run(ctx, config.inputPath, io).catch((error) => fail(io, error));
+}
+"#;
 
 async fn stream_stdout(
     stdout: tokio::process::ChildStdout,
